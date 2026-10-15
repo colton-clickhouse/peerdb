@@ -97,7 +97,7 @@ func TestMySQLPG(t *testing.T) {
 }
 
 // destInt runs a query returning one integer on the destination. Check values with direct SQL in this
-// suite: the table-equality helpers treat NULL, '' and empty bytes as equal (qvalue.Equals) and decode
+// suite: the table-equality helpers treat NULL, empty strings and empty bytes as equal (qvalue.Equals) and decode
 // the source with the same code as the snapshot, so empty-vs-NULL and decoding bugs pass them.
 func (s MySQLPGSuite) destInt(query string) int64 {
 	s.t.Helper()
