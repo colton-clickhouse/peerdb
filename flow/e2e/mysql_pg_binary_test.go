@@ -17,11 +17,15 @@ func (s MySQLPGSuite) Test_Empty_Binary_Stays_Empty() {
 	srcFull := AttachSchema(s, srcTable)
 	dstFull := s.DestinationTable(srcTable)
 	cols := []string{"c_tinyblob", "c_blob", "c_mediumblob", "c_longblob", "c_varbinary", "c_binary_cs"}
-	// eachCol formats every column with format (%[1]s is the column name) and joins the results
+	// eachCol renders format once per column (%s is the column name; a format without %s is repeated
+	// as is, e.g. "NULL") and joins the results
 	eachCol := func(format string, sep string) string {
 		parts := make([]string, len(cols))
 		for i, c := range cols {
-			parts[i] = fmt.Sprintf(format, c)
+			parts[i] = format
+			if strings.Contains(format, "%s") {
+				parts[i] = fmt.Sprintf(format, c)
+			}
 		}
 		return strings.Join(parts, sep)
 	}
