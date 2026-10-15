@@ -106,6 +106,47 @@ func (s MySQLPGSuite) destInt(query string) int64 {
 	return n
 }
 
+// Canary: snapshot plus CDC insert / update / delete with types that replicate correctly on v0.37.10.
+// It should pass on every build; if it fails, suspect the environment before the code under test.
+// (TestGenericMySQLPG/Test_Simple_Flow is not a canary here: its SERIAL key is BIGINT UNSIGNED, which
+// v0.37.10 maps to bigint (finding #5), and the table comparison rejects UInt64 vs Int64.)
+func (s MySQLPGSuite) Test_Canary_Snapshot_And_CDC() {
+	t := s.t
+	srcTable := "canary"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	require.NoError(t, s.source.Exec(t.Context(),
+		fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY, name VARCHAR(50), note TEXT, amount DECIMAL(10,2))`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(),
+		fmt.Sprintf(`INSERT INTO %s VALUES (1, 'one', 'snapshot', 1.50), (2, 'two', NULL, 2.00)`, srcFull)))
+
+	connectionGen := FlowConnectionGenerationConfig{
+		FlowJobName:   AddSuffix(s, srcTable),
+		TableMappings: TableMappings(s, srcTable, srcTable),
+		Destination:   s.Peer().Name,
+	}
+	flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
+	flowConnConfig.DoInitialSnapshot = true
+
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitForEqualTablesWithNames(env, s, "initial load", srcTable, srcTable, "id,name,note,amount")
+
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (3, 'three', 'cdc', 3.25)`, srcFull)))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET note = 'updated' WHERE id = 1`, srcFull)))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`DELETE FROM %s WHERE id = 2`, srcFull)))
+	EnvWaitForEqualTablesWithNames(env, s, "cdc insert/update/delete", srcTable, srcTable, "id,name,note,amount")
+	EnvWaitFor(t, env, time.Minute, "direct check", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE (id = 1 AND note = 'updated') OR id = 3`, dstFull)) == 2 &&
+			s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 2
+	})
+
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+}
+
 // A primary-key UPDATE during CDC must remove the row under its old key, not leave it next to the new
 // one. Repro for MySQL -> Managed PG Pass 1 finding #19; fails on v0.37.10.
 func (s MySQLPGSuite) Test_PKey_Update_Removes_Old_Row() {
