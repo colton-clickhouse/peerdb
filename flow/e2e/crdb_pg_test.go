@@ -343,6 +343,68 @@ func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 	}
 }
 
+// Which types stop the initial snapshot? One single-column table per type, all in one mirror; a table
+// whose row never reaches the destination is retried forever and keeps the mirror in STATUS_SNAPSHOT.
+// The failure message lists the blocking types (diagnostic for Test_Type_Fidelity_Snapshot_And_CDC).
+func (s CRDBPGSuite) Test_Types_That_Block_Snapshot() {
+	t := s.t
+	schema := Schema(s)
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TYPE %s.mood2 AS ENUM ('happy', 'sad')`, schema)))
+	cases := []struct{ name, typ, val string }{
+		{"dec_nan", "DECIMAL", "'NaN'"}, {"dec_inf", "DECIMAL", "'Infinity'"},
+		{"dec_big", "DECIMAL", "12345678901234567890.123456789012345678"},
+		{"interval", "INTERVAL", "'1 year 2 mons 3 days 04:05:06.789'"}, {"timetz", "TIMETZ", "'13:14:15+05:30'"},
+		{"time24", "TIME", "'24:00:00'"}, {"jsonb", "JSONB", `'{"b": 1, "a": [1, null]}'`}, {"jsonb_null", "JSONB", "'null'"},
+		{"int_arr", "INT8[]", "ARRAY[1, NULL, 3]"}, {"text_arr", "STRING[]", "ARRAY['x', NULL, '']"},
+		{"date_bc", "DATE", "'0044-03-15 BC'"}, {"ts_bc", "TIMESTAMP", "'0044-03-15 12:00:00 BC'"},
+		{"date_inf", "DATE", "'infinity'"}, {"ts_inf", "TIMESTAMPTZ", "'infinity'"},
+		{"geom", "GEOMETRY", "'SRID=3857;POINT(1 2)'"}, {"bytes_empty", "BYTES", "''::BYTES"},
+		{"mood", schema + ".mood2", "'sad'"}, {"bit", "BIT(4)", "B'1010'"}, {"inet", "INET", "'192.168.1.0/24'"},
+		{"interval_arr", "INTERVAL[]", "ARRAY['1 day'::INTERVAL]"}, {"str_nul", "STRING", `e'a\x00b'`},
+	}
+	tables := make([]string, 0, 2*len(cases))
+	for _, c := range cases {
+		tbl := "blk_" + c.name
+		require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT8 PRIMARY KEY, v %s)`, AttachSchema(s, tbl), c.typ)))
+		require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, %s)`, AttachSchema(s, tbl), c.val)))
+		tables = append(tables, tbl, tbl)
+	}
+
+	connectionGen := FlowConnectionGenerationConfig{
+		FlowJobName:   AddSuffix(s, "blk"),
+		TableMappings: TableMappings(s, tables...),
+		Destination:   s.Peer().Name,
+	}
+	flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
+	flowConnConfig.DoInitialSnapshot = true
+	flowConnConfig.SnapshotMaxParallelWorkers = 8
+	flowConnConfig.SnapshotNumTablesInParallel = 8
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+
+	arrived := func(tbl string) bool {
+		ok, _ := s.destBool(fmt.Sprintf(`SELECT count(*) = 1 FROM %s`, s.DestinationTable(tbl)))
+		return ok
+	}
+	deadline := time.Now().Add(2 * time.Minute)
+	var blocked []string
+	for time.Now().Before(deadline) {
+		blocked = blocked[:0]
+		for _, c := range cases {
+			if !arrived("blk_" + c.name) {
+				blocked = append(blocked, c.name+" ("+c.typ+")")
+			}
+		}
+		if len(blocked) == 0 {
+			break
+		}
+		time.Sleep(5 * time.Second)
+	}
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+	require.Empty(t, blocked, "types whose snapshot never reached the destination")
+}
+
 // OID is an unsigned 32-bit integer; the connector maps it to UInt32 and the Postgres destination to
 // integer (int4), so values above 2^31-1 can't be written. Expected failure: the snapshot partition is
 // retried forever and the mirror never leaves STATUS_SNAPSHOT.
