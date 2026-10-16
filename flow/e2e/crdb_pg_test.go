@@ -247,7 +247,9 @@ func (s CRDBPGSuite) Test_NoPK_Table_Snapshot_And_CDC() {
 
 // Value fidelity for types the connector maps lossily or decodes differently in snapshot (pgx binary)
 // and CDC (changefeed JSON). Row 1 arrives by snapshot and row 2 (identical values) by CDC; every
-// check runs against both rows and all mismatches are reported together.
+// check runs against both rows and all mismatches are reported together. TIMETZ, NUL in STRING and
+// OID above 2^31-1 block the snapshot (Test_Types_That_Block_Snapshot, Test_OID_Above_Int32_Max), so
+// they are not in this table.
 func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 	t := s.t
 	srcTable := "type_fidelity"
@@ -259,7 +261,7 @@ func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (
 		id INT8 PRIMARY KEY,
 		c_dec_nan DECIMAL, c_dec_inf DECIMAL, c_dec_big DECIMAL,
-		c_interval INTERVAL, c_timetz TIMETZ, c_time24 TIME,
+		c_interval INTERVAL, c_time24 TIME,
 		c_jsonb JSONB, c_jsonb_null JSONB,
 		c_int_arr INT8[], c_text_arr STRING[],
 		c_date_bc DATE, c_ts_bc TIMESTAMP,
@@ -268,7 +270,7 @@ func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 	)`, srcFull, schema)))
 	values := `(%d,
 		'NaN', 'Infinity', 12345678901234567890.123456789012345678,
-		'1 year 2 mons 3 days 04:05:06.789', '13:14:15+05:30', '24:00:00',
+		'1 year 2 mons 3 days 04:05:06.789', '24:00:00',
 		'{"b": 1, "a": [1, null]}', 'null',
 		ARRAY[1, NULL, 3], ARRAY['x', NULL, ''],
 		'0044-03-15 BC', '0044-03-15 12:00:00 BC',
@@ -296,7 +298,6 @@ func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 		{"c_dec_inf", `c_dec_inf::text = 'Infinity'`, `c_dec_inf::text`},
 		{"c_dec_big", `c_dec_big::text = '12345678901234567890.123456789012345678'`, `c_dec_big::text`},
 		{"c_interval", `c_interval::text::interval = '1 year 2 mons 3 days 04:05:06.789'::interval`, `c_interval::text`},
-		{"c_timetz", `c_timetz::text = '13:14:15+05:30'`, `c_timetz::text`},
 		{"c_time24", `c_time24::text = '24:00:00'`, `c_time24::text`},
 		{"c_jsonb", `c_jsonb::jsonb = '{"a": [1, null], "b": 1}'::jsonb`, `c_jsonb::text`},
 		{"c_jsonb_null", `c_jsonb_null IS NOT NULL AND c_jsonb_null::jsonb = 'null'::jsonb`, `coalesce(c_jsonb_null::text, 'SQL NULL')`},
