@@ -131,7 +131,7 @@ func (s CRDBPGSuite) destText(query string) string {
 	return *v
 }
 
-func (s CRDBPGSuite) startMirror(srcTable string) *protos.FlowConnectionConfigsCore {
+func (s CRDBPGSuite) startMirror(srcTable string) *protos.FlowConnectionConfigs {
 	s.t.Helper()
 	connectionGen := FlowConnectionGenerationConfig{
 		FlowJobName:   AddSuffix(s, srcTable),
