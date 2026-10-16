@@ -258,7 +258,7 @@ func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TYPE %s.mood AS ENUM ('happy', 'sad')`, schema)))
 	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (
 		id INT8 PRIMARY KEY,
-		c_oid OID, c_dec_nan DECIMAL, c_dec_inf DECIMAL, c_dec_big DECIMAL,
+		c_dec_nan DECIMAL, c_dec_inf DECIMAL, c_dec_big DECIMAL,
 		c_interval INTERVAL, c_timetz TIMETZ, c_time24 TIME,
 		c_jsonb JSONB, c_jsonb_null JSONB,
 		c_int_arr INT8[], c_text_arr STRING[],
@@ -267,7 +267,7 @@ func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 		c_mood %s.mood, c_bit BIT(4), c_inet INET, c_uuid UUID
 	)`, srcFull, schema)))
 	values := `(%d,
-		3000000000, 'NaN', 'Infinity', 12345678901234567890.123456789012345678,
+		'NaN', 'Infinity', 12345678901234567890.123456789012345678,
 		'1 year 2 mons 3 days 04:05:06.789', '13:14:15+05:30', '24:00:00',
 		'{"b": 1, "a": [1, null]}', 'null',
 		ARRAY[1, NULL, 3], ARRAY['x', NULL, ''],
@@ -292,7 +292,6 @@ func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 
 	// column -> (predicate that a faithful copy satisfies, expression to show when it doesn't)
 	checks := []struct{ col, ok, show string }{
-		{"c_oid", `c_oid::text = '3000000000'`, `c_oid::text`},
 		{"c_dec_nan", `c_dec_nan::text = 'NaN'`, `c_dec_nan::text`},
 		{"c_dec_inf", `c_dec_inf::text = 'Infinity'`, `c_dec_inf::text`},
 		{"c_dec_big", `c_dec_big::text = '12345678901234567890.123456789012345678'`, `c_dec_big::text`},
@@ -342,6 +341,32 @@ func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 	if len(bad) > 0 {
 		t.Errorf("%d value mismatches on the destination:\n  %s", len(bad), strings.Join(bad, "\n  "))
 	}
+}
+
+// OID is an unsigned 32-bit integer; the connector maps it to UInt32 and the Postgres destination to
+// integer (int4), so values above 2^31-1 can't be written. Expected failure: the snapshot partition is
+// retried forever and the mirror never leaves STATUS_SNAPSHOT.
+func (s CRDBPGSuite) Test_OID_Above_Int32_Max() {
+	t := s.t
+	srcTable := "oid_big"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT8 PRIMARY KEY, o OID)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(),
+		fmt.Sprintf(`INSERT INTO %s VALUES (1, 1), (2, 2147483647), (3, 3000000000), (4, 4294967295)`, srcFull)))
+
+	flowConnConfig := s.startMirror(srcTable)
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 2*time.Minute, "all 4 OID values on the destination", func() bool {
+		ok, _ := s.destBool(fmt.Sprintf(`SELECT string_agg(o::text, ',' ORDER BY id) = '1,2147483647,3000000000,4294967295' FROM %s`, dstFull))
+		return ok
+	})
+
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
 }
 
 // ADD COLUMN ... DEFAULT during CDC. The changefeed runs with schema_change_policy='nobackfill', so
