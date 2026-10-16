@@ -248,8 +248,8 @@ func (s CRDBPGSuite) Test_NoPK_Table_Snapshot_And_CDC() {
 // Value fidelity for types the connector maps lossily or decodes differently in snapshot (pgx binary)
 // and CDC (changefeed JSON). Row 1 arrives by snapshot and row 2 (identical values) by CDC; every
 // check runs against both rows and all mismatches are reported together. TIMETZ, NUL in STRING and
-// OID above 2^31-1 block the snapshot (Test_Types_That_Block_Snapshot, Test_OID_Above_Int32_Max), so
-// they are not in this table.
+// OID above 2^31-1 block the snapshot (Test_Types_That_Block_Snapshot, Test_OID_Above_Int32_Max) and BC
+// dates block CDC normalization (Test_BC_Dates_Via_CDC), so they are not in this table.
 func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 	t := s.t
 	srcTable := "type_fidelity"
@@ -264,7 +264,6 @@ func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 		c_interval INTERVAL, c_time24 TIME,
 		c_jsonb JSONB, c_jsonb_null JSONB,
 		c_int_arr INT8[], c_text_arr STRING[],
-		c_date_bc DATE, c_ts_bc TIMESTAMP,
 		c_geom GEOMETRY, c_bytes_empty BYTES, c_str_empty STRING,
 		c_mood %s.mood, c_bit BIT(4), c_inet INET, c_uuid UUID
 	)`, srcFull, schema)))
@@ -273,7 +272,6 @@ func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 		'1 year 2 mons 3 days 04:05:06.789', '24:00:00',
 		'{"b": 1, "a": [1, null]}', 'null',
 		ARRAY[1, NULL, 3], ARRAY['x', NULL, ''],
-		'0044-03-15 BC', '0044-03-15 12:00:00 BC',
 		'SRID=3857;POINT(1 2)', ''::BYTES, '',
 		'sad', B'1010', '192.168.1.0/24', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11')`
 	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES `+values, srcFull, 1)))
@@ -303,8 +301,6 @@ func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 		{"c_jsonb_null", `c_jsonb_null IS NOT NULL AND c_jsonb_null::jsonb = 'null'::jsonb`, `coalesce(c_jsonb_null::text, 'SQL NULL')`},
 		{"c_int_arr", `c_int_arr::text = '{1,NULL,3}'`, `c_int_arr::text`},
 		{"c_text_arr", `c_text_arr::text = '{x,NULL,""}'`, `c_text_arr::text`},
-		{"c_date_bc", `c_date_bc::text = '0044-03-15 BC'`, `c_date_bc::text`},
-		{"c_ts_bc", `c_ts_bc::text = '0044-03-15 12:00:00 BC'`, `c_ts_bc::text`},
 		{"c_geom", `ST_SRID(c_geom) = 3857 AND ST_AsText(c_geom) = 'POINT(1 2)'`, `ST_AsEWKT(c_geom)`},
 		{"c_bytes_empty", `c_bytes_empty IS NOT NULL AND length(c_bytes_empty) = 0`, `coalesce(encode(c_bytes_empty, 'hex'), 'NULL')`},
 		{"c_str_empty", `c_str_empty IS NOT NULL AND c_str_empty = ''`, `coalesce(c_str_empty, 'NULL')`},
@@ -404,6 +400,36 @@ func (s CRDBPGSuite) Test_Types_That_Block_Snapshot() {
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
 	require.Empty(t, blocked, "types whose snapshot never reached the destination")
+}
+
+// BC dates and timestamps: the snapshot copies them (binary), but CDC renders them from changefeed JSON
+// with Go's astronomical year numbering ("-0043-03-15" for 44 BC), which Postgres rejects in the
+// normalize cast. Expected failure: normalization errors on every batch and stalls the whole mirror.
+func (s CRDBPGSuite) Test_BC_Dates_Via_CDC() {
+	t := s.t
+	srcTable := "bc_dates"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT8 PRIMARY KEY, d DATE, ts TIMESTAMP)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, '0044-03-15 BC', '0044-03-15 12:00:00 BC')`, srcFull)))
+
+	flowConnConfig := s.startMirror(srcTable)
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 2*time.Minute, "snapshot row", func() bool {
+		ok, _ := s.destBool(fmt.Sprintf(`SELECT d::text = '0044-03-15 BC' AND ts::text = '0044-03-15 12:00:00 BC' FROM %s WHERE id = 1`, dstFull))
+		return ok
+	})
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (2, '0044-03-15 BC', '0044-03-15 12:00:00 BC'), (3, '2026-01-01', '2026-01-01 00:00:00')`, srcFull)))
+	EnvWaitFor(t, env, 2*time.Minute, "cdc rows with the same values", func() bool {
+		ok, _ := s.destBool(fmt.Sprintf(`SELECT count(*) = 2 FROM %s WHERE id IN (2, 3) AND (id = 3 OR (d::text = '0044-03-15 BC' AND ts::text = '0044-03-15 12:00:00 BC'))`, dstFull))
+		return ok
+	})
+
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
 }
 
 // OID is an unsigned 32-bit integer; the connector maps it to UInt32 and the Postgres destination to
