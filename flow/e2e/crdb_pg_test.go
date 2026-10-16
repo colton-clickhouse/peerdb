@@ -432,6 +432,39 @@ func (s CRDBPGSuite) Test_BC_Dates_Via_CDC() {
 	RequireEnvCanceled(t, env)
 }
 
+// A table with more than one column family: CockroachDB refuses a changefeed on it unless
+// split_column_families is set, which the connector doesn't do. Expected failure: the snapshot
+// completes but the changefeed fails after 5 retries, so CDC stops for every table in the mirror.
+func (s CRDBPGSuite) Test_Column_Families_CDC() {
+	t := s.t
+	srcTable := "families"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+		`CREATE TABLE %s (id INT8 PRIMARY KEY, hot INT8, cold STRING, FAMILY f_hot (id, hot), FAMILY f_cold (cold))`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 10, 'a')`, srcFull)))
+
+	flowConnConfig := s.startMirror(srcTable)
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 2*time.Minute, "snapshot row", func() bool {
+		ok, _ := s.destBool(fmt.Sprintf(`SELECT count(*) = 1 FROM %s`, dstFull))
+		return ok
+	})
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET hot = 11 WHERE id = 1`, srcFull)))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (2, 20, 'b')`, srcFull)))
+	EnvWaitFor(t, env, 2*time.Minute, "cdc update and insert, whole rows", func() bool {
+		ok, _ := s.destBool(fmt.Sprintf(
+			`SELECT string_agg(id || ':' || hot || ':' || cold, ',' ORDER BY id) = '1:11:a,2:20:b' FROM %s`, dstFull))
+		return ok
+	})
+
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+}
+
 // OID is an unsigned 32-bit integer; the connector maps it to UInt32 and the Postgres destination to
 // integer (int4), so values above 2^31-1 can't be written. Expected failure: the snapshot partition is
 // retried forever and the mirror never leaves STATUS_SNAPSHOT.
