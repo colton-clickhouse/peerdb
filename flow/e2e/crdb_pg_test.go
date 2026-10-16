@@ -283,6 +283,39 @@ func (s CRDBPGSuite) Test_NoPK_Table_Snapshot_And_CDC() {
 	RequireEnvCanceled(t, env)
 }
 
+// A hash-sharded primary key (CockroachDB's recommended layout for sequential keys) puts a hidden,
+// virtual shard column in the key. The connector leaves virtual columns out of the schema but keeps
+// the key, so the destination CREATE TABLE names a missing column (42703) and setup retries forever
+// for every table in the mirror. Expected failure: the table never reaches the destination.
+func (s CRDBPGSuite) Test_Hash_Sharded_PKey() {
+	t := s.t
+	srcTable := "hash_sharded"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+		`CREATE TABLE %s (ts TIMESTAMPTZ NOT NULL, id INT8 NOT NULL, v STRING, PRIMARY KEY (ts, id) USING HASH)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+		`INSERT INTO %s VALUES ('2026-01-01', 1, 'a'), ('2026-01-02', 2, 'b')`, srcFull)))
+
+	flowConnConfig := s.startMirror(srcTable)
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 2*time.Minute, "snapshot rows", func() bool {
+		ok, _ := s.destBool(fmt.Sprintf(`SELECT count(*) = 2 FROM %s`, dstFull))
+		return ok
+	})
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET v = 'b2' WHERE id = 2`, srcFull)))
+	EnvWaitFor(t, env, 2*time.Minute, "cdc update", func() bool {
+		ok, _ := s.destBool(fmt.Sprintf(`SELECT count(*) = 1 FROM %s WHERE id = 2 AND v = 'b2'`, dstFull))
+		return ok
+	})
+
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+}
+
 // ON DELETE CASCADE: CockroachDB writes the cascaded child deletes as ordinary row changes, so unlike
 // MySQL (cascades aren't in the binlog) the children should disappear on the destination.
 func (s CRDBPGSuite) Test_FK_Cascade_Delete_Replicates() {
