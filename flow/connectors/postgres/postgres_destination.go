@@ -397,6 +397,13 @@ func (c *PostgresConnector) normalizeBatch(
 	}
 	defer shared.RollbackTx(tx, c.logger)
 
+	// mirror validation refuses keyless tables; one that got in anyway (validation skipped, or a mirror
+	// from before) fails here, named, instead of a malformed MERGE failing the batch under another table
+	if keyless := tablesWithoutPrimaryKey(destinationTableNames, normalizeStmtGen.tableSchemaMapping); len(keyless) > 0 {
+		return 0, fmt.Errorf("can't normalize batch %d: tables without a primary key can't be replicated with CDC "+
+			"to Postgres: %s; remove them from the mirror or add a primary key on the source", batchID, strings.Join(keyless, ", "))
+	}
+
 	for _, tableName := range destinationTableNames {
 		if schema, ok := normalizeStmtGen.tableSchemaMapping[tableName]; ok && schema.System == protos.TypeSystem_PG {
 			if _, err := tx.Exec(ctx, setSessionReplicaRoleSQL); err != nil {

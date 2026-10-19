@@ -2,10 +2,12 @@ package e2e
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
+	"github.com/PeerDB-io/peerdb/flow/internal"
 )
 
 // Keyless tables to a Postgres destination (MySQL -> Managed PG Pass 1 finding #18). Normalize matches rows
@@ -50,4 +52,44 @@ func (s MySQLPGSuite) Test_Keyless_Table_Refused_At_Validation() {
 	require.Error(t, err, "keyless table in a CDC mirror to Postgres must be refused at validation (#18)")
 	require.Contains(t, err.Error(), keyless, "the refusal must name the keyless table")
 	require.NotContains(t, err.Error(), keyed, "the refusal must not name keyed tables")
+}
+
+// A keyless table that got into a mirror anyway (validation skipped, or a mirror from before the check):
+// normalize must fail with an error naming that table, not a malformed MERGE reported under another table.
+func (s MySQLPGSuite) Test_Keyless_Table_Normalize_Error_Names_Table() {
+	t := s.t
+	keyless, keyed := "keyless_cdc_nopk", "keyless_cdc_keyed"
+	require.NoError(t, s.source.Exec(t.Context(),
+		fmt.Sprintf(`CREATE TABLE %s (id INT, v VARCHAR(20))`, AttachSchema(s, keyless))))
+	require.NoError(t, s.source.Exec(t.Context(),
+		fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY, v VARCHAR(20))`, AttachSchema(s, keyed))))
+
+	// started directly, so mirror validation doesn't run
+	connectionGen := FlowConnectionGenerationConfig{
+		FlowJobName:   AddSuffix(s, keyless),
+		TableMappings: TableMappings(s, keyless, keyless, keyed, keyed),
+		Destination:   s.Peer().Name,
+	}
+	flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 'a')`, AttachSchema(s, keyless))))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 'a')`, AttachSchema(s, keyed))))
+
+	catalogPool, err := internal.GetCatalogConnectionPoolFromEnv(t.Context())
+	require.NoError(t, err)
+	// GetLogCount pastes the pattern into SQL quotes, so no apostrophes
+	pattern := "replicated with CDC to Postgres: " + s.DestinationTable(keyless)
+	EnvWaitFor(t, env, 3*time.Minute, "normalize error naming the keyless table (#18)", func() bool {
+		count, err := GetLogCount(t.Context(), catalogPool, flowConnConfig.FlowJobName, "error", pattern)
+		if err != nil {
+			t.Log("error querying flow_errors:", err)
+			return false
+		}
+		return count > 0
+	})
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
 }

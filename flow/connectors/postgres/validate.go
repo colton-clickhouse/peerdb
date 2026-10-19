@@ -278,6 +278,19 @@ func (c *PostgresConnector) ValidateMirrorDestination(
 	cfg *protos.FlowConnectionConfigsCore,
 	tableNameSchemaMapping map[string]*protos.TableSchema,
 ) error {
+	// before the resync shortcut: recreating the tables doesn't make a keyless one replicable
+	if !cfg.InitialSnapshotOnly {
+		sourceTables := make([]string, 0, len(cfg.TableMappings))
+		for _, tableMapping := range cfg.TableMappings {
+			sourceTables = append(sourceTables, tableMapping.SourceTableIdentifier)
+		}
+		if keyless := tablesWithoutPrimaryKey(sourceTables, tableNameSchemaMapping); len(keyless) > 0 {
+			return fmt.Errorf("tables without a primary key can't be replicated with CDC to Postgres: %s; "+
+				"add a primary key on the source, remove them from the mirror, or use an initial snapshot only mirror",
+				strings.Join(keyless, ", "))
+		}
+	}
+
 	if cfg.Resync {
 		return nil // no need to validate schema for resync, as we will create or replace the tables
 	}
@@ -373,4 +386,18 @@ func (c *PostgresConnector) ValidateMirrorDestination(
 	}
 
 	return nil
+}
+
+// tablesWithoutPrimaryKey returns the tables among names whose schema has no primary key columns. Normalize
+// matches rows by primary key, so their CDC changes can't be applied: the MERGE would be malformed and, as
+// a batch normalizes all its tables together, fail every table's. A Postgres source reports all columns as
+// the key of a REPLICA IDENTITY FULL table, so only tables with nothing to match on are returned.
+func tablesWithoutPrimaryKey(names []string, schemas map[string]*protos.TableSchema) []string {
+	var keyless []string
+	for _, name := range names {
+		if schema, ok := schemas[name]; ok && len(schema.PrimaryKeyColumns) == 0 {
+			keyless = append(keyless, name)
+		}
+	}
+	return keyless
 }
