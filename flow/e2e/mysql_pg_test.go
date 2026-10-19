@@ -191,3 +191,36 @@ func (s MySQLPGSuite) Test_PKey_Update_Removes_Old_Row() {
 	require.EqualValues(t, 0, oldKeys, "rows under the old primary keys were left behind (#19)")
 	require.EqualValues(t, 3, total, "destination row count")
 }
+
+// NUL bytes in strings (MySQL -> PG #6, CockroachDB -> PG #3): PG text can't hold them, PeerDB strips them.
+func (s MySQLPGSuite) Test_Nul_Bytes_Stripped() {
+	t := s.t
+	srcTable := "nul_strip"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY, s VARCHAR(20), tx TEXT)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, CONCAT('a', CHAR(0), 'b'), CHAR(0)), (2, 'plain', 't')`, srcFull)))
+
+	connectionGen := FlowConnectionGenerationConfig{
+		FlowJobName:   AddSuffix(s, srcTable),
+		TableMappings: TableMappings(s, srcTable, srcTable),
+		Destination:   s.Peer().Name,
+	}
+	flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
+	flowConnConfig.DoInitialSnapshot = true
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 3*time.Minute, "snapshot rows", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 2
+	})
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (11, CONCAT('a', CHAR(0), 'b'), CHAR(0))`, srcFull)))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET s = CONCAT(CHAR(0), 'c') WHERE id = 2`, srcFull)))
+	EnvWaitFor(t, env, 3*time.Minute, "cdc rows", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE (id IN (1, 11) AND s = 'ab' AND tx = '') OR (id = 2 AND s = 'c')`,
+			dstFull)) == 3
+	})
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+}
