@@ -323,8 +323,15 @@ func (s CRDBPGSuite) Test_FK_Cascade_Delete_Replicates() {
 // A NULL array must stay NULL and an empty array empty, on both paths (via CDC a NULL array
 // arrived as '{}'). NULL elements are tested separately.
 func (s CRDBPGSuite) Test_Null_Array_Stays_Null() {
+	if bad := s.nullArrayProblems("null_array"); len(bad) > 0 {
+		s.t.Errorf("%d array mismatches on the destination:\n  %s", len(bad), strings.Join(bad, "\n  "))
+	}
+}
+
+// nullArrayProblems replicates NULL, empty and non-empty arrays through snapshot and CDC and returns the rows that
+// differ from the source.
+func (s CRDBPGSuite) nullArrayProblems(srcTable string) []string {
 	t := s.t
-	srcTable := "null_array"
 	srcFull := AttachSchema(s, srcTable)
 	dstFull := s.DestinationTable(srcTable)
 
@@ -360,7 +367,5 @@ func (s CRDBPGSuite) Test_Null_Array_Stays_Null() {
 			bad = append(bad, fmt.Sprintf("id %d: want %s, got %s", id, want[id], got))
 		}
 	}
-	if len(bad) > 0 {
-		t.Errorf("%d array mismatches on the destination:\n  %s", len(bad), strings.Join(bad, "\n  "))
-	}
+	return bad
 }
