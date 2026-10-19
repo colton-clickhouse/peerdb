@@ -108,9 +108,9 @@ func TestGenerateMergeStatement_CastRules(t *testing.T) {
 		{"c_dec", string(types.QValueKindNumeric), "integer", `(_peerdb_data->>'c_dec')::NUMERIC::integer AS "c_dec"`},
 		// arrays: text[] has no cast to a vector or from float text to integer[]
 		{"c_vec", string(types.QValueKindArrayFloat32), "vector",
-			`ARRAY(SELECT JSON_ARRAY_ELEMENTS_TEXT((_peerdb_data->>'c_vec')::JSON))::REAL[]::vector AS "c_vec"`},
+			`CASE WHEN _peerdb_data->>'c_vec' IS NULL THEN NULL ELSE ARRAY(SELECT JSON_ARRAY_ELEMENTS_TEXT((_peerdb_data->>'c_vec')::JSON))::REAL[]::vector END AS "c_vec"`},
 		{"c_ints", string(types.QValueKindArrayFloat64), "integer[]",
-			`ARRAY(SELECT JSON_ARRAY_ELEMENTS_TEXT((_peerdb_data->>'c_ints')::JSON))::DOUBLE PRECISION[]::integer[] AS "c_ints"`},
+			`CASE WHEN _peerdb_data->>'c_ints' IS NULL THEN NULL ELSE ARRAY(SELECT JSON_ARRAY_ELEMENTS_TEXT((_peerdb_data->>'c_ints')::JSON))::DOUBLE PRECISION[]::integer[] END AS "c_ints"`},
 		// into bytea: the text's bytes, not its backslash escapes; a UUID's 16 bytes
 		{"c_str_bytes", string(types.QValueKindString), "bytea", `convert_to(_peerdb_data->>'c_str_bytes', 'UTF8') AS "c_str_bytes"`},
 		{"c_uuid_bytes", string(types.QValueKindUUID), "bytea", `uuid_send((_peerdb_data->>'c_uuid_bytes')::uuid) AS "c_uuid_bytes"`},
