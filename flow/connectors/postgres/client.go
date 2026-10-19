@@ -703,7 +703,7 @@ func generateCreateTableSQLForNormalizedTable(
 			}
 			pgColumnType = schemaQualifiedPgType.String()
 		} else if tableSchema.System == protos.TypeSystem_Q {
-			pgColumnType = qValueKindToPostgresType(pgColumnType)
+			pgColumnType = qValueKindToPostgresType(pgColumnType, config.Version)
 		}
 
 		if column.Type == "numeric" && column.TypeModifier != -1 {

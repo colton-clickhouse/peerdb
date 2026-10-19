@@ -272,6 +272,7 @@ func (c *PostgresConnector) NormalizeRecords(
 		},
 		supportsMerge:  pgversion >= shared.POSTGRES_15,
 		metadataSchema: c.metadataSchema,
+		version:        req.Version,
 	}
 
 	totalRowsAffected := 0
@@ -350,6 +351,39 @@ type batchEntry struct {
 	statement string
 }
 
+// getTargetColumnTypes reads the destination tables' column types (without modifiers) for the tables
+// whose values normalize casts from PeerDB's own types. Read in the normalize transaction, so a column
+// altered since the last batch is picked up.
+func getTargetColumnTypes(
+	ctx context.Context, tx pgx.Tx, tableNames []string, schemas map[string]*protos.TableSchema,
+) (map[string]map[string]string, error) {
+	out := make(map[string]map[string]string, len(tableNames))
+	for _, tableName := range tableNames {
+		if schema, ok := schemas[tableName]; !ok || schema.System != protos.TypeSystem_Q {
+			continue
+		}
+		parsedTable, err := common.ParseTableIdentifier(tableName)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing destination table %s: %w", tableName, err)
+		}
+		rows, err := tx.Query(ctx, `SELECT attname, format_type(atttypid, NULL) FROM pg_attribute
+			WHERE attrelid = $1::regclass AND attnum > 0 AND NOT attisdropped`, parsedTable.String())
+		if err != nil {
+			return nil, fmt.Errorf("error reading column types of %s: %w", tableName, err)
+		}
+		columnTypes := make(map[string]string)
+		var column, columnType string
+		if _, err := pgx.ForEachRow(rows, []any{&column, &columnType}, func() error {
+			columnTypes[column] = columnType
+			return nil
+		}); err != nil {
+			return nil, fmt.Errorf("error reading column types of %s: %w", tableName, err)
+		}
+		out[tableName] = columnTypes
+	}
+	return out, nil
+}
+
 func (c *PostgresConnector) normalizeBatch(
 	ctx context.Context,
 	batchID int64,
@@ -370,6 +404,15 @@ func (c *PostgresConnector) normalizeBatch(
 			}
 			break
 		}
+	}
+
+	normalizeStmtGen.targetColumnTypes = nil
+	if req.Version >= shared.InternalVersion_PgNormalizeCastToTargetTypes {
+		targetColumnTypes, err := getTargetColumnTypes(ctx, tx, destinationTableNames, normalizeStmtGen.tableSchemaMapping)
+		if err != nil {
+			return 0, err
+		}
+		normalizeStmtGen.targetColumnTypes = targetColumnTypes
 	}
 
 	batch := &pgx.Batch{}
@@ -542,7 +585,9 @@ func (c *PostgresConnector) ReplayTableSchemaDeltas(
 			columnType := addedColumn.Type
 			switch schemaDelta.System {
 			case protos.TypeSystem_Q:
-				columnType = qValueKindToPostgresType(columnType)
+				// an added column holds no existing values, so it gets the widest mapping whatever the
+				// mirror's version (the version isn't passed to schema-delta replay)
+				columnType = qValueKindToPostgresType(columnType, shared.InternalVersion_Latest)
 			case protos.TypeSystem_PG:
 				// schema qualification handled after numeric typmod check
 			default:

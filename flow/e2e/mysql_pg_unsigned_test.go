@@ -2,10 +2,13 @@ package e2e
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/PeerDB-io/peerdb/flow/shared"
 )
 
 // Unsigned integers (MySQL -> Managed PG Pass 1 findings #5 and #20). On v0.37.10 PeerDB creates each
@@ -32,10 +35,11 @@ func (s MySQLPGSuite) Test_Unsigned_Target_Types() {
 	RequireEnvCanceled(t, env)
 
 	t.Log("unsigned target types:", types)
-	// every type must hold its source's full range; BIGINT UNSIGNED is a per-migration choice (bigint or
-	// numeric(20,0), see Test_Unsigned_CDC_Into_Wider_Target), so it isn't asserted here
+	// every type must hold its source's full range (MEDIUMINT UNSIGNED is UInt32 inside PeerDB, so bigint);
+	// BIGINT UNSIGNED stays bigint (identity-compatible), numeric(20,0) is the user's choice, see
+	// Test_Unsigned_CDC_Into_Wider_Target
 	for col, want := range map[string]string{
-		"c_tiny": "smallint", "c_small": "integer", "c_medium": "integer", "c_int": "bigint",
+		"c_tiny": "smallint", "c_small": "integer", "c_medium": "bigint", "c_int": "bigint", "c_big": "bigint",
 	} {
 		require.Equal(t, want, types[col], "%s: target type too narrow for the unsigned range (#5)", col)
 	}
@@ -92,7 +96,30 @@ func (s MySQLPGSuite) Test_Unsigned_CDC_Into_Wider_Target() {
 	RequireEnvCanceled(t, env)
 }
 
-func (s MySQLPGSuite) startUnsignedFlow(srcTable string) WorkflowRun {
+// mirrors created before InternalVersion_PgWidenUnsignedInts keep their narrower types, so an existing
+// mirror's resync or new tables don't change type (their casts: TestGenerateMergeStatement_TargetColumnTypes)
+func (s MySQLPGSuite) Test_Unsigned_Old_Version_Keeps_Types() {
+	t := s.t
+	srcTable := "unsigned_types_old"
+	srcFull := AttachSchema(s, srcTable)
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY,
+		c_small SMALLINT UNSIGNED, c_int INT UNSIGNED)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 1, 1)`, srcFull)))
+
+	env := s.startUnsignedFlow(srcTable, shared.InternalVersion_PgWidenUnsignedInts-1)
+	EnvWaitFor(t, env, 3*time.Minute, "initial load", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, s.DestinationTable(srcTable))) == 1
+	})
+	types := s.destColumnTypes(srcTable)
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+
+	require.Equal(t, "smallint", types["c_small"])
+	require.Equal(t, "integer", types["c_int"])
+}
+
+// startUnsignedFlow starts a mirror of srcTable, at the given internal version if one is passed
+func (s MySQLPGSuite) startUnsignedFlow(srcTable string, version ...uint32) WorkflowRun {
 	connectionGen := FlowConnectionGenerationConfig{
 		FlowJobName:   AddSuffix(s, srcTable),
 		TableMappings: TableMappings(s, srcTable, srcTable),
@@ -100,6 +127,11 @@ func (s MySQLPGSuite) startUnsignedFlow(srcTable string) WorkflowRun {
 	}
 	flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
 	flowConnConfig.DoInitialSnapshot = true
+	if len(version) > 0 {
+		// mirror creation replaces Version with PEERDB_FORCE_INTERNAL_VERSION (default: latest)
+		flowConnConfig.Env = map[string]string{"PEERDB_FORCE_INTERNAL_VERSION": strconv.FormatUint(uint64(version[0]), 10)}
+		flowConnConfig.Version = version[0]
+	}
 	tc := NewTemporalClient(s.t)
 	env := ExecutePeerflow(s.t, tc, flowConnConfig)
 	SetupCDCFlowStatusQuery(s.t, env, flowConnConfig)

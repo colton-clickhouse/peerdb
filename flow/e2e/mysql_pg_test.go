@@ -109,7 +109,8 @@ func (s MySQLPGSuite) destInt(query string) int64 {
 // Canary: snapshot plus CDC insert / update / delete with types that replicate correctly on v0.37.10.
 // It should pass on every build; if it fails, suspect the environment before the code under test.
 // (TestGenericMySQLPG/Test_Simple_Flow is not a canary here: its SERIAL key is BIGINT UNSIGNED, which
-// v0.37.10 maps to bigint (finding #5), and the table comparison rejects UInt64 vs Int64.)
+// maps to bigint (identity-compatible; numeric(20,0) is the user's choice, see mysql_pg_unsigned_test.go),
+// and the table comparison rejects UInt64 vs Int64. It fails by design while that default stands.)
 func (s MySQLPGSuite) Test_Canary_Snapshot_And_CDC() {
 	t := s.t
 	srcTable := "canary"
