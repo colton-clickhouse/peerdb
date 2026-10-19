@@ -5,7 +5,9 @@ import (
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/log"
 
 	"github.com/PeerDB-io/peerdb/flow/shared"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
@@ -69,6 +71,67 @@ func TestQkindFromMysqlType_Bit(t *testing.T) {
 			require.Equal(t, tc.want, qkind)
 		})
 	}
+}
+
+// Empty, non-NULL binary values must not be a nil slice (sinks write nil as NULL, #10), from
+// InternalVersion_MySQLEmptyBinaryAsEmpty on; older mirrors keep nil.
+func TestQValueFromMysql_EmptyBinary(t *testing.T) {
+	ev := &replication.TableMapEvent{ColumnType: []byte{mysql.MYSQL_TYPE_VARCHAR}, ColumnMeta: []uint16{16}}
+	logger := log.NewStructuredLogger(nil)
+	var coercionReported bool
+	for _, tc := range []struct {
+		name    string
+		version uint32
+		wantNil bool
+	}{
+		{"version just before the gate keeps nil", shared.InternalVersion_MySQLEmptyBinaryAsEmpty - 1, true},
+		{"gating version gives empty bytes", shared.InternalVersion_MySQLEmptyBinaryAsEmpty, false},
+		{"latest version gives empty bytes", shared.InternalVersion_Latest, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			check := func(what string, qv types.QValue, err error) {
+				t.Helper()
+				require.NoError(t, err, what)
+				b := qv.(types.QValueBytes).Val
+				require.Empty(t, b, what)
+				require.Equal(t, tc.wantNil, b == nil, what)
+			}
+			// snapshot (text protocol): go-mysql's buffer for an empty value is nil until the column
+			// has held a non-empty value
+			qv, err := QValueFromMysqlFieldValue(types.QValueKindBytes, mysql.MYSQL_TYPE_VAR_STRING,
+				mysql.NewFieldValue(mysql.FieldValueTypeString, 0, nil), tc.version)
+			check("snapshot", qv, err)
+			// cdc: VARBINARY and CHARACTER SET binary strings arrive as string, BLOBs as []byte
+			qv, err = QValueFromMysqlRowEvent(
+				ev, 0, nil, nil, types.QValueKindBytes, "", nil, logger, &coercionReported, tc.version)
+			check("cdc string", qv, err)
+			qv, err = QValueFromMysqlRowEvent(
+				ev, 0, nil, nil, types.QValueKindBytes, []byte(nil), nil, logger, &coercionReported, tc.version)
+			check("cdc []byte", qv, err)
+		})
+	}
+
+	// an empty value in a reused (non-nil) buffer was already empty on every version
+	qv, err := QValueFromMysqlFieldValue(types.QValueKindBytes, mysql.MYSQL_TYPE_VAR_STRING,
+		mysql.NewFieldValue(mysql.FieldValueTypeString, 0, []byte{}), shared.InternalVersion_First)
+	require.NoError(t, err)
+	require.NotNil(t, qv.(types.QValueBytes).Val)
+}
+
+func TestQValueFromMysql_NullBinaryStaysNull(t *testing.T) {
+	ev := &replication.TableMapEvent{ColumnType: []byte{mysql.MYSQL_TYPE_BLOB}, ColumnMeta: []uint16{2}}
+	logger := log.NewStructuredLogger(nil)
+	var coercionReported bool
+
+	qv, err := QValueFromMysqlFieldValue(types.QValueKindBytes, mysql.MYSQL_TYPE_BLOB,
+		mysql.NewFieldValue(mysql.FieldValueTypeNull, 0, nil), shared.InternalVersion_Latest)
+	require.NoError(t, err)
+	require.Equal(t, types.QValueNull(types.QValueKindBytes), qv)
+
+	qv, err = QValueFromMysqlRowEvent(
+		ev, 0, nil, nil, types.QValueKindBytes, nil, nil, logger, &coercionReported, shared.InternalVersion_Latest)
+	require.NoError(t, err)
+	require.Equal(t, types.QValueNull(types.QValueKindBytes), qv)
 }
 
 func TestQkindFromMysqlColumnType_Set(t *testing.T) {

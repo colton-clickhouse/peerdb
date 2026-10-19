@@ -234,6 +234,15 @@ func processTime(str string) (time.Duration, error) {
 }
 
 // padTrimmedBinary restores a fixed-width binary value
+// nonNilBinary keeps an empty, non-NULL binary value from being a nil slice: sinks write nil as NULL
+// (pgx COPY, encoding/json). go-mysql hands out nil for empty values depending on buffer reuse.
+func nonNilBinary(b []byte, version uint32) []byte {
+	if b == nil && version >= shared.InternalVersion_MySQLEmptyBinaryAsEmpty {
+		return []byte{}
+	}
+	return b
+}
+
 func padTrimmedBinary(data []byte, width int) []byte {
 	if width <= len(data) {
 		return data
@@ -267,7 +276,7 @@ func processVector(data []byte) []float32 {
 	return floats
 }
 
-func QValueFromMysqlFieldValue(qkind types.QValueKind, mytype byte, fv mysql.FieldValue) (types.QValue, error) {
+func QValueFromMysqlFieldValue(qkind types.QValueKind, mytype byte, fv mysql.FieldValue, version uint32) (types.QValue, error) {
 	switch fv.Type {
 	case mysql.FieldValueTypeNull:
 		return types.QValueNull(qkind), nil
@@ -348,7 +357,7 @@ func QValueFromMysqlFieldValue(qkind types.QValueKind, mytype byte, fv mysql.Fie
 		case types.QValueKindEnum:
 			return types.QValueEnum{Val: string(v)}, nil
 		case types.QValueKindBytes:
-			return types.QValueBytes{Val: slices.Clone(v)}, nil
+			return types.QValueBytes{Val: nonNilBinary(slices.Clone(v), version)}, nil
 		case types.QValueKindJSON:
 			// keep snapshot and cdc json representation consistent
 			return types.QValueJSON{Val: compactMySQLJSON(v)}, nil
@@ -437,6 +446,7 @@ func QValueFromMysqlRowEvent(
 	ev *replication.TableMapEvent, idx int,
 	enums []string, sets []string,
 	qkind types.QValueKind, val any, enc encoding.Encoding, logger log.Logger, coercionReported *bool,
+	version uint32,
 ) (types.QValue, error) {
 	mytype := ev.ColumnType[idx]
 
@@ -575,7 +585,7 @@ func QValueFromMysqlRowEvent(
 	case []byte:
 		switch qkind {
 		case types.QValueKindBytes:
-			return types.QValueBytes{Val: val}, nil
+			return types.QValueBytes{Val: nonNilBinary(val, version)}, nil
 		case types.QValueKindString:
 			s, err := decodeMySQLBytes(enc, val)
 			if err != nil {
@@ -602,7 +612,7 @@ func QValueFromMysqlRowEvent(
 		switch qkind {
 		case types.QValueKindBytes:
 			b := padTrimmedBinary(shared.UnsafeFastStringToReadOnlyBytes(val), binaryColumnLength(mytype, ev.ColumnMeta[idx]))
-			return types.QValueBytes{Val: b}, nil
+			return types.QValueBytes{Val: nonNilBinary(b, version)}, nil
 		case types.QValueKindString:
 			s, err := decodeMySQLString(enc, val)
 			if err != nil {
