@@ -95,7 +95,12 @@ func (n *normalizeStmtGenerator) generateExpr(
 	if normalizedTableSchema.System == protos.TypeSystem_Q {
 		qkind := types.QValueKind(genericColumnType)
 		if qkind.IsArray() {
-			return fmt.Sprintf("ARRAY(SELECT JSON_ARRAY_ELEMENTS_TEXT((_peerdb_data->>%s)::JSON))::%s", stringCol, pgType)
+			if n.version < shared.InternalVersion_PgNullArrayStaysNull {
+				return fmt.Sprintf("ARRAY(SELECT JSON_ARRAY_ELEMENTS_TEXT((_peerdb_data->>%s)::JSON))::%s", stringCol, pgType)
+			}
+			// ARRAY(SELECT ...) over a NULL yields '{}', so keep NULL arrays NULL explicitly
+			return fmt.Sprintf("CASE WHEN _peerdb_data->>%[1]s IS NULL THEN NULL"+
+				" ELSE ARRAY(SELECT JSON_ARRAY_ELEMENTS_TEXT((_peerdb_data->>%[1]s)::JSON))::%[2]s END", stringCol, pgType)
 		} else if qkind == types.QValueKindBytes {
 			return fmt.Sprintf("decode(_peerdb_data->>%s, 'base64')::%s", stringCol, pgType)
 		}
