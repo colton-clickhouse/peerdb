@@ -786,3 +786,55 @@ func (s CRDBPGSuite) Test_Nul_Bytes_Stripped() {
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
 }
+
+// A clear source failure must fail the mirror visibly (#18: a table with several column families made every
+// changefeed start fail while the mirror reported STATUS_RUNNING). Expected: STATUS_FAILED once CDC starts; resuming
+// retries (and fails again, the table still has two families), so the mirror ends up FAILED, not RUNNING.
+func (s CRDBPGSuite) Test_Column_Families_Fails_Mirror() {
+	t := s.t
+	srcTable := "families_fail"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+		`CREATE TABLE %s (id INT8 PRIMARY KEY, hot INT8, cold STRING, FAMILY f_hot (id, hot), FAMILY f_cold (cold))`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 10, 'a')`, srcFull)))
+
+	flowConnConfig := s.startMirror(srcTable)
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	// not SetupCDCFlowStatusQuery: it requires STATUS_RUNNING, and the mirror may already have failed
+	EnvWaitFor(t, env, 2*time.Minute, "snapshot row", func() bool {
+		ok, _ := s.destBool(fmt.Sprintf(`SELECT count(*) = 1 FROM %s`, dstFull)) // the table may not exist yet
+		return ok
+	})
+	EnvWaitFor(t, env, 4*time.Minute, "mirror failed", func() bool {
+		return env.GetFlowStatus(t) == protos.FlowStatus_STATUS_FAILED
+	})
+
+	// FAILED is set just before the workflow continues as new into its paused wait; a signal sent inside that window
+	// goes to the old run and is dropped, so let it settle (a resume sent that early can simply be repeated)
+	time.Sleep(5 * time.Second)
+	failedRun := EnvGetRunID(t, env)
+
+	// resume with new settings, as for a frozen cursor (#31): the update must reach the failed mirror too. The retry
+	// fails again within about a second (the table still has two families), so check the outcome, not RUNNING
+	client, err := NewApiClient()
+	require.NoError(t, err)
+	_, err = client.FlowStateChange(t.Context(), &protos.FlowStateChangeRequest{
+		FlowJobName:        flowConnConfig.FlowJobName,
+		RequestedFlowState: protos.FlowStatus_STATUS_RUNNING,
+		FlowConfigUpdate: &protos.FlowConfigUpdate{Update: &protos.FlowConfigUpdate_CdcFlowConfigUpdate{
+			CdcFlowConfigUpdate: &protos.CDCFlowConfigUpdate{IdleTimeout: 77},
+		}},
+	})
+	require.NoError(t, err)
+	EnvWaitFor(t, env, 4*time.Minute, "retried with the new sync interval, failed again", func() bool {
+		return EnvGetRunID(t, env) != failedRun &&
+			EnvGetWorkflowState(t, env).SyncFlowOptions.IdleTimeoutSeconds == 77 &&
+			env.GetFlowStatus(t) == protos.FlowStatus_STATUS_FAILED
+	})
+
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+}
