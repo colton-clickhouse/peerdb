@@ -42,6 +42,9 @@ type CockroachDBConnector struct {
 	// unix nanos of the last snapshot history protection extension fired by
 	// this connector, throttling per-partition extension attempts
 	historyExtendedAt atomic.Int64
+	// batches of this SyncFlow activity that replayed from an unmoving cursor (#31); PullRecords is called
+	// sequentially, so no locking
+	frozenCursor frozenCursorTracker
 }
 
 func NewCockroachDBConnector(ctx context.Context, env map[string]string, config *protos.CockroachDBConfig) (*CockroachDBConnector, error) {

@@ -463,10 +463,11 @@ func (h *FlowRequestHandler) FlowStateChange(
 
 	if req.FlowConfigUpdate != nil && req.FlowConfigUpdate.GetCdcFlowConfigUpdate() != nil &&
 		// Don't allow config updates if the flow is already in a terminal state since it can lead to confusion
-		//  where the config is updated but the flow is not reflecting those changes since it's already completed/failed
+		//  where the config is updated but the flow is not reflecting those changes since it's already completed.
+		// FAILED is allowed: a CDC mirror failed by an irrecoverable sync error waits like a paused one, and resuming
+		// it with new settings (e.g. a longer sync interval) is the way out; a workflow that has ended fails the signal
 		(currState != protos.FlowStatus_STATUS_TERMINATED &&
 			currState != protos.FlowStatus_STATUS_TERMINATING &&
-			currState != protos.FlowStatus_STATUS_FAILED &&
 			currState != protos.FlowStatus_STATUS_COMPLETED) {
 		if err := model.CDCDynamicPropertiesSignal.SignalClientWorkflow(
 			ctx,
@@ -496,7 +497,8 @@ func (h *FlowRequestHandler) FlowStateChange(
 				}
 			}
 		case protos.FlowStatus_STATUS_RUNNING:
-			if currState == protos.FlowStatus_STATUS_PAUSED {
+			// a CDC mirror failed by an irrecoverable sync error waits like a paused one: resuming retries it
+			if currState == protos.FlowStatus_STATUS_PAUSED || currState == protos.FlowStatus_STATUS_FAILED {
 				changeErr = model.FlowSignal.SignalClientWorkflow(ctx, h.temporalClient, workflowID, "", model.NoopSignal)
 				if changeErr == nil {
 					telemetry.LogActivityResumeFlow(ctx, req.FlowJobName)

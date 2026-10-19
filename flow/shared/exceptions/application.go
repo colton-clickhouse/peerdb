@@ -17,6 +17,8 @@ var (
 	ApplicationErrorTypeIrrecoverableCouldNotImportSnapshot = NewIrrecoverableApplicationErrorType("irrecoverable_could_not_import_snapshot")
 	ApplicationErrorTypeIrrecoverableExistingSlot           = NewIrrecoverableApplicationErrorType("irrecoverable_existing_slot")
 	ApplicationErrorTypeIrrecoverableMissingTables          = NewIrrecoverableApplicationErrorType("irrecoverable_missing_tables")
+	// a CDC source failure no retry can fix: the CDC workflow marks the mirror STATUS_FAILED instead of retrying
+	ApplicationErrorTypeIrrecoverableCDC = NewIrrecoverableApplicationErrorType("irrecoverable_cdc")
 )
 
 func (a ApplicationErrorType) String() string {

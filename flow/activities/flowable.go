@@ -22,6 +22,7 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/log"
+	"go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/PeerDB-io/peerdb/flow/alerting"
@@ -354,7 +355,15 @@ func (a *FlowableActivity) SyncFlow(
 	ctx context.Context,
 	config *protos.FlowConnectionConfigsCore,
 	options *protos.SyncFlowOptions,
-) error {
+) (err error) {
+	defer func() {
+		// the CDC workflow can't see Go error types across the activity boundary: give irrecoverable source
+		// failures a Temporal error type it can match, so it fails the mirror instead of retrying forever
+		if irrecoverable, ok := errors.AsType[*exceptions.CockroachChangefeedIrrecoverableError](err); ok {
+			err = temporal.NewNonRetryableApplicationError(err.Error(),
+				exceptions.ApplicationErrorTypeIrrecoverableCDC.String(), irrecoverable)
+		}
+	}()
 	activityCtx := ctx
 	// Heartbeats connector setup below, which must not exceed the activity's heartbeat
 	// timeout. Each sync path replaces it with its own heartbeat once it takes over.

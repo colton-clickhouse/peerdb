@@ -21,6 +21,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/internal"
 	"github.com/PeerDB-io/peerdb/flow/model"
 	"github.com/PeerDB-io/peerdb/flow/shared"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/telemetry"
 	"github.com/PeerDB-io/peerdb/flow/workflows/cdc_state"
 )
@@ -575,7 +576,10 @@ func handlePaused(
 	})
 	addCdcPropertiesSignalListener(ctx, logger, selector, state)
 	startTime := workflow.Now(ctx)
-	state.UpdateStatus(ctx, logger, protos.FlowStatus_STATUS_PAUSED)
+	if state.CurrentFlowStatus != protos.FlowStatus_STATUS_FAILED {
+		// a mirror failed by an irrecoverable sync error waits here too, and keeps reporting FAILED
+		state.UpdateStatus(ctx, logger, protos.FlowStatus_STATUS_PAUSED)
+	}
 
 	for state.ActiveSignal == model.PauseSignal {
 		// only place we block on receive, so signal processing is immediate
@@ -853,6 +857,7 @@ func startCDC(
 ) (nextRun, error) {
 	var finished bool
 	var finishedError bool
+	var failedIrrecoverable bool
 	syncCtx, cancelSync := workflow.WithCancel(workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 365 * 24 * time.Hour,
 		HeartbeatTimeout:    time.Minute,
@@ -869,6 +874,16 @@ func startCDC(
 		if err := f.Get(ctx, nil); err != nil {
 			if finished || err == workflow.ErrCanceled {
 				logger.Error("error in sync flow, but cdc finished", slog.Any("error", err))
+				return
+			}
+			// a source failure no retry can fix (e.g. CockroachDB cursor past the GC threshold, a frozen cursor):
+			// report it as STATUS_FAILED instead of retrying forever behind STATUS_RUNNING
+			if appErr, ok := errors.AsType[*temporal.ApplicationError](err); ok &&
+				appErr.Type() == exceptions.ApplicationErrorTypeIrrecoverableCDC.String() &&
+				workflow.GetVersion(ctx, "cdc-fail-on-irrecoverable", workflow.DefaultVersion, 1) >= 1 {
+				logger.Error("irrecoverable error in sync flow, failing the mirror", slog.Any("error", err))
+				failedIrrecoverable = true
+				finished = true
 				return
 			}
 
@@ -961,6 +976,11 @@ func startCDC(
 
 			if state.ActiveSignal == model.TerminateSignal || state.ActiveSignal == model.ResyncSignal {
 				return nextRunDrop, nil
+			}
+			if failedIrrecoverable {
+				// wait like a paused mirror (resume retries, resync and terminate work as usual), reporting FAILED
+				state.ActiveSignal = model.PauseSignal
+				state.UpdateStatus(ctx, logger, protos.FlowStatus_STATUS_FAILED)
 			}
 			return nextRunCDC, nil
 		}
