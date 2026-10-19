@@ -667,3 +667,45 @@ func (s CRDBPGSuite) Test_OID_Via_CDC() {
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
 }
+
+// TIMETZ through snapshot and CDC (#2: the snapshot's binary COPY sent an 8-byte time for the 12-byte
+// timetz, PG refused it with 08P01 and the snapshot retried forever). PeerDB keeps the UTC instant, not the
+// source offset, so compare in UTC; '23:30-05' and '01:00+05' cross midnight in UTC.
+func (s CRDBPGSuite) Test_TimeTZ_Snapshot_And_CDC() {
+	t := s.t
+	srcTable := "timetz"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	values := `(%[1]d, '10:00:00+02'), (%[1]d + 1, '23:30:00-05'), (%[1]d + 2, '01:00:00+05'), (%[1]d + 3, '12:34:56.789+00')`
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT8 PRIMARY KEY, c TIMETZ)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES `+fmt.Sprintf(values, 1), srcFull)))
+
+	flowConnConfig := s.startMirror(srcTable)
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 3*time.Minute, "snapshot rows", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 4
+	})
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES `+fmt.Sprintf(values, 11), srcFull)))
+	EnvWaitFor(t, env, 3*time.Minute, "cdc rows", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 8
+	})
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+
+	want := []string{"08:00:00+00", "04:30:00+00", "20:00:00+00", "12:34:56.789+00"}
+	var bad []string
+	for base, via := range map[int]string{1: "snapshot", 11: "cdc"} {
+		for i, w := range want {
+			got := s.destText(fmt.Sprintf(`SELECT (c AT TIME ZONE 'UTC')::text FROM %s WHERE id = %d`, dstFull, base+i))
+			if got != w {
+				bad = append(bad, fmt.Sprintf("id %d (%s): want %s, got %s", base+i, via, w, got))
+			}
+		}
+	}
+	if len(bad) > 0 {
+		t.Errorf("%d timetz mismatches on the destination:\n  %s", len(bad), strings.Join(bad, "\n  "))
+	}
+}
