@@ -226,6 +226,7 @@ func TestQValueFromChangefeedJSON(t *testing.T) {
 		{types.QValueInt32{Val: -7}, "int32", `-7`, types.QValueKindInt32},
 		{types.QValueInt64{Val: 9007199254740993}, "int64 beyond float53", `9007199254740993`, types.QValueKindInt64},
 		{types.QValueUInt32{Val: 4294967295}, "oid as uint32", `4294967295`, types.QValueKindUInt32},
+		{types.QValueUInt32{Val: 4294967295}, "oid as JSON string", `"4294967295"`, types.QValueKindUInt32},
 		{types.QValueFloat32{Val: 1.5}, "float32", `1.5`, types.QValueKindFloat32},
 		{types.QValueFloat64{Val: 1.5}, "float64", `1.5`, types.QValueKindFloat64},
 		{mustDecimal("12345678901234567890.1234567890"), "big numeric", `12345678901234567890.1234567890`, types.QValueKindNumeric},
@@ -295,6 +296,9 @@ func TestQValueFromChangefeedJSON(t *testing.T) {
 			"interval", `"1 year 2 days 03:04:05"`, types.QValueKindInterval,
 		},
 		{types.QValueArrayInt64{Val: []int64{1, 2}}, "int64 array", `[1, 2]`, types.QValueKindArrayInt64},
+		{types.QValueArrayInt64{Val: []int64{1, 4294967295}}, "oid array as JSON strings", `["1", "4294967295"]`, types.QValueKindArrayInt64},
+		{types.QValueArrayInt64{Val: []int64{1, 2, 4294967295}}, "oid array mixing strings and numbers",
+			`["1", 2, "4294967295"]`, types.QValueKindArrayInt64},
 		{types.QValueArrayInt32{Val: []int32{1, 2}}, "int32 array", `[1, 2]`, types.QValueKindArrayInt32},
 		{types.QValueArrayInt16{Val: []int16{1, 2}}, "int16 array", `[1, 2]`, types.QValueKindArrayInt16},
 		{types.QValueArrayFloat64{Val: []float64{1.25, 2.5}}, "float64 array", `[1.25, 2.5]`, types.QValueKindArrayFloat64},
@@ -390,6 +394,15 @@ func TestQValueFromChangefeedJSON(t *testing.T) {
 			json.RawMessage(`{"coordinates": [-74, 40.7], "type": "Point"}`))
 		require.NoError(t, err)
 		require.Equal(t, "SRID=4326;POINT (-74 40.7)", qv.(types.QValueGeography).Val)
+	})
+
+	t.Run("oid out of range", func(t *testing.T) {
+		// CockroachDB stores '-1'::OID as 4294967295 and refuses 4294967296, so neither reaches a changefeed;
+		// if one did, it must fail rather than wrap
+		for _, raw := range []string{`"4294967296"`, `"-1"`, `4294967296`} {
+			_, err := qvalueFromChangefeedJSON(field(types.QValueKindUInt32), json.RawMessage(raw))
+			require.Error(t, err, raw)
+		}
 	})
 
 	t.Run("invalid int", func(t *testing.T) {
