@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -11,6 +12,15 @@ import (
 	geo "github.com/PeerDB-io/peerdb/flow/shared/datatypes"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
+
+// timetzBinary is PG's binary timetz (int64 microseconds, int32 zone in seconds west of UTC) for a UTC
+// time of day. pgx has no timetz codec: a pgtype.Time went out as an 8-byte time, which the server rejects
+// for a timetz column (08P01 insufficient data left in message). Unknown OIDs take []byte as-is.
+func timetzBinary(d time.Duration) []byte {
+	b := make([]byte, 12)
+	binary.BigEndian.PutUint64(b, uint64(d/time.Microsecond))
+	return b
+}
 
 func constructArray[T any](v []T) *pgtype.Array[T] {
 	return &pgtype.Array[T]{
@@ -105,7 +115,7 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		case types.QValueTime:
 			values[i] = pgtype.Time{Microseconds: int64(v.Val / time.Microsecond), Valid: true}
 		case types.QValueTimeTZ:
-			values[i] = pgtype.Time{Microseconds: int64(v.Val / time.Microsecond), Valid: true}
+			values[i] = timetzBinary(v.Val)
 		case types.QValueInterval:
 			values[i] = v.Val
 		case types.QValueTimestamp:
