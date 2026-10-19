@@ -62,6 +62,9 @@ const (
 	// MySQL: dates with any zero part (a zero month or day, i.e. partial zero dates, or a zero year) replicated
 	// like zero dates (the epoch). Older mirrors roll a zero month or day forward to 01, inventing a real date.
 	InternalVersion_MySQLZeroDatePartsAsZero
+	// Postgres: a NULL array stays NULL through CDC normalize. Older mirrors write '{}' (ARRAY(SELECT
+	// JSON_ARRAY_ELEMENTS_TEXT(NULL)) is empty), while their snapshot kept NULL.
+	InternalVersion_PgNullArrayStaysNull
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
