@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -72,6 +73,8 @@ func (s MySQLPGSuite) emptyBinaryProblems(srcTable string, version uint32) []str
 	}
 	flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
 	flowConnConfig.DoInitialSnapshot = true
+	// mirror creation replaces Version with PEERDB_FORCE_INTERNAL_VERSION (default: latest)
+	flowConnConfig.Env = map[string]string{"PEERDB_FORCE_INTERNAL_VERSION": strconv.FormatUint(uint64(version), 10)}
 	flowConnConfig.Version = version
 
 	tc := NewTemporalClient(t)
