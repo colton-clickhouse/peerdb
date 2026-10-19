@@ -234,6 +234,21 @@ func processTime(str string) (time.Duration, error) {
 }
 
 // padTrimmedBinary restores a fixed-width binary value
+// isZeroDate reports whether a MySQL date or datetime string ("YYYY-MM-DD...") is replicated as a zero date,
+// i.e. the epoch (#11a). Before InternalVersion_MySQLZeroDatePartsAsZero only the full zero date is; callers
+// then roll a zero month or day forward to 01, inventing a real date (#11b). From it on, any zero part is:
+// a zero month or day, or a zero year, which Postgres can't store (it has no year 0, and MySQL's year 0
+// has no single meaning).
+func isZeroDate(s string, version uint32) bool {
+	if strings.HasPrefix(s, "0000-00-00") {
+		return true
+	}
+	if version < shared.InternalVersion_MySQLZeroDatePartsAsZero || len(s) < 10 || s[4] != '-' || s[7] != '-' {
+		return false
+	}
+	return s[0:4] == "0000" || s[5:7] == "00" || s[8:10] == "00"
+}
+
 // nonNilBinary keeps an empty, non-NULL binary value from being a nil slice: sinks write nil as NULL
 // (pgx COPY, encoding/json). go-mysql hands out nil for empty values depending on buffer reuse.
 func nonNilBinary(b []byte, version uint32) []byte {
@@ -380,7 +395,7 @@ func QValueFromMysqlFieldValue(qkind types.QValueKind, mytype byte, fv mysql.Fie
 			}
 			return types.QValueNumeric{Val: val}, nil
 		case types.QValueKindTimestamp:
-			if strings.HasPrefix(unsafeString, "0000-00-00") {
+			if isZeroDate(unsafeString, version) {
 				return types.QValueTimestamp{Val: time.Unix(0, 0)}, nil
 			}
 			val, err := time.Parse("2006-01-02 15:04:05.999999", strings.ReplaceAll(unsafeString, "-00", "-01"))
@@ -395,7 +410,7 @@ func QValueFromMysqlFieldValue(qkind types.QValueKind, mytype byte, fv mysql.Fie
 			}
 			return types.QValueTime{Val: tm}, nil
 		case types.QValueKindDate:
-			if unsafeString == "0000-00-00" {
+			if isZeroDate(unsafeString, version) {
 				return types.QValueDate{Val: time.Unix(0, 0)}, nil
 			}
 			val, err := time.Parse(time.DateOnly, strings.ReplaceAll(unsafeString, "-00", "-01"))
@@ -665,7 +680,7 @@ func QValueFromMysqlRowEvent(
 				// https://github.com/go-mysql-org/go-mysql/blob/v1.13.0/replication/row_event.go#L1316-L1327
 				// TIMESTAMP2  zero
 				// https://github.com/go-mysql-org/go-mysql/blob/v1.13.0/replication/row_event.go#L1663-L1686
-				if strings.HasPrefix(val, "0000-00-00") {
+				if isZeroDate(val, version) {
 					return types.QValueDate{Val: time.Unix(0, 0).UTC()}, nil
 				}
 				tm, err := time.Parse("2006-01-02 15:04:05.999999", strings.ReplaceAll(val, "-00", "-01"))
@@ -674,7 +689,7 @@ func QValueFromMysqlRowEvent(
 				}
 				return types.QValueDate{Val: tm.Truncate(24 * time.Hour).UTC()}, nil
 			default:
-				if val == "0000-00-00" {
+				if isZeroDate(val, version) {
 					return types.QValueDate{Val: time.Unix(0, 0).UTC()}, nil
 				}
 				val, err := time.Parse(time.DateOnly, strings.ReplaceAll(val, "-00", "-01"))
@@ -691,7 +706,7 @@ func QValueFromMysqlRowEvent(
 				}
 				return types.QValueTimestamp{Val: time.Unix(0, 0).UTC().Add(tm)}, nil
 			}
-			if strings.HasPrefix(val, "0000-00-00") {
+			if isZeroDate(val, version) {
 				return types.QValueTimestamp{Val: time.Unix(0, 0).UTC()}, nil
 			}
 			tm, err := time.Parse("2006-01-02 15:04:05.999999", strings.ReplaceAll(val, "-00", "-01"))
