@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math"
 	"math/rand/v2"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -977,8 +978,37 @@ func (c *MySqlConnector) PullRecords(
 							}
 							newItems.AddColumn(fd.Name, val)
 						}
+						// Normalize matches rows by the new primary key only, so an update that changes the key would
+						// leave the old row behind: send it as delete(old) + insert(new). Not with unchanged TOAST
+						// columns, where the new image isn't a complete row.
+						keyMoved := req.InternalVersion >= shared.InternalVersion_MySQLPKeyChangeAsDeleteInsert &&
+							len(unchangedToastColumns) == 0 && pkeyChanged(schema.PrimaryKeyColumns, oldItems, newItems)
 						if sourceSchemaAsDestinationColumn {
 							newItems.AddColumn("_peerdb_source_schema", types.QValueString{Val: string(ev.Table.Schema)})
+						}
+
+						if keyMoved {
+							if sourceSchemaAsDestinationColumn {
+								oldItems.AddColumn("_peerdb_source_schema", types.QValueString{Val: string(ev.Table.Schema)})
+							}
+							baseRecord := model.BaseRecord{CommitTimeNano: int64(event.Header.Timestamp) * 1e9}
+							if err := addRecord(ctx, &model.DeleteRecord[model.RecordItems]{
+								BaseRecord:           baseRecord,
+								Items:                oldItems,
+								SourceTableName:      sourceTableName,
+								DestinationTableName: destinationTableName,
+							}); err != nil {
+								return err
+							}
+							if err := addRecord(ctx, &model.InsertRecord[model.RecordItems]{
+								BaseRecord:           baseRecord,
+								Items:                newItems,
+								SourceTableName:      sourceTableName,
+								DestinationTableName: destinationTableName,
+							}); err != nil {
+								return err
+							}
+							continue
 						}
 
 						if err := addRecord(ctx, &model.UpdateRecord[model.RecordItems]{
@@ -1454,6 +1484,32 @@ func (c *MySqlConnector) processRenameTableQuery(
 //   - pt-online-schema-change new table: _<table>_new
 //
 // Anything else that renames into a tracked table is bucketed as "other".
+// pkeyChanged reports whether an update moved the row to another primary key. Values are compared as
+// the binlog sent them (bytes as bytes, so a case-only change under a CI collation counts). A false
+// positive is harmless: delete + insert of the same key normalizes to the same row.
+func pkeyChanged(pkeyCols []string, oldItems, newItems model.RecordItems) bool {
+	for _, col := range pkeyCols {
+		o, n := oldItems.GetColumnValue(col), newItems.GetColumnValue(col)
+		if o == nil || n == nil {
+			if o != n {
+				return true
+			}
+			continue
+		}
+		ov, nv := o.Value(), n.Value()
+		if ob, ok := ov.([]byte); ok {
+			if nb, ok := nv.([]byte); !ok || !bytes.Equal(ob, nb) {
+				return true
+			}
+			continue
+		}
+		if !reflect.DeepEqual(ov, nv) {
+			return true
+		}
+	}
+	return false
+}
+
 func classifyOnlineSchemaMigrationTool(oldTable, newTable string) string {
 	switch oldTable {
 	case "_" + newTable + "_gho":

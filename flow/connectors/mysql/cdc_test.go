@@ -929,3 +929,72 @@ func TestIntegrationGetTableSchemaPrimaryKeyVariants(t *testing.T) {
 		})
 	}
 }
+
+func TestPkeyChanged(t *testing.T) {
+	items := func(kv ...any) model.RecordItems {
+		r := model.NewRecordItems(len(kv) / 2)
+		for i := 0; i < len(kv); i += 2 {
+			r.AddColumn(kv[i].(string), kv[i+1].(types.QValue))
+		}
+		return r
+	}
+	for _, tc := range []struct {
+		name     string
+		pkey     []string
+		old, new model.RecordItems
+		want     bool
+	}{
+		{
+			"same key, other column changed", []string{"id"},
+			items("id", types.QValueInt32{Val: 1}, "v", types.QValueString{Val: "a"}),
+			items("id", types.QValueInt32{Val: 1}, "v", types.QValueString{Val: "b"}),
+			false,
+		},
+		{
+			"key changed", []string{"id"},
+			items("id", types.QValueInt32{Val: 1}), items("id", types.QValueInt32{Val: 101}),
+			true,
+		},
+		{
+			"one column of a composite key changed", []string{"a", "b"},
+			items("a", types.QValueInt64{Val: 1}, "b", types.QValueString{Val: "x"}),
+			items("a", types.QValueInt64{Val: 1}, "b", types.QValueString{Val: "y"}),
+			true,
+		},
+		{
+			"composite key unchanged", []string{"a", "b"},
+			items("a", types.QValueInt64{Val: 1}, "b", types.QValueString{Val: "x"}),
+			items("a", types.QValueInt64{Val: 1}, "b", types.QValueString{Val: "x"}),
+			false,
+		},
+		{
+			"case-only change counts (CI collation on the source, bytes differ)", []string{"code"},
+			items("code", types.QValueString{Val: "abc"}), items("code", types.QValueString{Val: "ABC"}),
+			true,
+		},
+		{
+			"binary key unchanged", []string{"k"},
+			items("k", types.QValueBytes{Val: []byte{1, 2}}), items("k", types.QValueBytes{Val: []byte{1, 2}}),
+			false,
+		},
+		{
+			"binary key changed", []string{"k"},
+			items("k", types.QValueBytes{Val: []byte{1, 2}}), items("k", types.QValueBytes{Val: []byte{1, 3}}),
+			true,
+		},
+		{
+			"key column missing from both images", []string{"id"},
+			items("v", types.QValueString{Val: "a"}), items("v", types.QValueString{Val: "b"}),
+			false,
+		},
+		{
+			"key column missing from one image", []string{"id"},
+			items("v", types.QValueString{Val: "a"}), items("id", types.QValueInt32{Val: 1}),
+			true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, pkeyChanged(tc.pkey, tc.old, tc.new))
+		})
+	}
+}
