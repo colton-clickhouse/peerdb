@@ -100,6 +100,7 @@ func syncRecordsCore[Items model.Items](
 		UnnestColumns:  nil,
 		HStoreAsJSON:   false,
 		GeometryAsEWKT: req.Version >= shared.InternalVersion_PgGeoKeepSRID,
+		StripNulBytes:  true,
 	}
 	streamReadFunc := func() ([]any, error) {
 		for record := range req.Records.GetRecords() {

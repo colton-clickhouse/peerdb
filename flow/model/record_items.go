@@ -100,6 +100,9 @@ func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 			jsonStruct[col] = string(v.Val)
 		case types.QValueString:
 			strVal := v.Val
+			if opts.StripNulBytes {
+				strVal = StripNulBytes(strVal)
+			}
 			if opts.ClearValuesOverBytes > 0 && len(strVal) > opts.ClearValuesOverBytes {
 				jsonStruct[col] = ""
 			} else {
@@ -142,6 +145,24 @@ func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 				}
 			}
 
+		case types.QValueEnum:
+			if opts.StripNulBytes {
+				jsonStruct[col] = StripNulBytes(v.Val)
+			} else {
+				jsonStruct[col] = v.Val
+			}
+		case types.QValueArrayString:
+			if opts.StripNulBytes {
+				jsonStruct[col] = stripNulBytesAll(v.Val)
+			} else {
+				jsonStruct[col] = v.Val
+			}
+		case types.QValueArrayEnum:
+			if opts.StripNulBytes {
+				jsonStruct[col] = stripNulBytesAll(v.Val)
+			} else {
+				jsonStruct[col] = v.Val
+			}
 		case types.QValueGeometry:
 			if opts.GeometryAsEWKT && v.SRID != 0 {
 				if err := CheckPostGISSRID(v.SRID); err != nil {
