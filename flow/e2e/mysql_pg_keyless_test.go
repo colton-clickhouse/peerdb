@@ -64,13 +64,14 @@ func (s MySQLPGSuite) Test_Keyless_Table_Normalize_Error_Names_Table() {
 	require.NoError(t, s.source.Exec(t.Context(),
 		fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY, v VARCHAR(20))`, AttachSchema(s, keyed))))
 
-	// started directly, so mirror validation doesn't run
 	connectionGen := FlowConnectionGenerationConfig{
 		FlowJobName:   AddSuffix(s, keyless),
 		TableMappings: TableMappings(s, keyless, keyless, keyed, keyed),
 		Destination:   s.Peer().Name,
 	}
 	flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
+	// creation validates (and would refuse the keyless table) unless told not to
+	flowConnConfig.SkipValidation = new(true)
 	tc := NewTemporalClient(t)
 	env := ExecutePeerflow(t, tc, flowConnConfig)
 	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
