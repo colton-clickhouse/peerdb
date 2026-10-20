@@ -102,9 +102,10 @@ func syncRecordsCore[Items model.Items](
 			switch typedRecord := record.(type) {
 			case *model.InsertRecord[Items]:
 				itemsJSON, err := typedRecord.Items.ToJSONWithOptions(model.ToJSONOptions{
-					UnnestColumns: nil,
-					HStoreAsJSON:  false,
-					StripNulBytes: true,
+					UnnestColumns:     nil,
+					HStoreAsJSON:      false,
+					StripNulBytes:     true,
+					ArrayNullElements: true,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize insert record items to JSON: %w", err)
@@ -123,17 +124,19 @@ func syncRecordsCore[Items model.Items](
 
 			case *model.UpdateRecord[Items]:
 				newItemsJSON, err := typedRecord.NewItems.ToJSONWithOptions(model.ToJSONOptions{
-					UnnestColumns: nil,
-					HStoreAsJSON:  false,
-					StripNulBytes: true,
+					UnnestColumns:     nil,
+					HStoreAsJSON:      false,
+					StripNulBytes:     true,
+					ArrayNullElements: true,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize update record new items to JSON: %w", err)
 				}
 				oldItemsJSON, err := typedRecord.OldItems.ToJSONWithOptions(model.ToJSONOptions{
-					UnnestColumns: nil,
-					HStoreAsJSON:  false,
-					StripNulBytes: true,
+					UnnestColumns:     nil,
+					HStoreAsJSON:      false,
+					StripNulBytes:     true,
+					ArrayNullElements: true,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize update record old items to JSON: %w", err)
@@ -152,9 +155,10 @@ func syncRecordsCore[Items model.Items](
 
 			case *model.DeleteRecord[Items]:
 				itemsJSON, err := typedRecord.Items.ToJSONWithOptions(model.ToJSONOptions{
-					UnnestColumns: nil,
-					HStoreAsJSON:  false,
-					StripNulBytes: true,
+					UnnestColumns:     nil,
+					HStoreAsJSON:      false,
+					StripNulBytes:     true,
+					ArrayNullElements: true,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize delete record items to JSON: %w", err)

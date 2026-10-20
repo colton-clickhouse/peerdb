@@ -1118,3 +1118,31 @@ func TestChangefeedMetricsRecording(t *testing.T) {
 	require.Len(t, gauge.DataPoints, 1)
 	require.InDelta(t, 90, gauge.DataPoints[0].Value, 30, "lag should be about 90 seconds behind wall clock")
 }
+
+func TestChangefeedArrayNullElements(t *testing.T) {
+	require.Equal(t, []bool{false, true, false}, jsonNullElements(json.RawMessage(`[1, null, 3]`)))
+	require.Nil(t, jsonNullElements(json.RawMessage(`"x"`)))
+	require.Equal(t, []bool{false, true}, nilElements([]any{int64(1), nil}))
+
+	tableSchema := &protos.TableSchema{
+		TableIdentifier:   "public.t",
+		PrimaryKeyColumns: []string{"id"},
+		Columns: []*protos.FieldDescription{
+			{Name: "id", Type: string(types.QValueKindInt64)},
+			{Name: "ia", Type: string(types.QValueKindArrayInt64), Nullable: true},
+		},
+	}
+	row := map[string]json.RawMessage{"id": json.RawMessage(`1`), "ia": json.RawMessage(`[1, null, 3]`)}
+
+	marked := newChangefeedTableSchema(tableSchema, nil)
+	marked.arrayNullElements = true
+	items, err := changefeedRecordItems(row, marked, nil)
+	require.NoError(t, err)
+	require.Equal(t, types.QValueArrayInt64{Val: []int64{1, 0, 3}, Nulls: []bool{false, true, false}},
+		items.GetColumnValue("ia"))
+
+	// older mirrors: no mask, the zero value as before
+	items, err = changefeedRecordItems(row, newChangefeedTableSchema(tableSchema, nil), nil)
+	require.NoError(t, err)
+	require.Equal(t, types.QValueArrayInt64{Val: []int64{1, 0, 3}}, items.GetColumnValue("ia"))
+}
