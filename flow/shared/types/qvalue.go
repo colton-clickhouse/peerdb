@@ -434,7 +434,8 @@ func (v QValueInterval) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayInterval struct {
-	Val []string
+	Val   []string
+	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
 }
 
 func (QValueArrayInterval) Kind() QValueKind {
@@ -502,7 +503,8 @@ func (v QValueUUID) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayUUID struct {
-	Val []uuid.UUID
+	Val   []uuid.UUID
+	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
 }
 
 func (QValueArrayUUID) Kind() QValueKind {
@@ -649,7 +651,8 @@ func (v QValueMacaddr) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayFloat32 struct {
-	Val []float32
+	Val   []float32
+	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
 }
 
 func (QValueArrayFloat32) Kind() QValueKind {
@@ -667,7 +670,8 @@ func (v QValueArrayFloat32) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayFloat64 struct {
-	Val []float64
+	Val   []float64
+	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
 }
 
 func (QValueArrayFloat64) Kind() QValueKind {
@@ -685,7 +689,8 @@ func (v QValueArrayFloat64) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayInt16 struct {
-	Val []int16
+	Val   []int16
+	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
 }
 
 func (QValueArrayInt16) Kind() QValueKind {
@@ -703,7 +708,8 @@ func (v QValueArrayInt16) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayInt32 struct {
-	Val []int32
+	Val   []int32
+	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
 }
 
 func (QValueArrayInt32) Kind() QValueKind {
@@ -721,7 +727,8 @@ func (v QValueArrayInt32) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayInt64 struct {
-	Val []int64
+	Val   []int64
+	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
 }
 
 func (QValueArrayInt64) Kind() QValueKind {
@@ -739,7 +746,8 @@ func (v QValueArrayInt64) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayString struct {
-	Val []string
+	Val   []string
+	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
 }
 
 func (QValueArrayString) Kind() QValueKind {
@@ -757,7 +765,8 @@ func (v QValueArrayString) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayDate struct {
-	Val []time.Time
+	Val   []time.Time
+	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
 }
 
 func (QValueArrayDate) Kind() QValueKind {
@@ -775,7 +784,8 @@ func (v QValueArrayDate) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayTime struct {
-	Val []time.Duration
+	Val   []time.Duration
+	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
 }
 
 func (QValueArrayTime) Kind() QValueKind {
@@ -793,7 +803,8 @@ func (v QValueArrayTime) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayTimestamp struct {
-	Val []time.Time
+	Val   []time.Time
+	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
 }
 
 func (QValueArrayTimestamp) Kind() QValueKind {
@@ -811,7 +822,8 @@ func (v QValueArrayTimestamp) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayTimestampTZ struct {
-	Val []time.Time
+	Val   []time.Time
+	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
 }
 
 func (QValueArrayTimestampTZ) Kind() QValueKind {
@@ -829,7 +841,8 @@ func (v QValueArrayTimestampTZ) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayBoolean struct {
-	Val []bool
+	Val   []bool
+	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
 }
 
 func (QValueArrayBoolean) Kind() QValueKind {
@@ -847,7 +860,8 @@ func (v QValueArrayBoolean) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayEnum struct {
-	Val []string
+	Val   []string
+	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
 }
 
 func (QValueArrayEnum) Kind() QValueKind {
@@ -868,6 +882,7 @@ type QValueArrayNumeric struct {
 	Val       []decimal.Decimal
 	Precision int16
 	Scale     int16
+	Nulls     []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
 }
 
 func (QValueArrayNumeric) Kind() QValueKind {

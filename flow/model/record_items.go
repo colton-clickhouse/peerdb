@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"reflect"
 
 	"github.com/PeerDB-io/peerdb/flow/shared/datatypes"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
@@ -226,9 +227,29 @@ func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 		default:
 			jsonStruct[col] = v.Value()
 		}
+		if opts.ArrayNullElements {
+			if nulls := types.ArrayNulls(qv); nulls != nil {
+				jsonStruct[col] = withNullElements(jsonStruct[col], nulls)
+			}
+		}
 	}
 
 	return jsonStruct, nil
+}
+
+// withNullElements turns an encoded array into a []any with nil where nulls says so, so it marshals JSON nulls.
+func withNullElements(encoded any, nulls []bool) any {
+	rv := reflect.ValueOf(encoded)
+	if rv.Kind() != reflect.Slice || rv.Len() != len(nulls) {
+		return encoded
+	}
+	out := make([]any, rv.Len())
+	for i := range out {
+		if !nulls[i] {
+			out[i] = rv.Index(i).Interface()
+		}
+	}
+	return out
 }
 
 func (r RecordItems) ToJSONWithOptions(options ToJSONOptions) (string, error) {

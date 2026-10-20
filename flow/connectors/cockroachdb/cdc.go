@@ -279,6 +279,7 @@ func (c *CockroachDBConnector) PullRecords(
 		state.indexSource(fmt.Sprintf("%s.%s.%s", c.config.Database, parsed.Namespace, parsed.Table), source)
 		if schema, ok := req.TableNameSchemaMapping[target.Name]; ok {
 			state.schemas[source] = newChangefeedTableSchema(schema, target.Exclude)
+			state.schemas[source].arrayNullElements = req.InternalVersion >= shared.InternalVersion_ArrayNullElements
 		}
 	}
 	state.finishIndexing()
