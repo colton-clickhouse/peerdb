@@ -148,6 +148,8 @@ type changefeedTableSchema struct {
 	// column); empty means the same as primaryKeys.
 	sourceKey       []string
 	nullableEnabled bool
+	// arrayNullElements marks NULL array elements (InternalVersion_ArrayNullElements)
+	arrayNullElements bool
 }
 
 // newChangefeedTableSchema builds the cached per-table schema for envelope
@@ -220,6 +222,9 @@ func changefeedRecordItems(
 			return items, fmt.Errorf("column %s as %s: %w"+
 				" (the source column type may have changed; resync the mirror to pick up the new type)",
 				col, field.Type, err)
+		}
+		if schema.arrayNullElements && field.Type.IsArray() {
+			qv = types.WithArrayNulls(qv, jsonNullElements(raw))
 		}
 		items.AddColumn(col, qv)
 	}
@@ -1050,4 +1055,17 @@ func isPermanentChangefeedError(err error) bool {
 	return strings.Contains(msg, "does not exist") ||
 		strings.Contains(msg, "syntax error") ||
 		strings.Contains(msg, "rangefeeds require the kv.rangefeed.enabled setting")
+}
+
+// jsonNullElements marks the null elements of a JSON array; nil for anything else.
+func jsonNullElements(raw json.RawMessage) []bool {
+	var elems []json.RawMessage
+	if err := json.Unmarshal(raw, &elems); err != nil {
+		return nil
+	}
+	nulls := make([]bool, len(elems))
+	for i, el := range elems {
+		nulls[i] = isJSONNull(el)
+	}
+	return nulls
 }

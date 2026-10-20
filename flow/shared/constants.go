@@ -66,6 +66,9 @@ const (
 	// Postgres: a NULL array stays NULL through CDC normalize. Older mirrors write '{}' (ARRAY(SELECT
 	// JSON_ARRAY_ELEMENTS_TEXT(NULL)) is empty), while their snapshot kept NULL.
 	InternalVersion_PgNullArrayStaysNull
+	// CockroachDB: NULL elements inside arrays are marked (types.ArrayNulls), and Postgres destinations write them as
+	// NULL. Older mirrors write the element type's zero value ({1,NULL,3} -> {1,0,3}, text '', bool false, ...).
+	InternalVersion_ArrayNullElements
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
