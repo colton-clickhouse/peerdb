@@ -101,10 +101,11 @@ func syncRecordsCore[Items model.Items](
 		return nil, err
 	}
 	jsonOpts := model.ToJSONOptions{
-		UnnestColumns:  nil,
-		HStoreAsJSON:   false,
-		GeometryAsEWKT: req.Version >= shared.InternalVersion_PgGeoKeepSRID,
-		StripNulBytes:  stripNulBytes,
+		UnnestColumns:     nil,
+		HStoreAsJSON:      false,
+		GeometryAsEWKT:    req.Version >= shared.InternalVersion_PgGeoKeepSRID,
+		StripNulBytes:     stripNulBytes,
+		ArrayNullElements: true,
 	}
 	streamReadFunc := func() ([]any, error) {
 		for record := range req.Records.GetRecords() {
