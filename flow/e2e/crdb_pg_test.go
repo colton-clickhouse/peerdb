@@ -286,7 +286,8 @@ func (s CRDBPGSuite) Test_NoPK_Table_Snapshot_And_CDC() {
 // A hash-sharded primary key (CockroachDB's recommended layout for sequential keys) puts a hidden,
 // virtual shard column in the key. The connector leaves virtual columns out of the schema but keeps
 // the key, so the destination CREATE TABLE names a missing column (42703) and setup retries forever
-// for every table in the mirror. Expected failure: the table never reaches the destination.
+// for every table in the mirror. Expected: the table replicates (snapshot, update, insert, delete),
+// keyed on the visible key columns, without the shard column.
 func (s CRDBPGSuite) Test_Hash_Sharded_PKey() {
 	t := s.t
 	srcTable := "hash_sharded"
@@ -311,6 +312,18 @@ func (s CRDBPGSuite) Test_Hash_Sharded_PKey() {
 		ok, _ := s.destBool(fmt.Sprintf(`SELECT count(*) = 1 FROM %s WHERE id = 2 AND v = 'b2'`, dstFull))
 		return ok
 	})
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(
+		`INSERT INTO %s VALUES ('2026-01-03', 3, 'c'); DELETE FROM %s WHERE id = 1`, srcFull, srcFull)))
+	EnvWaitFor(t, env, 2*time.Minute, "cdc insert and delete", func() bool {
+		ok, _ := s.destBool(fmt.Sprintf(`SELECT array_agg(id ORDER BY id) = '{2,3}' FROM %s`, dstFull))
+		return ok
+	})
+	// the shard column is derived from (ts, id): the target keys on the visible columns and has no shard column
+	ok, err := s.destBool(fmt.Sprintf(`SELECT array_agg(a.attname::text ORDER BY array_position(i.indkey, a.attnum))
+			= '{ts,id}' FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+		WHERE i.indrelid = '%s'::regclass AND i.indisprimary`, dstFull))
+	EnvNoError(t, env, err)
+	require.True(t, ok, "target primary key is (ts, id)")
 
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
