@@ -684,3 +684,32 @@ func (s CRDBPGSuite) Test_OID_Via_CDC() {
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
 }
+
+// OIDs above 2^31 - 1 through snapshot and CDC: needs both the bigint mapping (#1, from MySQL -> PG #5/#20's
+// InternalVersion_PgWidenUnsignedInts) and the quoted-OID decoding (#27).
+func (s CRDBPGSuite) Test_OID_Above_Int32_Max_Snapshot_And_CDC() {
+	t := s.t
+	srcTable := "oid_big_cdc"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT8 PRIMARY KEY, o OID)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 1), (2, 4294967295)`, srcFull)))
+
+	flowConnConfig := s.startMirror(srcTable)
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 3*time.Minute, "snapshot rows", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 2
+	})
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (3, 3000000000)`, srcFull)))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET o = 2147483648 WHERE id = 1`, srcFull)))
+	EnvWaitFor(t, env, 3*time.Minute, "cdc rows", func() bool {
+		ok, _ := s.destBool(fmt.Sprintf(`SELECT string_agg(id || ':' || o::text, ' ' ORDER BY id)
+			= '1:2147483648 2:4294967295 3:3000000000' FROM %s`, dstFull))
+		return ok
+	})
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+}
