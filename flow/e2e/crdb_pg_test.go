@@ -869,3 +869,79 @@ func (s CRDBPGSuite) Test_Column_Families_Stalls_Mirror() {
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
 }
+
+// NULL elements inside arrays must stay NULL (PeerDB's array values had no way to hold a NULL element, so
+// {1,NULL,3} arrived as {1,0,3}, text as an empty string, bool as false, uuid as the nil UUID, dates as 0001-01-01). One column per
+// array element type, each [v, NULL, v], through the snapshot (id 1), a CDC insert (id 101) and a CDC update (id 1).
+func (s CRDBPGSuite) Test_Array_Null_Elements() {
+	if bad := s.arrayNullElementProblems("array_null_elems", shared.InternalVersion_Latest); len(bad) > 0 {
+		s.t.Errorf("%d array columns lost their NULL element:\n  %s", len(bad), strings.Join(bad, "\n  "))
+	}
+}
+
+// arrayNullElementColumns are the array columns of arrayNullElementProblems, with a non-NULL element value.
+var arrayNullElementColumns = []struct{ name, typ, elem string }{
+	{"c_i2", "INT2[]", "1"}, {"c_i4", "INT4[]", "1"}, {"c_i8", "INT8[]", "1"},
+	{"c_f4", "FLOAT4[]", "1.5"}, {"c_f8", "FLOAT8[]", "1.5"}, {"c_dec", "DECIMAL[]", "1.5"},
+	{"c_bool", "BOOL[]", "true"}, {"c_text", "STRING[]", "'a'"},
+	{"c_uuid", "UUID[]", "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'"},
+	{"c_date", "DATE[]", "'2026-01-02'"}, {"c_ts", "TIMESTAMP[]", "'2026-01-02 03:04:05'"},
+	{"c_tstz", "TIMESTAMPTZ[]", "'2026-01-02 03:04:05+00'"}, {"c_iv", "INTERVAL[]", "'1h'"},
+	{"c_time", "TIME[]", "'12:34:56'"}, {"c_inet", "INET[]", "'10.0.0.1'"},
+	{"c_enum", "{mood}[]", "'ok'"}, // pgx doesn't know enum types: their arrays arrive as text
+}
+
+// arrayNullElementProblems replicates [v, NULL, v] arrays of every element type on a mirror of the given version and
+// returns "<id> <column>: <value>" for each destination array that doesn't have exactly its second element NULL.
+func (s CRDBPGSuite) arrayNullElementProblems(srcTable string, version uint32) []string {
+	t := s.t
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	mood := AttachSchema(s, srcTable+"_mood")
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TYPE %s AS ENUM ('ok', 'meh')`, mood)))
+	defs := make([]string, 0, len(arrayNullElementColumns))
+	vals := make([]string, 0, len(arrayNullElementColumns))
+	for _, c := range arrayNullElementColumns {
+		typ := strings.ReplaceAll(c.typ, "{mood}", mood)
+		defs = append(defs, c.name+" "+typ)
+		vals = append(vals, fmt.Sprintf("ARRAY[%[1]s, NULL, %[1]s]::%[2]s", c.elem, typ))
+	}
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT8 PRIMARY KEY, n INT8, %s)`,
+		srcFull, strings.Join(defs, ", "))))
+	row := func(id int) string { return fmt.Sprintf("(%d, 0, %s)", id, strings.Join(vals, ", ")) }
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES %s, %s`, srcFull, row(1), row(2))))
+
+	flowConnConfig := s.startMirror(srcTable)
+	// mirror creation replaces Version with PEERDB_FORCE_INTERNAL_VERSION (default: latest)
+	flowConnConfig.Env = map[string]string{"PEERDB_FORCE_INTERNAL_VERSION": strconv.FormatUint(uint64(version), 10)}
+	flowConnConfig.Version = version
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 3*time.Minute, "snapshot rows", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 2
+	})
+	// id 2 keeps its snapshot values; id 1 is rewritten by an update, id 101 is new
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES %s`, srcFull, row(101))))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET n = 1 WHERE id = 1`, srcFull)))
+	EnvWaitFor(t, env, 3*time.Minute, "cdc rows", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id = 101 OR (id = 1 AND n = 1)`, dstFull)) == 2
+	})
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+
+	var bad []string
+	for _, id := range []int{1, 2, 101} {
+		for _, c := range arrayNullElementColumns {
+			ok, err := s.destBool(fmt.Sprintf(
+				`SELECT cardinality(%[1]s) = 3 AND %[1]s[1] IS NOT NULL AND %[1]s[2] IS NULL AND %[1]s[3] IS NOT NULL
+				FROM %[2]s WHERE id = %[3]d`, c.name, dstFull, id))
+			if err != nil || !ok {
+				bad = append(bad, fmt.Sprintf("%d %s: %s (%v)", id, c.name,
+					s.destText(fmt.Sprintf(`SELECT %s::text FROM %s WHERE id = %d`, c.name, dstFull, id)), err))
+			}
+		}
+	}
+	return bad
+}
