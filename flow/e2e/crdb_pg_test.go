@@ -17,11 +17,13 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/PeerDB-io/peerdb/flow/connectors"
 	connpostgres "github.com/PeerDB-io/peerdb/flow/connectors/postgres"
 	"github.com/PeerDB-io/peerdb/flow/e2eshared"
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
+	"github.com/PeerDB-io/peerdb/flow/internal"
 	"github.com/PeerDB-io/peerdb/flow/model"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared"
@@ -804,6 +806,74 @@ func (s CRDBPGSuite) Test_Nul_Bytes_Stripped() {
 			= '1:ab:{x,y} 2:c:{p} 11:ab:{x,y} 12:plain:{p}' FROM %s`, dstFull))
 		return ok
 	})
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+}
+
+// A clear source failure must show in the mirror's status (a table with several column families made every
+// changefeed start fail while the mirror reported STATUS_RUNNING). The changefeed error is user-actionable
+// (NOTIFY_CHANGEFEED_INVALID), so once it has repeated without progress for PEERDB_STALLED_THRESHOLD_MINUTES the
+// mirror is STATUS_STALLED, and its log says why.
+func (s CRDBPGSuite) Test_Column_Families_Stalls_Mirror() {
+	t := s.t
+	srcTable := "families_stall"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+		`CREATE TABLE %s (id INT8 PRIMARY KEY, hot INT8, cold STRING, FAMILY f_hot (id, hot), FAMILY f_cold (cold))`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 10, 'a')`, srcFull)))
+
+	client, err := NewApiClient()
+	require.NoError(t, err)
+	// the setting is global for the stack and the API can't unset it: restore its previous value
+	const setting = "PEERDB_STALLED_THRESHOLD_MINUTES"
+	settings, err := client.GetDynamicSettings(t.Context(), &protos.GetDynamicSettingsRequest{})
+	require.NoError(t, err)
+	previous := ""
+	for _, ds := range settings.Settings {
+		if ds.Name == setting {
+			previous = ds.GetValue()
+			if previous == "" {
+				previous = ds.DefaultValue
+			}
+		}
+	}
+	require.NotEmpty(t, previous, setting)
+	setThreshold := func(ctx context.Context, minutes string) error {
+		_, err := client.PostDynamicSetting(ctx, &protos.PostDynamicSettingRequest{Name: setting, Value: proto.String(minutes)})
+		return err
+	}
+	require.NoError(t, setThreshold(t.Context(), "1"))
+	// t.Context() is already canceled when cleanups run
+	t.Cleanup(func() { require.NoError(t, setThreshold(context.Background(), previous)) })
+
+	flowConnConfig := s.startMirror(srcTable)
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 2*time.Minute, "snapshot row", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 1
+	})
+	EnvWaitFor(t, env, 6*time.Minute, "STALLED while every changefeed start fails", func() bool {
+		res, err := client.MirrorStatus(t.Context(), &protos.MirrorStatusRequest{FlowJobName: flowConnConfig.FlowJobName})
+		if err != nil {
+			t.Log("mirror status:", err)
+			return false
+		}
+		return res.CurrentFlowState == protos.FlowStatus_STATUS_STALLED
+	})
+	catalogPool, err := internal.GetCatalogConnectionPoolFromEnv(t.Context())
+	require.NoError(t, err)
+	count, err := GetLogCount(t.Context(), catalogPool, flowConnConfig.FlowJobName, "warn",
+		"Mirror is STALLED%NOTIFY_CHANGEFEED_INVALID")
+	EnvNoError(t, env, err)
+	require.Positive(t, count, "the mirror's log says why it is STALLED")
+	count, err = GetLogCount(t.Context(), catalogPool, flowConnConfig.FlowJobName, "error",
+		"recreate the table with a single column family")
+	EnvNoError(t, env, err)
+	require.Positive(t, count, "the mirror's errors say how to fix it")
+
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
 }
