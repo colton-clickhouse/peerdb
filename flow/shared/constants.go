@@ -59,6 +59,10 @@ const (
 	// Postgres: normalize casts values to the target columns' own types instead of PeerDB's mapped types, so
 	// columns widened or pre-created by the user hold through CDC, as they already do for the snapshot.
 	InternalVersion_PgNormalizeCastToTargetTypes
+	// MySQL, every destination: dates with any zero part (a zero month or day, i.e. partial zero dates, or a
+	// zero year) replicated like zero dates (the epoch). Older mirrors roll a zero month or day forward to 01,
+	// inventing a real date.
+	InternalVersion_MySQLZeroDatePartsAsZero
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
