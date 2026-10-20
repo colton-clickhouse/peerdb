@@ -238,7 +238,8 @@ func (a *MaintenanceActivity) PauseMirrorIfRunning(ctx context.Context, mirror *
 
 	logger.InfoContext(ctx, "Checking if mirror is running", "status", mirrorStatus.String())
 
-	if mirrorStatus != protos.FlowStatus_STATUS_RUNNING {
+	// a STALLED mirror is still running and gets paused for maintenance too
+	if mirrorStatus != protos.FlowStatus_STATUS_RUNNING && mirrorStatus != protos.FlowStatus_STATUS_STALLED {
 		return false, nil
 	}
 

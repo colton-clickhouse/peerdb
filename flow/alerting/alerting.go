@@ -405,6 +405,8 @@ func (a *Alerter) recordFlowErrorInternal(
 	// 2. Insert log to flow_errors table
 	if err := InsertFlowLog(ctx, a.CatalogPool, flowName, errMessage, errorType); err != nil {
 		logger.Error("failed to insert flow error", slog.Any("error", err))
+	} else if errorType == FlowErrorTypeError && errClass.ErrorAction() == NotifyUser {
+		a.markStalledIfPersistent(ctx, flowName, errClass)
 	}
 
 	// 3. Record error metrics
@@ -428,6 +430,35 @@ func (a *Alerter) recordFlowErrorInternal(
 	}
 	counter.Add(ctx, 1, errorAttributeSet)
 	gauge.Record(ctx, 1, errorAttributeSet)
+}
+
+// markStalledIfPersistent sets a running mirror to STALLED once a user-actionable error (like the one just
+// recorded) has kept it from making progress for longer than PEERDB_STALLED_THRESHOLD_MINUTES. The scheduled
+// tasks set it back to RUNNING once it makes progress again.
+func (a *Alerter) markStalledIfPersistent(ctx context.Context, flowName string, errClass ErrorClass) {
+	logger := internal.LoggerFromCtx(ctx)
+	threshold, err := internal.PeerDBStalledThresholdMinutes(ctx, nil)
+	if err != nil {
+		logger.Warn("failed to get stalled threshold from catalog", slog.Any("error", err))
+		return
+	}
+	if threshold == 0 {
+		return
+	}
+	stalled, err := internal.MarkFlowStalledIfPersistent(ctx, a.CatalogPool, flowName, threshold)
+	if err != nil {
+		logger.Warn("failed to check whether the mirror is stalled", slog.Any("error", err))
+		return
+	}
+	if stalled {
+		message := fmt.Sprintf("Mirror is STALLED: it has failed for more than %d minutes without making progress "+
+			"(error class %s) and isn't expected to recover without intervention. "+
+			"It returns to RUNNING once it makes progress again or stops failing.", threshold, errClass.String())
+		logger.Warn(message, slog.String("flowName", flowName))
+		if err := InsertFlowLog(ctx, a.CatalogPool, flowName, message, FlowErrorTypeWarn); err != nil {
+			logger.Warn("failed to insert flow warning", slog.Any("error", err))
+		}
+	}
 }
 
 func (a *Alerter) LogFlowError(ctx context.Context, flowName string, err error) error {
