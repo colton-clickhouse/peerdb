@@ -2080,3 +2080,30 @@ func TestClickHouseGenericAbortShouldBeInternalClickHouse(t *testing.T) {
 		Code:   "236",
 	}, errInfo, "Unexpected error info")
 }
+
+func TestPostgresNormalizeErrorsNeedingTheUser(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		code  string
+		class ErrorClass
+	}{
+		// a column the mirror writes was dropped from the destination table
+		{pgerrcode.UndefinedColumn, ErrorNotifyDestinationModified},
+		// a value the destination column's type can't hold, or a type it can't take
+		{pgerrcode.NumericValueOutOfRange, ErrorNotifyInvalidDestinationTableDefinition},
+		{pgerrcode.DatatypeMismatch, ErrorNotifyInvalidDestinationTableDefinition},
+	} {
+		// as startNormalize returns them: the destination's error, wrapped by the connector and the activity
+		err := exceptions.NewNormalizationError(fmt.Errorf("failed to normalize records: %w",
+			fmt.Errorf("error executing normalize statement for table public.t: %w", &pgconn.PgError{Code: tc.code})))
+		errorClass, errInfo := GetErrorClass(t.Context(), err)
+		assert.Equal(t, tc.class, errorClass, tc.code)
+		assert.Equal(t, NotifyUser, errorClass.ErrorAction(), tc.code)
+		assert.Equal(t, ErrorInfo{Source: ErrorSourcePostgres, Code: tc.code}, errInfo, tc.code)
+
+		// outside normalize (e.g. a source query) the code keeps its existing class
+		otherClass, _ := GetErrorClass(t.Context(), fmt.Errorf("query failed: %w", &pgconn.PgError{Code: tc.code}))
+		assert.NotEqual(t, tc.class, otherClass, tc.code)
+	}
+}

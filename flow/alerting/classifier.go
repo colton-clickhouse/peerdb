@@ -614,6 +614,16 @@ func GetErrorClass(ctx context.Context, err error) (ErrorClass, ErrorInfo) {
 		}
 	}
 
+	// a Postgres destination table that can't take the data: normalize retries won't help
+	if _, ok := errors.AsType[*exceptions.NormalizationError](err); ok && pgErr != nil {
+		switch pgErr.Code {
+		case pgerrcode.UndefinedColumn:
+			return ErrorNotifyDestinationModified, pgErrorInfo
+		case pgerrcode.NumericValueOutOfRange, pgerrcode.DatatypeMismatch:
+			return ErrorNotifyInvalidDestinationTableDefinition, pgErrorInfo
+		}
+	}
+
 	// Consolidated PostgreSQL error handling
 	if pgErr != nil {
 		switch pgErr.Code {
