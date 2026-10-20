@@ -336,7 +336,7 @@ func (a *CancelTableAdditionActivity) WaitForNewRunningMirrorToBeInRunningState(
 		return fmt.Errorf("failed to get workflow status for flow %s: %w", flowJobName, err)
 	}
 
-	if flowStatus != protos.FlowStatus_STATUS_RUNNING {
+	if flowStatus != protos.FlowStatus_STATUS_RUNNING && flowStatus != protos.FlowStatus_STATUS_STALLED {
 		return fmt.Errorf("expected flow %s to be in RUNNING state, but found %s", flowJobName, flowStatus.String())
 	}
 

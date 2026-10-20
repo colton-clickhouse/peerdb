@@ -1521,6 +1521,10 @@ func (a *FlowableActivity) RecordSlotSizes(ctx context.Context) error {
 		logger.Warn("failed to get interval since last normalize threshold", slog.Any("error", err))
 	}
 
+	if err := a.clearStalledFlows(ctx); err != nil {
+		logger.Error("Failed to clear stalled mirrors", slog.Any("error", err))
+	}
+
 	logger.Info("Recording slot size and emitting log retention where applicable", slog.Int("flows", len(infos)))
 	for _, info := range infos {
 		if err := ctx.Err(); err != nil {
@@ -1552,6 +1556,23 @@ func (a *FlowableActivity) RecordSlotSizes(ctx context.Context) error {
 	}
 	logger.Info("Finished emitting Slot Information", slog.Int("flows", len(infos)))
 
+	return nil
+}
+
+// clearStalledFlows sets STALLED mirrors back to RUNNING once they make progress again or stop failing (the
+// Alerter sets STALLED when a user-actionable error persists).
+func (a *FlowableActivity) clearStalledFlows(ctx context.Context) error {
+	threshold, err := internal.PeerDBStalledThresholdMinutes(ctx, nil)
+	if err != nil {
+		return err
+	}
+	cleared, err := internal.ClearStalledFlows(ctx, a.CatalogPool, threshold)
+	if err != nil {
+		return err
+	}
+	for _, flowName := range cleared {
+		a.Alerter.LogFlowInfo(ctx, flowName, "Mirror is no longer stalled: status STALLED -> RUNNING")
+	}
 	return nil
 }
 
@@ -1703,6 +1724,7 @@ func (a *FlowableActivity) recordServerSideCommitLag(
 
 var activeFlowStatuses = map[protos.FlowStatus]struct{}{
 	protos.FlowStatus_STATUS_RUNNING:   {},
+	protos.FlowStatus_STATUS_STALLED:   {},
 	protos.FlowStatus_STATUS_PAUSED:    {},
 	protos.FlowStatus_STATUS_PAUSING:   {},
 	protos.FlowStatus_STATUS_SETUP:     {},
