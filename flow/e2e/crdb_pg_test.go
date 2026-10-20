@@ -651,3 +651,65 @@ func (s CRDBPGSuite) nullArrayProblems(srcTable string, version uint32) []string
 	}
 	return bad
 }
+
+// OID columns through CDC (#27: the changefeed JSON carries OIDs as quoted strings, the decoder wanted a
+// bare number, and the whole mirror stopped). Values stay below 2^31 (above is #1, OID -> integer) and
+// no array is NULL (that is #28).
+func (s CRDBPGSuite) Test_OID_Via_CDC() {
+	t := s.t
+	srcTable := "oid_cdc"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT8 PRIMARY KEY, o OID, oa OID[])`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 1, ARRAY[1, 2147483647]::OID[])`, srcFull)))
+
+	flowConnConfig := s.startMirror(srcTable)
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 3*time.Minute, "snapshot row", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 1
+	})
+
+	EnvNoError(t, env, s.source.Exec(t.Context(),
+		fmt.Sprintf(`INSERT INTO %s VALUES (2, 2147483647, ARRAY[3, 4]::OID[]), (3, NULL, '{}'::OID[])`, srcFull)))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET o = 5 WHERE id = 1`, srcFull)))
+	EnvWaitFor(t, env, 3*time.Minute, "cdc insert/update of OID values", func() bool {
+		ok, _ := s.destBool(fmt.Sprintf(`SELECT string_agg(id || ':' || coalesce(o::text, 'NULL') || ':' || coalesce(oa::text, 'NULL'),
+			' ' ORDER BY id) = '1:5:{1,2147483647} 2:2147483647:{3,4} 3:NULL:{}' FROM %s`, dstFull))
+		return ok
+	})
+
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+}
+
+// OIDs above 2^31 - 1 through snapshot and CDC: needs both the bigint mapping (#1, from MySQL -> PG #5/#20's
+// InternalVersion_PgWidenUnsignedInts) and the quoted-OID decoding (#27).
+func (s CRDBPGSuite) Test_OID_Above_Int32_Max_Snapshot_And_CDC() {
+	t := s.t
+	srcTable := "oid_big_cdc"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT8 PRIMARY KEY, o OID)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 1), (2, 4294967295)`, srcFull)))
+
+	flowConnConfig := s.startMirror(srcTable)
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 3*time.Minute, "snapshot rows", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 2
+	})
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (3, 3000000000)`, srcFull)))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET o = 2147483648 WHERE id = 1`, srcFull)))
+	EnvWaitFor(t, env, 3*time.Minute, "cdc rows", func() bool {
+		ok, _ := s.destBool(fmt.Sprintf(`SELECT string_agg(id || ':' || o::text, ' ' ORDER BY id)
+			= '1:2147483648 2:4294967295 3:3000000000' FROM %s`, dstFull))
+		return ok
+	})
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+}
