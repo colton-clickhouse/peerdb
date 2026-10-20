@@ -2,9 +2,12 @@ package e2e
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/PeerDB-io/peerdb/flow/shared"
 )
 
 // Primary key changes beyond the basic case in Test_PKey_Update_Removes_Old_Row: the destination must end up
@@ -81,4 +84,44 @@ func (s MySQLPGSuite) Test_PKey_Change_Edge_Cases() {
 	RequireEnvCanceled(t, env)
 
 	require.Empty(t, left, "rows left under old primary keys")
+}
+
+// Mirrors created before InternalVersion_MySQLPKeyChangeAsDeleteInsert keep sending key changes as
+// updates (the old row stays on the destination), so an existing mirror's event stream doesn't change.
+func (s MySQLPGSuite) Test_PKey_Change_Old_Version_Keeps_Update() {
+	t := s.t
+	srcTable := "pk_old"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY, v VARCHAR(20))`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 'a')`, srcFull)))
+
+	connectionGen := FlowConnectionGenerationConfig{
+		FlowJobName:   AddSuffix(s, srcTable),
+		TableMappings: TableMappings(s, srcTable, srcTable),
+		Destination:   s.Peer().Name,
+	}
+	version := shared.InternalVersion_MySQLPKeyChangeAsDeleteInsert - 1
+	flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
+	flowConnConfig.DoInitialSnapshot = true
+	// mirror creation replaces Version with PEERDB_FORCE_INTERNAL_VERSION (default: latest)
+	flowConnConfig.Env = map[string]string{"PEERDB_FORCE_INTERNAL_VERSION": strconv.FormatUint(uint64(version), 10)}
+	flowConnConfig.Version = version
+
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 3*time.Minute, "initial load", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 1
+	})
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET id = 101 WHERE id = 1`, srcFull)))
+	EnvWaitFor(t, env, 3*time.Minute, "row under its new key", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id = 101`, dstFull)) == 1
+	})
+	oldKey := s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id = 1`, dstFull))
+
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+
+	require.EqualValues(t, 1, oldKey, "old-version mirror: the row under the old key stays")
 }

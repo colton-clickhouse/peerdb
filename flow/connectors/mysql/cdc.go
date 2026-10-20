@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math"
 	"math/rand/v2"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -977,12 +978,38 @@ func (c *MySqlConnector) PullRecords(
 							}
 							newItems.AddColumn(fd.Name, notNullBinary(val, !fd.Nullable))
 						}
+						// Normalize matches rows by the new primary key only, so an update that changes the key would
+						// leave the old row behind: send it as delete(old) + insert(new). Not with unchanged TOAST
+						// columns, where the new image isn't a complete row.
+						keyMoved := req.InternalVersion >= shared.InternalVersion_MySQLPKeyChangeAsDeleteInsert &&
+							len(unchangedToastColumns) == 0 && pkeyChanged(schema.PrimaryKeyColumns, oldItems, newItems)
 						if sourceSchemaAsDestinationColumn {
 							newItems.AddColumn("_peerdb_source_schema", types.QValueString{Val: string(ev.Table.Schema)})
 						}
 
-						if err := addRecord(ctx, &model.UpdateRecord[model.RecordItems]{
-							BaseRecord:            model.BaseRecord{CommitTimeNano: int64(event.Header.Timestamp) * 1e9},
+						baseRecord := model.BaseRecord{CommitTimeNano: int64(event.Header.Timestamp) * 1e9}
+						if keyMoved {
+							if sourceSchemaAsDestinationColumn {
+								oldItems.AddColumn("_peerdb_source_schema", types.QValueString{Val: string(ev.Table.Schema)})
+							}
+							if err := addRecord(ctx, &model.DeleteRecord[model.RecordItems]{
+								BaseRecord:           baseRecord,
+								Items:                oldItems,
+								SourceTableName:      sourceTableName,
+								DestinationTableName: destinationTableName,
+							}); err != nil {
+								return err
+							}
+							if err := addRecord(ctx, &model.InsertRecord[model.RecordItems]{
+								BaseRecord:           baseRecord,
+								Items:                newItems,
+								SourceTableName:      sourceTableName,
+								DestinationTableName: destinationTableName,
+							}); err != nil {
+								return err
+							}
+						} else if err := addRecord(ctx, &model.UpdateRecord[model.RecordItems]{
+							BaseRecord:            baseRecord,
 							OldItems:              oldItems,
 							NewItems:              newItems,
 							SourceTableName:       sourceTableName,
@@ -1446,6 +1473,18 @@ func (c *MySqlConnector) processRenameTableQuery(
 			attribute.String(otel_metrics.OnlineSchemaMigrationTool, tool),
 		)))
 	}
+}
+
+// pkeyChanged reports whether an update moved the row to another primary key. Values are compared as the
+// binlog sent them, so a case-only change under a CI collation counts; a false positive is harmless
+// (delete + insert of the same key normalizes to the same row).
+func pkeyChanged(pkeyCols []string, oldItems, newItems model.RecordItems) bool {
+	for _, col := range pkeyCols {
+		if !reflect.DeepEqual(oldItems.GetColumnValue(col), newItems.GetColumnValue(col)) {
+			return true
+		}
+	}
+	return false
 }
 
 // classifyOnlineSchemaMigrationTool guesses which online schema-change tool
