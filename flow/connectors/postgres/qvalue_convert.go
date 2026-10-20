@@ -43,13 +43,23 @@ func (c *PostgresConnector) postgresOIDToQValueKind(
 	return colType
 }
 
-func qValueKindToPostgresType(colTypeStr string) string {
+func qValueKindToPostgresType(colTypeStr string, version uint32) string {
 	switch types.QValueKind(colTypeStr) {
 	case types.QValueKindBoolean:
 		return "BOOLEAN"
-	case types.QValueKindInt16, types.QValueKindUInt16, types.QValueKindInt8, types.QValueKindUInt8:
+	case types.QValueKindInt16, types.QValueKindInt8, types.QValueKindUInt8:
 		return "SMALLINT"
-	case types.QValueKindInt32, types.QValueKindUInt32:
+	case types.QValueKindUInt16:
+		if version >= shared.InternalVersion_PgWidenUnsignedInts {
+			return "INTEGER"
+		}
+		return "SMALLINT"
+	case types.QValueKindInt32:
+		return "INTEGER"
+	case types.QValueKindUInt32:
+		if version >= shared.InternalVersion_PgWidenUnsignedInts {
+			return "BIGINT"
+		}
 		return "INTEGER"
 	case types.QValueKindInt64, types.QValueKindUInt64:
 		return "BIGINT"
