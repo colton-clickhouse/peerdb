@@ -71,6 +71,13 @@ export default function CdcDetails({
                 <Label>{FormatStatus(mirrorStatus)}</Label>
               </Link>
             </div>
+            {mirrorStatus.toString() ===
+              FlowStatus[FlowStatus.STATUS_STALLED] && (
+              <Label variant='footnote' colorSet='destructive'>
+                Failing without progress; not expected to recover without
+                intervention.
+              </Label>
+            )}
           </div>
           <div>
             <div>

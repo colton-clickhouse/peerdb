@@ -30,7 +30,10 @@ export default function PauseOrResumeButton({
     });
 
   const status = mirrorStatus.toString();
-  if (status === FlowStatus[FlowStatus.STATUS_RUNNING]) {
+  if (
+    status === FlowStatus[FlowStatus.STATUS_RUNNING] ||
+    status === FlowStatus[FlowStatus.STATUS_STALLED]
+  ) {
     return (
       <Button
         variant='normalBorderless'
