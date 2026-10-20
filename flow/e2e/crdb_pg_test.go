@@ -621,6 +621,16 @@ func (s CRDBPGSuite) Test_Array_Null_Elements() {
 	}
 }
 
+// Mirrors created before InternalVersion_ArrayNullElements keep writing the zero value for a NULL element, on both
+// paths, so a running mirror doesn't switch mid-stream.
+func (s CRDBPGSuite) Test_Array_Null_Elements_Old_Version_Keeps_Zero() {
+	bad := s.arrayNullElementProblems("array_null_elems_old", shared.InternalVersion_ArrayNullElements-1)
+	require.Len(s.t, bad, 3*len(arrayNullElementColumns))
+	for _, id := range []string{"1", "2", "101"} {
+		require.Contains(s.t, bad, id+" c_i8: {1,0,1} (<nil>)")
+	}
+}
+
 // arrayNullElementColumns are the array columns of arrayNullElementProblems, with a non-NULL element value.
 var arrayNullElementColumns = []struct{ name, typ, elem string }{
 	{"c_i2", "INT2[]", "1"}, {"c_i4", "INT4[]", "1"}, {"c_i8", "INT8[]", "1"},
