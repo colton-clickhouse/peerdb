@@ -48,6 +48,10 @@ const (
 	// MySQL: empty (non-NULL) binary values (BLOB, VARBINARY, CHARACTER SET binary strings) replicated
 	// as empty bytes instead of NULL. Older mirrors emit a nil slice for them, which sinks write as NULL.
 	InternalVersion_MySQLEmptyBinaryAsEmpty
+	// MySQL: an update that changes the primary key is replicated as a delete of the old row plus an
+	// insert of the new one. Older mirrors emit an update, which normalize applies by the new key only,
+	// leaving the old row behind.
+	InternalVersion_MySQLPKeyChangeAsDeleteInsert
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
