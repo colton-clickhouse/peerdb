@@ -26,6 +26,7 @@ function getStatusVariant(status: FlowStatus): BadgeVariant {
     case FlowStatus[FlowStatus.STATUS_PAUSING]:
       return 'warning';
     case FlowStatus[FlowStatus.STATUS_FAILED]:
+    case FlowStatus[FlowStatus.STATUS_STALLED]:
     case FlowStatus[FlowStatus.STATUS_TERMINATED]:
     case FlowStatus[FlowStatus.STATUS_TERMINATING]:
       return 'destructive';
