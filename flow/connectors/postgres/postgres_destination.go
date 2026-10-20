@@ -406,6 +406,12 @@ func (c *PostgresConnector) normalizeBatch(
 	}
 	defer shared.RollbackTx(tx, c.logger)
 
+	// mirror validation refuses keyless tables; one that got in anyway (validation skipped, or a mirror
+	// from before) fails here, named, instead of a malformed MERGE failing the batch under another table
+	if err := keylessTablesError(destinationTableNames, normalizeStmtGen.tableSchemaMapping); err != nil {
+		return 0, fmt.Errorf("can't normalize batch %d: %w", batchID, err)
+	}
+
 	for _, tableName := range destinationTableNames {
 		if schema, ok := normalizeStmtGen.tableSchemaMapping[tableName]; ok && schema.System == protos.TypeSystem_PG {
 			if _, err := tx.Exec(ctx, setSessionReplicaRoleSQL); err != nil {
