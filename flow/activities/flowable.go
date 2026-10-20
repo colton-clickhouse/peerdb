@@ -1514,6 +1514,13 @@ func (a *FlowableActivity) RecordSlotSizes(ctx context.Context) error {
 		logger.Error("Failed to query normalize lag", slog.Any("error", qryErr))
 	}
 
+	// Postgres sources raise the normalize-gap alert from their slot handling; for other sources it comes
+	// from how long the oldest synced batch has waited for normalize
+	normalizeGapThreshold, err := internal.PeerDBIntervalSinceLastNormalizeThresholdMinutes(ctx, nil)
+	if err != nil {
+		logger.Warn("failed to get interval since last normalize threshold", slog.Any("error", err))
+	}
+
 	logger.Info("Recording slot size and emitting log retention where applicable", slog.Int("flows", len(infos)))
 	for _, info := range infos {
 		if err := ctx.Err(); err != nil {
@@ -1537,11 +1544,33 @@ func (a *FlowableActivity) RecordSlotSizes(ctx context.Context) error {
 			a.OtelManager.Metrics.NormalizeLagGauge.Record(ctx, lagMicroseconds, metric.WithAttributeSet(attribute.NewSet(
 				attribute.String(otel_metrics.FlowNameKey, flowName),
 			)))
+			if lag := time.Duration(lagMicroseconds) * time.Microsecond; normalizeGapThreshold > 0 &&
+				lag > time.Duration(normalizeGapThreshold)*time.Minute {
+				a.alertIfNormalizeStalled(ctx, info, lag)
+			}
 		}
 	}
 	logger.Info("Finished emitting Slot Information", slog.Int("flows", len(infos)))
 
 	return nil
+}
+
+// alertIfNormalizeStalled raises the normalize-gap alert for a flow whose oldest synced batch has waited lag
+// for normalize, unless its source is Postgres, which alerts from its slot handling.
+func (a *FlowableActivity) alertIfNormalizeStalled(ctx context.Context, info flowInformation, lag time.Duration) {
+	flowMetadata, err := a.GetFlowMetadata(ctx, &protos.FlowContextMetadataInput{
+		FlowName:        info.config.FlowJobName,
+		SourceName:      info.config.SourceName,
+		DestinationName: info.config.DestinationName,
+	})
+	if err != nil {
+		internal.LoggerFromCtx(ctx).Warn("failed to get flow metadata for the normalize-gap alert", slog.Any("error", err))
+		return
+	}
+	if flowMetadata.Source.Type != protos.DBType_POSTGRES {
+		a.Alerter.AlertIfTooLongSinceLastNormalize(ctx,
+			&alerting.AlertKeys{FlowName: info.config.FlowJobName, PeerName: info.config.SourceName}, lag)
+	}
 }
 
 func (a *FlowableActivity) recordSlotInformation(
