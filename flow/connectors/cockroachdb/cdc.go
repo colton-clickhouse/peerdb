@@ -128,6 +128,7 @@ type changefeedPullState struct {
 	batchDeadline    time.Time
 	graceDeadline    time.Time
 	lastLagWarnAt    time.Time
+	forcedEmit       bool // records were emitted past the checkpoint (no covering resolved timestamp)
 	deltaBytes       atomic.Int64
 	totalBytes       atomic.Int64
 }
@@ -247,6 +248,16 @@ func (c *CockroachDBConnector) PullRecords(
 	if err != nil {
 		return err
 	}
+	frozenCursor := frozenCursorFor(req.FlowJobName)
+	syncSettings := frozenCursorSettings{idleTimeout: req.IdleTimeout, maxBatchSize: req.MaxBatchSize}
+	if frozen, since, batches := frozenCursor.frozen(cursor, syncSettings, time.Now()); frozen {
+		return exceptions.NewCockroachChangefeedIrrecoverableError("CURSOR_NOT_ADVANCING",
+			fmt.Errorf("mirror %s: the changefeed cursor %s has not advanced for %d batches since %s: each batch"+
+				" ended without a covering resolved timestamp and replayed the same changes, so later changes never"+
+				" arrive; pause the mirror and resume it with a longer sync interval (idle timeout, e.g. 300 s) and a"+
+				" larger batch size for one batch to catch up, or resync the mirror", req.FlowJobName, cursor,
+				batches, since.UTC().Format(time.RFC3339)))
+	}
 
 	state := &changefeedPullState{
 		req:              req,
@@ -331,6 +342,7 @@ func (c *CockroachDBConnector) PullRecords(
 		recordsBefore := state.recordCount
 		done, err := c.runChangefeedSession(ctx, otelManager, state)
 		if done {
+			frozenCursor.observe(state.forcedEmit, cursor, state.cursor, syncSettings, time.Now())
 			return nil
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -350,7 +362,8 @@ func (c *CockroachDBConnector) PullRecords(
 		if isCursorTooOldError(err) {
 			return exceptions.NewCockroachChangefeedIrrecoverableError("CURSOR_PAST_GC",
 				fmt.Errorf("changefeed cursor %s is older than the replica GC threshold and cannot resume;"+
-					" increase the CockroachDB gc.ttlseconds zone setting on the source tables or resync the mirror: %w",
+					" increase the CockroachDB gc.ttlseconds zone setting on the source tables or resync the mirror"+
+					" (a system range such as /Table/{0-4} means the system database's zone, 4 h by default): %w",
 					state.cursor, err))
 		}
 		if isTableTruncatedError(err) {
@@ -362,6 +375,13 @@ func (c *CockroachDBConnector) PullRecords(
 		if isTableDroppedError(err) {
 			return exceptions.NewCockroachChangefeedIrrecoverableError("TABLE_DROPPED",
 				fmt.Errorf("a table watched by mirror %s was dropped; remove it from the mirror or resync: %w",
+					req.FlowJobName, err))
+		}
+		if isColumnFamiliesError(err) {
+			return exceptions.NewCockroachChangefeedIrrecoverableError("COLUMN_FAMILIES",
+				fmt.Errorf("a table watched by mirror %s has more than one column family, which PeerDB's changefeed"+
+					" can't read; recreate the table with a single column family (columns can't move between families)"+
+					" or remove it from the mirror: %w",
 					req.FlowJobName, err))
 		}
 		if isTargetNotAtCursorError(err) {
@@ -731,6 +751,7 @@ func (c *CockroachDBConnector) emitBuffered(
 		return nil
 	}
 	if upTo == nil {
+		state.forcedEmit = true
 		c.logger.Warn("[cockroachdb] force-emitting buffered records past the checkpoint: "+forceReason,
 			slog.Int("records", len(eligible)),
 			slog.Int64("bufferedBytes", state.bufferedBytes),
