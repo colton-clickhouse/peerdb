@@ -640,6 +640,25 @@ func TestChangefeedKeyItems(t *testing.T) {
 	}, nil)
 	_, err = changefeedKeyItems([]byte(`[7]`), noPKs, nil)
 	require.ErrorContains(t, err, "does not match primary key columns")
+
+	// a hash-sharded key: the changefeed key leads with the virtual shard column, which the destination isn't keyed on
+	sharded := newChangefeedTableSchema(&protos.TableSchema{
+		TableIdentifier:   "public.events",
+		PrimaryKeyColumns: []string{"ts", "id"},
+		Columns: []*protos.FieldDescription{
+			{Name: "ts", Type: string(types.QValueKindString), Nullable: false},
+			{Name: "id", Type: string(types.QValueKindInt64), Nullable: false},
+		},
+	}, nil)
+	sharded.sourceKey = []string{"crdb_internal_id_ts_shard_16", "ts", "id"}
+	items, err = changefeedKeyItems([]byte(`[3, "2026-01-01", 7]`), sharded, nil)
+	require.NoError(t, err)
+	require.Equal(t, types.QValueString{Val: "2026-01-01"}, items.GetColumnValue("ts"))
+	require.Equal(t, types.QValueInt64{Val: 7}, items.GetColumnValue("id"))
+	require.Nil(t, items.GetColumnValue("crdb_internal_id_ts_shard_16"))
+	require.Len(t, items.ColToVal, 2)
+	_, err = changefeedKeyItems([]byte(`["2026-01-01", 7]`), sharded, nil)
+	require.ErrorContains(t, err, "does not match primary key columns")
 }
 
 func TestChangefeedBackoff(t *testing.T) {
