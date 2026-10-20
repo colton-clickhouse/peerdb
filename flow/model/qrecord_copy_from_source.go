@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,6 +21,26 @@ func timetzBinary(d time.Duration) []byte {
 	b := make([]byte, 12)
 	binary.BigEndian.PutUint64(b, uint64(d/time.Microsecond))
 	return b
+}
+
+// StripNulBytes removes U+0000, which PG text can't hold (22021 in COPY, and JSONB refuses \u0000).
+// The value written to PG then differs from the source: a deliberate behavioral difference.
+func StripNulBytes(s string) string {
+	if strings.IndexByte(s, 0) < 0 {
+		return s
+	}
+	return strings.ReplaceAll(s, "\x00", "")
+}
+
+func stripNulBytesAll(a []string) []string {
+	if !slices.ContainsFunc(a, func(s string) bool { return strings.IndexByte(s, 0) >= 0 }) {
+		return a
+	}
+	out := make([]string, len(a))
+	for i, s := range a {
+		out[i] = StripNulBytes(s)
+	}
+	return out
 }
 
 func constructArray[T any](v []T) *pgtype.Array[T] {
@@ -99,9 +120,9 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		case types.QValueQChar:
 			values[i] = rune(v.Val)
 		case types.QValueString:
-			values[i] = v.Val
+			values[i] = StripNulBytes(v.Val)
 		case types.QValueEnum:
-			values[i] = v.Val
+			values[i] = StripNulBytes(v.Val)
 		case types.QValueUint16Enum:
 			values[i] = v.Val
 		case types.QValueUint64Set:
@@ -151,9 +172,9 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 			}
 			values[i] = wkb
 		case types.QValueArrayString:
-			values[i] = constructArray(v.Val)
+			values[i] = constructArray(stripNulBytesAll(v.Val))
 		case types.QValueArrayEnum:
-			values[i] = constructArray(v.Val)
+			values[i] = constructArray(stripNulBytesAll(v.Val))
 		case types.QValueArrayDate:
 			values[i] = constructArray(v.Val)
 		case types.QValueArrayInterval:
