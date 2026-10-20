@@ -109,3 +109,25 @@ func (s MySQLPGSuite) destColumnTypes(table string) map[string]string {
 	require.NoError(s.t, rows.Err())
 	return out
 }
+
+// mirrors created before InternalVersion_PgWidenUnsignedInts keep their narrower types, so an existing
+// mirror's resync or new tables don't change type (their casts: TestGenerateMergeStatement_TargetColumnTypes)
+func (s MySQLPGSuite) Test_Unsigned_Old_Version_Keeps_Types() {
+	t := s.t
+	srcTable := "unsigned_types_old"
+	srcFull := AttachSchema(s, srcTable)
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY,
+		c_small SMALLINT UNSIGNED, c_int INT UNSIGNED)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 1, 1)`, srcFull)))
+
+	env := s.startUnsignedFlow(srcTable, shared.InternalVersion_PgWidenUnsignedInts-1)
+	EnvWaitFor(t, env, 3*time.Minute, "initial load", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, s.DestinationTable(srcTable))) == 1
+	})
+	types := s.destColumnTypes(srcTable)
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+
+	require.Equal(t, "smallint", types["c_small"])
+	require.Equal(t, "integer", types["c_int"])
+}
