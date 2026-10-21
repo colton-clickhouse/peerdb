@@ -286,6 +286,16 @@ func TestQValueFromCrdbValue(t *testing.T) {
 			expected: types.QValueArrayString{Val: []string{}},
 		},
 		{
+			// #32: host addresses bare, like scalar INET and the changefeed path
+			name:  "inet array",
+			field: field(types.QValueKindArrayString),
+			value: []any{
+				netip.MustParsePrefix("10.0.0.1/32"), netip.MustParsePrefix("::1/128"), nil,
+				netip.MustParsePrefix("192.168.0.0/16"), netip.MustParsePrefix("10.1.2.3/8"),
+			},
+			expected: types.QValueArrayString{Val: []string{"10.0.0.1", "::1", "", "192.168.0.0/16", "10.1.2.3/8"}},
+		},
+		{
 			name:  "array numeric",
 			field: field(types.QValueKindArrayNumeric),
 			value: []any{pgtype.Numeric{Int: big.NewInt(5), Exp: 0, Valid: true}},
