@@ -495,6 +495,9 @@ func (c *CockroachDBConnector) runChangefeedSession(
 		return false, fmt.Errorf("failed to create changefeed: %w", err)
 	}
 	defer rows.Close()
+	// cancel first: rows.Close drains the result, and a sinkless changefeed never ends, so it would otherwise wait
+	// for the watchdog (up to changefeedCatchUpStallWindow while a batch is held open)
+	defer cancelQuery(nil)
 
 	if c.historyProtectionChecked.CompareAndSwap(false, true) {
 		// the changefeed accepted the cursor, so the snapshot timestamp no
