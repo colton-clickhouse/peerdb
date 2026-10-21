@@ -3,11 +3,13 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/PeerDB-io/peerdb/flow/shared"
 	geo "github.com/PeerDB-io/peerdb/flow/shared/datatypes"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
@@ -33,14 +35,17 @@ func (d pgDuration) IntervalValue() (pgtype.Interval, error) {
 type QRecordCopyFromSource struct {
 	stream        *QRecordStream
 	currentRecord []types.QValue
+	version       uint32
 }
 
 func NewQRecordCopyFromSource(
 	stream *QRecordStream,
+	version uint32,
 ) *QRecordCopyFromSource {
 	return &QRecordCopyFromSource{
 		stream:        stream,
 		currentRecord: nil,
+		version:       version,
 	}
 }
 
@@ -50,15 +55,23 @@ func (src *QRecordCopyFromSource) Next() bool {
 	return ok || src.Err() != nil
 }
 
-func geoWktToWkb(wkt string) ([]byte, error) {
+// geoWktToWkb converts WKT or EWKT (SRID=N;WKT) to WKB. With keepSRID it writes EWKB with the EWKT's SRID,
+// or srid for plain WKT (MySQL keeps the SRID beside the WKT).
+func geoWktToWkb(wkt string, srid int32, keepSRID bool) ([]byte, error) {
 	if strings.HasPrefix(wkt, "SRID=") {
-		_, wktWithoutSRID, found := strings.Cut(wkt, ";")
+		sridText, wktWithoutSRID, found := strings.Cut(strings.TrimPrefix(wkt, "SRID="), ";")
 		if found {
 			wkt = wktWithoutSRID
+			if n, err := strconv.ParseInt(sridText, 10, 32); err == nil {
+				srid = int32(n)
+			}
 		}
 	}
+	if !keepSRID {
+		srid = 0
+	}
 
-	return geo.GeoToWKB(wkt)
+	return geo.GeoToWKB(wkt, int(srid))
 }
 
 func (src *QRecordCopyFromSource) Values() ([]any, error) {
@@ -66,6 +79,7 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		return nil, err
 	}
 
+	keepSRID := src.version >= shared.InternalVersion_PgGeoKeepSRID
 	values := make([]any, len(src.currentRecord))
 	for i, qValue := range src.currentRecord {
 		if qValue == nil || qValue.Value() == nil {
@@ -133,19 +147,19 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		case types.QValueHStore:
 			values[i] = v.Val
 		case types.QValueGeography:
-			wkb, err := geoWktToWkb(v.Val)
+			wkb, err := geoWktToWkb(v.Val, 0, keepSRID)
 			if err != nil {
 				return nil, err
 			}
 			values[i] = wkb
 		case types.QValueGeometry:
-			wkb, err := geoWktToWkb(v.Val)
+			wkb, err := geoWktToWkb(v.Val, v.SRID, keepSRID)
 			if err != nil {
 				return nil, err
 			}
 			values[i] = wkb
 		case types.QValuePoint:
-			wkb, err := geoWktToWkb(v.Val)
+			wkb, err := geoWktToWkb(v.Val, 0, false)
 			if err != nil {
 				return nil, err
 			}

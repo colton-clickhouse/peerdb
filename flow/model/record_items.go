@@ -135,6 +135,12 @@ func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 				}
 			}
 
+		case types.QValueGeometry:
+			if opts.GeometryAsEWKT && v.SRID != 0 {
+				jsonStruct[col] = fmt.Sprintf("SRID=%d;%s", v.SRID, v.Val)
+			} else {
+				jsonStruct[col] = v.Val
+			}
 		case types.QValueTimestamp:
 			jsonStruct[col] = v.Val.Format("2006-01-02 15:04:05.999999")
 		case types.QValueTimestampTZ:
