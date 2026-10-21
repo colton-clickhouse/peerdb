@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/PeerDB-io/peerdb/flow/shared"
 )
 
 // specialValueColumns are the columns of the special-values tests: NaN and ±Infinity numerics and floats, ±infinity
@@ -102,4 +104,34 @@ func (s CRDBPGSuite) Test_Special_Values_Snapshot_And_CDC() {
 	if len(bad) > 0 {
 		t.Errorf("%d special-value mismatches on the destination:\n  %s", len(bad), strings.Join(bad, "\n  "))
 	}
+}
+
+// Mirrors created before InternalVersion_PgSpecialValues keep writing NULL for NaN decimals, and NULL for NaN
+// floats through CDC (the snapshot keeps them).
+func (s CRDBPGSuite) Test_Special_Values_Old_Version() {
+	t := s.t
+	srcTable := "special_values_old"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT8 PRIMARY KEY, d DECIMAL, f8 FLOAT8)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 'NaN', 'NaN')`, srcFull)))
+
+	flowConnConfig := s.startMirror(srcTable)
+	flowConnConfig.Env = map[string]string{"PEERDB_FORCE_INTERNAL_VERSION": fmt.Sprint(shared.InternalVersion_PgSpecialValues - 1)}
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 3*time.Minute, "snapshot row", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 1
+	})
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (2, 'NaN', 'NaN')`, srcFull)))
+	EnvWaitFor(t, env, 3*time.Minute, "cdc row", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 2
+	})
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+
+	require.Equal(t, "NULL|NaN|NULL|NULL", s.destText(fmt.Sprintf(`SELECT string_agg(coalesce(d::text, 'NULL') || '|' ||
+		coalesce(f8::text, 'NULL'), '|' ORDER BY id) FROM %s`, dstFull)))
 }
