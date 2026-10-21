@@ -16,6 +16,6 @@ func TestInvalidHexWkb(t *testing.T) {
 }
 
 func TestInvalidWkt(t *testing.T) {
-	_, err := GeoToWKB("invalid")
+	_, err := GeoToWKB("invalid", 0)
 	require.Error(t, err)
 }
