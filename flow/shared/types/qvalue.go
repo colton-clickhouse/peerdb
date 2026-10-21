@@ -338,7 +338,8 @@ func (v QValueUint64Set) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueTimestamp struct {
-	Val time.Time
+	Val     time.Time
+	Special SpecialValue // optional: NaN or +-infinity, which Val can't hold (Val is then a zero value)
 }
 
 func (QValueTimestamp) Kind() QValueKind {
@@ -354,7 +355,8 @@ func (v QValueTimestamp) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueTimestampTZ struct {
-	Val time.Time
+	Val     time.Time
+	Special SpecialValue // optional: NaN or +-infinity, which Val can't hold (Val is then a zero value)
 }
 
 func (QValueTimestampTZ) Kind() QValueKind {
@@ -370,7 +372,8 @@ func (v QValueTimestampTZ) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueDate struct {
-	Val time.Time
+	Val     time.Time
+	Special SpecialValue // optional: NaN or +-infinity, which Val can't hold (Val is then a zero value)
 }
 
 func (QValueDate) Kind() QValueKind {
@@ -456,6 +459,7 @@ type QValueNumeric struct {
 	Val       decimal.Decimal
 	Precision int16
 	Scale     int16
+	Special   SpecialValue // optional: NaN or +-Infinity, which Val can't hold (Val is then a zero value)
 }
 
 func (QValueNumeric) Kind() QValueKind {
@@ -765,8 +769,9 @@ func (v QValueArrayString) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayDate struct {
-	Val   []time.Time
-	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
+	Val      []time.Time
+	Nulls    []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
+	Specials []SpecialValue // optional: Specials[i] marks Val[i] as NaN or +-infinity (its Val is a zero value); nil means none
 }
 
 func (QValueArrayDate) Kind() QValueKind {
@@ -803,8 +808,9 @@ func (v QValueArrayTime) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayTimestamp struct {
-	Val   []time.Time
-	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
+	Val      []time.Time
+	Nulls    []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
+	Specials []SpecialValue // optional: Specials[i] marks Val[i] as NaN or +-infinity (its Val is a zero value); nil means none
 }
 
 func (QValueArrayTimestamp) Kind() QValueKind {
@@ -822,8 +828,9 @@ func (v QValueArrayTimestamp) LValue(ls *lua.LState) lua.LValue {
 }
 
 type QValueArrayTimestampTZ struct {
-	Val   []time.Time
-	Nulls []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
+	Val      []time.Time
+	Nulls    []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
+	Specials []SpecialValue // optional: Specials[i] marks Val[i] as NaN or +-infinity (its Val is a zero value); nil means none
 }
 
 func (QValueArrayTimestampTZ) Kind() QValueKind {
@@ -883,6 +890,7 @@ type QValueArrayNumeric struct {
 	Precision int16
 	Scale     int16
 	Nulls     []bool // optional: Nulls[i] marks Val[i] as a NULL element (its Val is a zero value); nil means none
+	Specials  []SpecialValue // optional: Specials[i] marks Val[i] as NaN or +-infinity (its Val is a zero value); nil means none
 }
 
 func (QValueArrayNumeric) Kind() QValueKind {
