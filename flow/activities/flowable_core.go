@@ -227,6 +227,11 @@ func pullAndSyncCore[TPull connectors.CDCPullConnectorCore, TSync connectors.CDC
 
 	startTime := time.Now()
 	syncState.Store(new("syncing"))
+	dstType, err := connectors.LoadPeerType(ctx, a.CatalogPool, config.DestinationName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load destination peer type: %w", err)
+	}
+
 	errGroup, errCtx := errgroup.WithContext(ctx)
 	errGroup.Go(func() error {
 		pullCtx, pullSpan := a.OtelManager.Tracer.Start(errCtx, "cdc.pull", trace.WithAttributes(
@@ -249,6 +254,7 @@ func pullAndSyncCore[TPull connectors.CDCPullConnectorCore, TSync connectors.CDC
 			RecordStream:                recordBatchPull,
 			Env:                         config.Env,
 			InternalVersion:             config.Version,
+			DestinationType:             dstType,
 		})
 		if err != nil {
 			pullSpan.RecordError(err)
