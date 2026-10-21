@@ -63,6 +63,9 @@ const (
 	// zero year) replicated like zero dates (the epoch). Older mirrors roll a zero month or day forward to 01,
 	// inventing a real date.
 	InternalVersion_MySQLZeroDatePartsAsZero
+	// Postgres, MySQL sources: TIME created as INTERVAL. MySQL TIME is a duration (-838:59:59 to 838:59:59), which
+	// time (a time of day) can't hold: older mirrors create time, and the snapshot fails on such values.
+	InternalVersion_PgMySQLTimeAsInterval
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
