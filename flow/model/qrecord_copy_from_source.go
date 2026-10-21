@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/shopspring/decimal"
 
 	geo "github.com/PeerDB-io/peerdb/flow/shared/datatypes"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
@@ -70,6 +71,35 @@ func constructNullableArray[T any](v []T, nulls []bool) any {
 		}
 	}
 	return constructArray(elems)
+}
+
+// constructSpecialArray is constructNullableArray for arrays with special elements (types.SpecialValue): conv builds
+// each element's pgtype value from its Val and special value.
+func constructSpecialArray[T any, P any](
+	v []T, nulls []bool, specials []types.SpecialValue, conv func(T, types.SpecialValue) P,
+) *pgtype.Array[*P] {
+	elems := make([]*P, len(v))
+	for i := range v {
+		if nulls == nil || !nulls[i] {
+			el := conv(v[i], specials[i])
+			elems[i] = &el
+		}
+	}
+	return constructArray(elems)
+}
+
+func pgInfinity(sv types.SpecialValue) pgtype.InfinityModifier {
+	switch sv {
+	case types.SpecialInfinity:
+		return pgtype.Infinity
+	case types.SpecialNegInfinity:
+		return pgtype.NegativeInfinity
+	}
+	return pgtype.Finite
+}
+
+func pgSpecialNumeric(sv types.SpecialValue) pgtype.Numeric {
+	return pgtype.Numeric{NaN: sv == types.SpecialNaN, InfinityModifier: pgInfinity(sv), Valid: true}
 }
 
 type QRecordCopyFromSource struct {
@@ -161,17 +191,21 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		case types.QValueInterval:
 			values[i] = v.Val
 		case types.QValueTimestamp:
-			values[i] = pgtype.Timestamp{Time: v.Val, Valid: true}
+			values[i] = pgtype.Timestamp{Time: v.Val, InfinityModifier: pgInfinity(v.Special), Valid: true}
 		case types.QValueTimestampTZ:
-			values[i] = pgtype.Timestamptz{Time: v.Val, Valid: true}
+			values[i] = pgtype.Timestamptz{Time: v.Val, InfinityModifier: pgInfinity(v.Special), Valid: true}
 		case types.QValueUUID:
 			values[i] = v.Val
 		case types.QValueNumeric:
-			values[i] = v.Val
+			if v.Special != types.SpecialNone {
+				values[i] = pgSpecialNumeric(v.Special)
+			} else {
+				values[i] = v.Val
+			}
 		case types.QValueBytes:
 			values[i] = v.Val
 		case types.QValueDate:
-			values[i] = pgtype.Date{Time: v.Val, Valid: true}
+			values[i] = pgtype.Date{Time: v.Val, InfinityModifier: pgInfinity(v.Special), Valid: true}
 		case types.QValueHStore:
 			values[i] = v.Val
 		case types.QValueGeography:
@@ -197,13 +231,31 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		case types.QValueArrayEnum:
 			values[i] = constructNullableArray(stripNulBytesAll(v.Val), v.Nulls)
 		case types.QValueArrayDate:
-			values[i] = constructNullableArray(v.Val, v.Nulls)
+			if v.Specials != nil {
+				values[i] = constructSpecialArray(v.Val, v.Nulls, v.Specials, func(t time.Time, sv types.SpecialValue) pgtype.Date {
+					return pgtype.Date{Time: t, InfinityModifier: pgInfinity(sv), Valid: true}
+				})
+			} else {
+				values[i] = constructNullableArray(v.Val, v.Nulls)
+			}
 		case types.QValueArrayInterval:
 			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayTimestamp:
-			values[i] = constructNullableArray(v.Val, v.Nulls)
+			if v.Specials != nil {
+				values[i] = constructSpecialArray(v.Val, v.Nulls, v.Specials, func(t time.Time, sv types.SpecialValue) pgtype.Timestamp {
+					return pgtype.Timestamp{Time: t, InfinityModifier: pgInfinity(sv), Valid: true}
+				})
+			} else {
+				values[i] = constructNullableArray(v.Val, v.Nulls)
+			}
 		case types.QValueArrayTimestampTZ:
-			values[i] = constructNullableArray(v.Val, v.Nulls)
+			if v.Specials != nil {
+				values[i] = constructSpecialArray(v.Val, v.Nulls, v.Specials, func(t time.Time, sv types.SpecialValue) pgtype.Timestamptz {
+					return pgtype.Timestamptz{Time: t, InfinityModifier: pgInfinity(sv), Valid: true}
+				})
+			} else {
+				values[i] = constructNullableArray(v.Val, v.Nulls)
+			}
 		case types.QValueArrayInt16:
 			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayInt32:
@@ -219,7 +271,16 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		case types.QValueArrayUUID:
 			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayNumeric:
-			values[i] = constructNullableArray(v.Val, v.Nulls)
+			if v.Specials != nil {
+				values[i] = constructSpecialArray(v.Val, v.Nulls, v.Specials, func(d decimal.Decimal, sv types.SpecialValue) pgtype.Numeric {
+					if sv != types.SpecialNone {
+						return pgSpecialNumeric(sv)
+					}
+					return pgtype.Numeric{Int: d.Coefficient(), Exp: d.Exponent(), Valid: true}
+				})
+			} else {
+				values[i] = constructNullableArray(v.Val, v.Nulls)
+			}
 		case types.QValueJSON:
 			if v.IsArray {
 				var arrayJ []any

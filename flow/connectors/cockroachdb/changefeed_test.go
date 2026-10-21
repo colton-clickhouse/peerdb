@@ -353,14 +353,14 @@ func TestQValueFromChangefeedJSON(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			qv, err := qvalueFromChangefeedJSON(field(tc.kind), json.RawMessage(tc.raw))
+			qv, err := qvalueFromChangefeedJSON(field(tc.kind), json.RawMessage(tc.raw), false)
 			require.NoError(t, err)
 			require.Equal(t, tc.expected, qv)
 		})
 	}
 
 	t.Run("float NaN", func(t *testing.T) {
-		qv, err := qvalueFromChangefeedJSON(field(types.QValueKindFloat64), json.RawMessage(`"NaN"`))
+		qv, err := qvalueFromChangefeedJSON(field(types.QValueKindFloat64), json.RawMessage(`"NaN"`), false)
 		require.NoError(t, err)
 		require.True(t, math.IsNaN(qv.(types.QValueFloat64).Val))
 	})
@@ -368,20 +368,20 @@ func TestQValueFromChangefeedJSON(t *testing.T) {
 	t.Run("numeric NaN not nullable", func(t *testing.T) {
 		qv, err := qvalueFromChangefeedJSON(
 			types.QField{Name: "col", Type: types.QValueKindNumeric, Nullable: false},
-			json.RawMessage(`"Infinity"`))
+			json.RawMessage(`"Infinity"`), false)
 		require.NoError(t, err)
 		require.Equal(t, types.QValueNumeric{}, qv)
 	})
 
 	t.Run("big numeric preserves precision", func(t *testing.T) {
-		qv, err := qvalueFromChangefeedJSON(field(types.QValueKindNumeric), json.RawMessage(`12345678901234567890.1234567890`))
+		qv, err := qvalueFromChangefeedJSON(field(types.QValueKindNumeric), json.RawMessage(`12345678901234567890.1234567890`), false)
 		require.NoError(t, err)
 		require.Equal(t, "12345678901234567890.123456789", qv.(types.QValueNumeric).Val.String())
 	})
 
 	t.Run("geometry from geojson", func(t *testing.T) {
 		qv, err := qvalueFromChangefeedJSON(field(types.QValueKindGeometry),
-			json.RawMessage(`{"coordinates": [1, 2], "type": "Point"}`))
+			json.RawMessage(`{"coordinates": [1, 2], "type": "Point"}`), false)
 		require.NoError(t, err)
 		require.Equal(t, "POINT (1 2)", qv.(types.QValueGeometry).Val)
 	})
@@ -390,18 +390,18 @@ func TestQValueFromChangefeedJSON(t *testing.T) {
 		// GeoJSON carries no SRID; the snapshot path emits SRID=4326;... from
 		// EWKB, so the changefeed path must match
 		qv, err := qvalueFromChangefeedJSON(field(types.QValueKindGeography),
-			json.RawMessage(`{"coordinates": [-74, 40.7], "type": "Point"}`))
+			json.RawMessage(`{"coordinates": [-74, 40.7], "type": "Point"}`), false)
 		require.NoError(t, err)
 		require.Equal(t, "SRID=4326;POINT (-74 40.7)", qv.(types.QValueGeography).Val)
 	})
 
 	t.Run("invalid int", func(t *testing.T) {
-		_, err := qvalueFromChangefeedJSON(field(types.QValueKindInt64), json.RawMessage(`"abc"`))
+		_, err := qvalueFromChangefeedJSON(field(types.QValueKindInt64), json.RawMessage(`"abc"`), false)
 		require.Error(t, err)
 	})
 
 	t.Run("empty bytes", func(t *testing.T) {
-		qv, err := qvalueFromChangefeedJSON(field(types.QValueKindBytes), json.RawMessage(`"\\x"`))
+		qv, err := qvalueFromChangefeedJSON(field(types.QValueKindBytes), json.RawMessage(`"\\x"`), false)
 		require.NoError(t, err)
 		require.Empty(t, qv.(types.QValueBytes).Val)
 	})
@@ -409,7 +409,7 @@ func TestQValueFromChangefeedJSON(t *testing.T) {
 	t.Run("bytes without hex prefix fail instead of reinterpreting text", func(t *testing.T) {
 		// BYTES emissions always carry the \x prefix (verified live); bare
 		// text means the column type drifted and must not be guessed at
-		_, err := qvalueFromChangefeedJSON(field(types.QValueKindBytes), json.RawMessage(`"plain text"`))
+		_, err := qvalueFromChangefeedJSON(field(types.QValueKindBytes), json.RawMessage(`"plain text"`), false)
 		require.ErrorContains(t, err, "hex byte encoding")
 	})
 }

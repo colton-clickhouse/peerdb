@@ -73,6 +73,11 @@ const (
 	// cursor (for at most an hour). Older mirrors end the batch at the deadline with the cursor unchanged, so a
 	// transaction or a catch-up that takes longer to emit than the batch window replays forever.
 	InternalVersion_CockroachHoldBatchForResolved
+	// CockroachDB to Postgres: NaN and +-Infinity decimals and +-infinity dates and timestamps, scalar and in arrays, are
+	// marked (types.SpecialValue) and written as such, and Postgres destinations write NaN / +-Infinity floats in CDC
+	// (from every source). Older mirrors write NULL (0, or 0001-01-01, when NOT NULL or inside an array), CDC floats
+	// NULL, and fail in CDC on an infinity date or timestamp.
+	InternalVersion_PgSpecialValues
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
