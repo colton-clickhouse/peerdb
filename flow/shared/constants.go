@@ -58,6 +58,11 @@ const (
 	// CockroachDB: NULL elements inside arrays are marked (types.ArrayNulls), and Postgres destinations write them as
 	// NULL. Older mirrors write the element type's zero value ({1,NULL,3} -> {1,0,3}, text '', bool false, ...).
 	InternalVersion_ArrayConversionIntegrity
+	// CockroachDB to Postgres: NaN and +-Infinity decimals and +-infinity dates and timestamps, scalar and in arrays, are
+	// marked (types.SpecialValue) and written as such, and Postgres destinations write NaN / +-Infinity floats in CDC
+	// (from every source). Older mirrors write NULL (0, or 0001-01-01, when NOT NULL or inside an array), CDC floats
+	// NULL, and fail in CDC on an infinity date or timestamp.
+	InternalVersion_PgSpecialValues
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
