@@ -34,12 +34,16 @@ func GeoValidate(hexWkb string) (string, error) {
 	return wkt, nil
 }
 
-func GeoToWKB(wkt string) ([]byte, error) {
+// GeoToWKB converts WKT to WKB, or to EWKB carrying srid when it isn't 0.
+func GeoToWKB(wkt string, srid int) ([]byte, error) {
 	// UnmarshalWKB performs geometry validation along with WKB parsing
 	geometryObject, geoErr := geom.NewGeomFromWKT(wkt)
 	if geoErr != nil {
 		return []byte{}, geoErr
 	}
 
+	if srid != 0 {
+		return geometryObject.SetSRID(srid).ToEWKBWithSRID(), nil
+	}
 	return geometryObject.ToWKB(), nil
 }

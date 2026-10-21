@@ -66,6 +66,9 @@ const (
 	// Postgres, MySQL sources: TIME created as INTERVAL. MySQL TIME is a duration (-838:59:59 to 838:59:59), which
 	// time (a time of day) can't hold: older mirrors create time, and the snapshot fails on such values.
 	InternalVersion_PgMySQLTimeAsInterval
+	// Postgres: geometry and geography keep their SRID (EWKB in the snapshot, EWKT in CDC). Older mirrors write
+	// the snapshot with SRID 0, and MySQL's SRID through CDC too.
+	InternalVersion_PgGeoKeepSRID
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
