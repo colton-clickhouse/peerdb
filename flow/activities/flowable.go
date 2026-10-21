@@ -311,6 +311,12 @@ func (a *FlowableActivity) CreateNormalizedTable(
 	if err != nil {
 		return nil, err
 	}
+	// destinations can map a type by source (MySQL TIME is a duration)
+	if err := a.CatalogPool.QueryRow(ctx,
+		"SELECT p.type FROM flows f JOIN peers p ON p.id = f.source_peer WHERE f.name = $1", config.FlowName,
+	).Scan(&config.SourcePeerType); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("failed to get source peer type: %w", err)
+	}
 
 	numTablesToSetup.Store(int32(len(tableNameSchemaMapping)))
 	tableExistsMapping := make(map[string]bool, len(tableNameSchemaMapping))
