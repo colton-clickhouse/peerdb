@@ -31,6 +31,15 @@ const changefeedSlotName = "changefeed"
 
 const resolvedLagWarnThreshold = time.Hour
 
+// A batch whose cursor hasn't advanced yet stays open past its sync interval and batch size (holdForResolved) for at
+// most changefeedCatchUpMaxDuration, and while it does the stream may stay silent for changefeedCatchUpStallWindow
+// before the session counts as stalled (a catch-up scan can go quiet over ranges without changes). Past either, the
+// batch ends without a covering resolved timestamp as before, and frozenCursorTracker takes over.
+const (
+	changefeedCatchUpMaxDuration = time.Hour
+	changefeedCatchUpStallWindow = 5 * time.Minute
+)
+
 func (c *CockroachDBConnector) EnsurePullability(
 	ctx context.Context, req *protos.EnsurePullabilityBatchInput,
 ) (*protos.EnsurePullabilityBatchOutput, error) {
@@ -124,6 +133,10 @@ type changefeedPullState struct {
 	bufferSeq        uint64
 	bufferedBytes    int64
 	cursor           crdbHLC
+	startCursor      crdbHLC // the cursor the pull started from
+	pullStart        time.Time
+	holdForResolved  bool // InternalVersion_CockroachHoldBatchForResolved
+	holdLogged       bool
 	resolvedInterval time.Duration
 	recordCount      uint32
 	batchDeadline    time.Time
@@ -229,6 +242,9 @@ func (state *changefeedPullState) watchdogWindow() time.Duration {
 		// the deadlines below don't cut a strict batch, so they don't bound its silence either
 		return max(min(stallWindow, time.Until(state.strictUntil)), time.Second)
 	}
+	if (state.recordCount > 0 || len(state.buffer) > 0) && state.holdingForResolved(time.Now()) {
+		return changefeedCatchUpStallWindow
+	}
 	if !state.graceDeadline.IsZero() {
 		return max(time.Until(state.graceDeadline), time.Second)
 	}
@@ -236,6 +252,32 @@ func (state *changefeedPullState) watchdogWindow() time.Duration {
 		return max(time.Until(state.batchDeadline)+2*state.resolvedInterval, time.Second)
 	}
 	return stallWindow
+}
+
+// holdingForResolved reports whether the batch has to stay open past its sync interval and batch size: no resolved
+// timestamp has advanced the cursor yet. A changefeed emits the first resolved timestamp past a transaction (or past a
+// catch-up from an old cursor) only once it has emitted every row before it, so when that takes longer than the batch
+// window, ending the batch leaves the stored cursor where it was, and the next batch restarts the changefeed from it
+// and replays the same rows, now with a larger backlog behind them: forever. Kept open, the batch ends on
+// that resolved timestamp, which covers everything emitted so far. The buffer's size limit still bounds memory.
+func (state *changefeedPullState) holdingForResolved(now time.Time) bool {
+	return state.holdForResolved && !state.cursor.After(state.startCursor) &&
+		now.Before(state.pullStart.Add(changefeedCatchUpMaxDuration))
+}
+
+// batchCutReason says why the batch has to end now without a covering resolved timestamp, or returns "" to keep
+// reading.
+func (state *changefeedPullState) batchCutReason(now time.Time) string {
+	switch {
+	case !state.graceDeadline.IsZero() && !now.Before(state.graceDeadline):
+		// the grace window closed without a covering resolved timestamp
+		return "batch filled but no covering resolved timestamp arrived within the grace window"
+	case (state.recordCount > 0 || len(state.buffer) > 0) &&
+		!now.Before(state.batchDeadline.Add(2*state.resolvedInterval)):
+		// records are flowing but resolved timestamps stalled past the idle deadline
+		return "batch deadline passed without a covering resolved timestamp"
+	}
+	return ""
 }
 
 func (c *CockroachDBConnector) PullRecords(
@@ -276,6 +318,9 @@ func (c *CockroachDBConnector) PullRecords(
 		schemas:          make(map[string]*changefeedTableSchema, len(req.TableNameMapping)),
 		buffer:           make(map[string]*bufferedChangefeedRecord),
 		cursor:           cursor,
+		startCursor:      cursor,
+		pullStart:        time.Now(),
+		holdForResolved:  req.InternalVersion >= shared.InternalVersion_CockroachHoldBatchForResolved,
 		resolvedInterval: changefeedResolvedInterval,
 	}
 	if frozen {
@@ -533,28 +578,24 @@ func (c *CockroachDBConnector) runChangefeedSession(
 			watchdog.Reset(state.watchdogWindow())
 			continue
 		}
-		if !state.graceDeadline.IsZero() && !now.Before(state.graceDeadline) {
-			// the grace window closed without a covering resolved timestamp:
-			// hand over the buffer (emitting past the checkpoint, so it may
-			// replay) rather than cut an empty batch and re-read the same
-			// window next time
-			if err := c.emitBuffered(ctx, state, nil,
-				"batch filled but no covering resolved timestamp arrived within the grace window"); err != nil {
-				return false, err
+		if reason := state.batchCutReason(now); reason != "" {
+			if state.holdingForResolved(now) {
+				if !state.holdLogged {
+					state.holdLogged = true
+					c.logger.Info("[cockroachdb] keeping the batch open until a resolved timestamp advances the cursor: "+reason,
+						slog.String("cursor", state.cursor.String()),
+						slog.Uint64("records", uint64(state.recordCount)),
+						slog.Int("bufferedRecords", len(state.buffer)))
+				}
+			} else {
+				// hand over the buffer (emitting past the checkpoint, so it
+				// may replay) and cut the batch on the last known checkpoint
+				// rather than sit on the data indefinitely
+				if err := c.emitBuffered(ctx, state, nil, reason); err != nil {
+					return false, err
+				}
+				return true, nil
 			}
-			return true, nil
-		}
-		if (state.recordCount > 0 || len(state.buffer) > 0) &&
-			!now.Before(state.batchDeadline.Add(2*state.resolvedInterval)) {
-			// records are flowing but resolved timestamps stalled past the
-			// idle deadline: hand over whatever is buffered (emitting past the
-			// checkpoint, so it may replay) and cut the batch on the last
-			// known checkpoint rather than sit on the data indefinitely
-			if err := c.emitBuffered(ctx, state, nil,
-				"batch deadline passed without a covering resolved timestamp"); err != nil {
-				return false, err
-			}
-			return true, nil
 		}
 		watchdog.Reset(state.watchdogWindow())
 	}
@@ -632,6 +673,9 @@ func (c *CockroachDBConnector) handleResolved(
 		c.logger.Info("[cockroachdb] changefeed cursor advanced again", slog.String("from", state.strictFrom.String()),
 			slog.String("to", ts.String()))
 		return true, nil
+	case state.recordCount > 0 && state.holdingForResolved(now):
+		// a resolved timestamp at the start cursor doesn't end the batch
+		return false, nil
 	case !state.graceDeadline.IsZero():
 		return true, nil
 	case state.recordCount > 0:
