@@ -289,6 +289,11 @@ func (c *PostgresConnector) ValidateMirrorDestination(
 		}
 	}
 
+	// also before the resync shortcut: recreated tables would get the same truncated names
+	if err := longIdentifiersError(cfg.TableMappings, tableNameSchemaMapping); err != nil {
+		return err
+	}
+
 	if cfg.Resync {
 		return nil // no need to validate schema for resync, as we will create or replace the tables
 	}
@@ -402,4 +407,34 @@ func keylessTablesError(names []string, schemas map[string]*protos.TableSchema) 
 	}
 	return fmt.Errorf("tables without a primary key can't be replicated with CDC to Postgres: %s; "+
 		"add a primary key on the source or remove them from the mirror", strings.Join(keyless, ", "))
+}
+
+// maxIdentifierBytes is Postgres's identifier limit (NAMEDATALEN - 1)
+const maxIdentifierBytes = 63
+
+// longIdentifiersError names the destination schemas, tables and columns longer than maxIdentifierBytes, or
+// is nil. Postgres truncates longer names silently, so the target's names would differ from the source's,
+// and two names sharing their first 63 bytes collide, which fails table setup for the whole mirror.
+func longIdentifiersError(tableMappings []*protos.TableMapping, schemas map[string]*protos.TableSchema) error {
+	var long []string
+	for _, tableMapping := range tableMappings {
+		dst := tableMapping.DestinationTableIdentifier
+		namespace, table, _ := strings.Cut(dst, ".")
+		if len(namespace) > maxIdentifierBytes || len(table) > maxIdentifierBytes {
+			long = append(long, "table "+dst)
+		}
+		if schema, ok := schemas[tableMapping.SourceTableIdentifier]; ok {
+			for _, column := range schema.Columns {
+				if len(column.Name) > maxIdentifierBytes && !slices.Contains(tableMapping.Exclude, column.Name) {
+					long = append(long, "column "+dst+"."+column.Name)
+				}
+			}
+		}
+	}
+	if len(long) == 0 {
+		return nil
+	}
+	return fmt.Errorf("identifiers longer than %d bytes can't be replicated to Postgres, which would truncate them: %s; "+
+		"rename them on the source, map the table to a shorter destination name, or exclude the columns",
+		maxIdentifierBytes, strings.Join(long, ", "))
 }
