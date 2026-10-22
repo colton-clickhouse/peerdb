@@ -299,15 +299,15 @@ func (c *MySqlConnector) getTableSchemaForTable(
 			return nil, err
 		}
 		qkind = tinyInt1Kind(qkind, dataType, columnSettings[columnName], tinyInt1AsInt)
+		extra, err := rs.GetString(idx, 7)
+		if err != nil {
+			return nil, err
+		}
 		var defaultExpr *string
 		if defaultIsNull, err := rs.IsNull(idx, 6); err != nil {
 			return nil, err
 		} else if !defaultIsNull {
 			columnDefault, err := rs.GetString(idx, 6)
-			if err != nil {
-				return nil, err
-			}
-			extra, err := rs.GetString(idx, 7)
 			if err != nil {
 				return nil, err
 			}
@@ -317,11 +317,12 @@ func (c *MySqlConnector) getTableSchemaForTable(
 		}
 
 		column := &protos.FieldDescription{
-			Name:         columnName,
-			Type:         string(qkind),
-			TypeModifier: datatypes.MakeNumericTypmod(int32(numericPrecision), int32(numericScale)),
-			Nullable:     isNullable == "YES",
-			DefaultExpr:  defaultExpr,
+			Name:          columnName,
+			Type:          string(qkind),
+			TypeModifier:  datatypes.MakeNumericTypmod(int32(numericPrecision), int32(numericScale)),
+			Nullable:      isNullable == "YES",
+			DefaultExpr:   defaultExpr,
+			AutoIncrement: strings.Contains(strings.ToLower(extra), "auto_increment"),
 		}
 		columns = append(columns, column)
 
