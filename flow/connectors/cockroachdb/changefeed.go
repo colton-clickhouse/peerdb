@@ -150,8 +150,8 @@ type changefeedTableSchema struct {
 	nullableEnabled bool
 	// arrayNullElements marks NULL array elements (InternalVersion_ArrayNullElements)
 	arrayNullElements bool
-	// specialValues marks NaN and infinity values for a Postgres destination (InternalVersion_PgSpecialValues)
-	specialValues bool
+	// pg are the conversions for a Postgres destination
+	pg pgValues
 }
 
 // newChangefeedTableSchema builds the cached per-table schema for envelope
@@ -219,7 +219,7 @@ func changefeedRecordItems(
 		if !ok {
 			continue
 		}
-		qv, err := qvalueFromChangefeedJSON(field, raw, schema.specialValues)
+		qv, err := qvalueFromChangefeedJSON(field, raw, schema.pg)
 		if err != nil {
 			return items, fmt.Errorf("column %s as %s: %w"+
 				" (the source column type may have changed; resync the mirror to pick up the new type)",
@@ -273,7 +273,7 @@ func changefeedKeyItems(
 		if !ok {
 			return items, fmt.Errorf("primary key column %s missing from cached schema", col)
 		}
-		qv, err := qvalueFromChangefeedJSON(field, elems[i], schema.specialValues)
+		qv, err := qvalueFromChangefeedJSON(field, elems[i], schema.pg)
 		if err != nil {
 			return items, fmt.Errorf("primary key column %s: %w", col, err)
 		}
@@ -336,11 +336,11 @@ func jsonString(raw json.RawMessage) (string, error) {
 
 // qvalueFromChangefeedJSON converts one changefeed JSON column value into the
 // QValue matching field.Type.
-func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, special bool) (types.QValue, error) {
+func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, pg pgValues) (types.QValue, error) {
 	if isJSONNull(raw) {
 		return types.QValueNull(field.Type), nil
 	}
-	if special {
+	if pg.specialValues {
 		if qv, ok := changefeedSpecialValue(field, raw); ok {
 			return qv, nil
 		}
@@ -458,6 +458,9 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, special b
 		v, err := parseWithString(raw, parseChangefeedTime)
 		if err != nil {
 			return nil, err
+		}
+		if !pg.time2400 {
+			v = min(v, maxTimeMicroseconds*time.Microsecond)
 		}
 		return types.QValueTime{Val: v}, nil
 	case types.QValueKindTimeTZ:
@@ -577,7 +580,7 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, special b
 			return nil, err
 		}
 		var specials []types.SpecialValue
-		if special {
+		if pg.specialValues {
 			specials = changefeedArraySpecials(raw, field)
 		}
 		return types.QValueArrayNumeric{Val: a, Precision: field.Precision, Scale: field.Scale, Specials: specials}, nil
@@ -605,7 +608,7 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, special b
 			parseElem = parseChangefeedTimestampTZ
 		}
 		a, err := changefeedArray(raw, func(el json.RawMessage) (time.Time, error) {
-			if isJSONNull(el) || (special && changefeedTimeSpecial(el) != types.SpecialNone) {
+			if isJSONNull(el) || (pg.specialValues && changefeedTimeSpecial(el) != types.SpecialNone) {
 				return time.Time{}, nil
 			}
 			return parseWithString(el, parseElem)
@@ -614,7 +617,7 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, special b
 			return nil, err
 		}
 		var specials []types.SpecialValue
-		if special {
+		if pg.specialValues {
 			specials = changefeedArraySpecials(raw, field)
 		}
 		switch field.Type {
@@ -924,8 +927,10 @@ func parseChangefeedDate(s string) (time.Time, error) {
 }
 
 func parseChangefeedTime(s string) (time.Duration, error) {
-	// CockroachDB permits this extreme value for time
-	s = strings.Replace(s, "24:00:00", "23:59:59.999999", 1)
+	// CockroachDB permits this extreme value for time, which time.Parse doesn't
+	if strings.HasPrefix(s, "24:00:00") && strings.Trim(strings.TrimPrefix(s, "24:00:00"), ".0") == "" {
+		return 24 * time.Hour, nil
+	}
 	t, err := time.Parse("15:04:05.999999999", s)
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse time %q: %w", s, err)
