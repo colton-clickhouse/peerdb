@@ -189,6 +189,7 @@ type ToJSONOptions struct {
 	ArrayNullElements    bool // write marked NULL array elements (types.ArrayNulls) as JSON null
 	NonFiniteFloats      bool // write NaN and +-Inf floats as their Postgres input text instead of JSON null
 	NoNumericInfinity    bool // write numeric +-Infinity as null (WithoutNumericInfinity), for Postgres before 14
+	PgIntervals          bool // write intervals as Postgres interval text instead of PeerDB's interval JSON
 }
 
 func NewToJSONOptions(unnestCols []string, hstoreAsJSON bool) ToJSONOptions {
