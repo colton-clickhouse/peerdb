@@ -188,6 +188,7 @@ type ToJSONOptions struct {
 	StripNulBytes        bool // drop U+0000 from strings (PG destinations can't store it)
 	ArrayNullElements    bool // write marked NULL array elements (types.ArrayNulls) as JSON null
 	NonFiniteFloats      bool // write NaN and +-Inf floats as their Postgres input text instead of JSON null
+	PgIntervals          bool // write intervals as Postgres interval text instead of PeerDB's interval JSON
 }
 
 func NewToJSONOptions(unnestCols []string, hstoreAsJSON bool) ToJSONOptions {

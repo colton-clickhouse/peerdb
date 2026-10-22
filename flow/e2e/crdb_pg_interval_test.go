@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/PeerDB-io/peerdb/flow/shared"
 )
 
 // #7: INTERVAL and INTERVAL[] landed as text / text[] holding PeerDB's interval JSON ({"hours":4,...}). They should
@@ -52,4 +54,35 @@ func (s CRDBPGSuite) Test_Interval_Snapshot_And_CDC() {
 	for id, w := range want {
 		require.Equal(t, w, s.destText(fmt.Sprintf(`SELECT i::text || '|' || a::text FROM %s WHERE id = %d`, dstFull, id)), "id %d", id)
 	}
+}
+
+// Mirrors from before InternalVersion_PgInterval keep text holding PeerDB's interval JSON.
+func (s CRDBPGSuite) Test_Interval_Old_Version() {
+	t := s.t
+	srcTable := "interval_old"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT8 PRIMARY KEY, i INTERVAL)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, '3 days 04:00:00')`, srcFull)))
+
+	flowConnConfig := s.startMirror(srcTable)
+	flowConnConfig.Env = map[string]string{"PEERDB_FORCE_INTERNAL_VERSION": fmt.Sprint(shared.InternalVersion_PgInterval - 1)}
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 3*time.Minute, "snapshot row", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 1
+	})
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (2, '3 days 04:00:00')`, srcFull)))
+	EnvWaitFor(t, env, 3*time.Minute, "cdc row", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 2
+	})
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+
+	require.Equal(t, "text", s.destText(fmt.Sprintf(
+		`SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = '%s'::regclass AND attname = 'i'`, dstFull)))
+	const old = `{"hours":4,"days":3,"valid":true}`
+	require.Equal(t, old+"|"+old, s.destText(fmt.Sprintf(`SELECT string_agg(i, '|' ORDER BY id) FROM %s`, dstFull)))
 }
