@@ -62,7 +62,7 @@ func TestCopyWithoutNumericInfinity(t *testing.T) {
 	}})
 	inf := types.QValueNumeric{Special: types.SpecialInfinity}
 	stream.Records <- []types.QValue{inf, inf}
-	src := NewQRecordCopyFromSource(stream).WithoutNumericInfinity()
+	src := &QRecordCopyFromSource{stream: stream, noNumericInfinity: true}
 	require.True(t, src.Next())
 	values, err := src.Values()
 	require.NoError(t, err)
