@@ -6,6 +6,9 @@ import (
 	"maps"
 	"math"
 	"reflect"
+	"slices"
+	"strings"
+	"time"
 
 	"github.com/PeerDB-io/peerdb/flow/shared/datatypes"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
@@ -165,19 +168,19 @@ func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 			if v.Special != types.SpecialNone {
 				jsonStruct[col] = v.Special.Text()
 			} else {
-				jsonStruct[col] = v.Val.Format("2006-01-02 15:04:05.999999")
+				jsonStruct[col] = formatTime(v.Val, timestampLayout, opts)
 			}
 		case types.QValueTimestampTZ:
 			if v.Special != types.SpecialNone {
 				jsonStruct[col] = v.Special.Text()
 			} else {
-				jsonStruct[col] = v.Val.Format("2006-01-02 15:04:05.999999-0700")
+				jsonStruct[col] = formatTime(v.Val, timestampTZLayout, opts)
 			}
 		case types.QValueDate:
 			if v.Special != types.SpecialNone {
 				jsonStruct[col] = v.Special.Text()
 			} else {
-				jsonStruct[col] = v.Val.Format("2006-01-02")
+				jsonStruct[col] = formatTime(v.Val, dateLayout, opts)
 			}
 		case types.QValueTime:
 			jsonStruct[col] = types.FormatExtendedTimeDuration(v.Val)
@@ -187,9 +190,13 @@ func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 			dateArr := v.Val
 			formattedDateArr := make([]string, 0, len(dateArr))
 			for _, val := range dateArr {
-				formattedDateArr = append(formattedDateArr, val.Format("2006-01-02"))
+				formattedDateArr = append(formattedDateArr, formatTime(val, dateLayout, opts))
 			}
 			jsonStruct[col] = formattedDateArr
+		case types.QValueArrayTimestamp:
+			jsonStruct[col] = timeArray(v.Val, timestampLayout, opts)
+		case types.QValueArrayTimestampTZ:
+			jsonStruct[col] = timeArray(v.Val, timestampTZLayout, opts)
 		case types.QValueArrayTime:
 			timeArr := v.Val
 			formattedTimeArr := make([]string, 0, len(timeArr))
@@ -271,6 +278,34 @@ func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 	}
 
 	return jsonStruct, nil
+}
+
+const (
+	dateLayout        = "2006-01-02"
+	timestampLayout   = "2006-01-02 15:04:05.999999"
+	timestampTZLayout = "2006-01-02 15:04:05.999999-0700"
+)
+
+// formatTime is t.Format(layout), a layout starting with the year. With PgBCDates, years before 1 AD are written as
+// Postgres reads them ("0044-03-15 12:00:00 BC" for Go's year -43): Postgres rejects Go's astronomical "-0043-03-15".
+func formatTime(t time.Time, layout string, opts ToJSONOptions) string {
+	if !opts.PgBCDates || t.Year() > 0 {
+		return t.Format(layout)
+	}
+	return fmt.Sprintf("%04d", 1-t.Year()) + t.Format(strings.TrimPrefix(layout, "2006")) + " BC"
+}
+
+// timeArray is a timestamp array for JSON. time.Time can't marshal years before 0, so with PgBCDates an array holding
+// a year before 1 AD is written as text, like the scalars; others keep time.Time's encoding.
+func timeArray(v []time.Time, layout string, opts ToJSONOptions) any {
+	if !opts.PgBCDates || !slices.ContainsFunc(v, func(t time.Time) bool { return t.Year() <= 0 }) {
+		return v
+	}
+	out := make([]string, len(v))
+	for i, t := range v {
+		out[i] = formatTime(t, layout, opts)
+	}
+	return out
 }
 
 // nonFiniteFloat is f for JSON: NaN and +-Inf, which JSON numbers can't express, are null, or their Postgres input
