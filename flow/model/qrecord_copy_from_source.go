@@ -169,6 +169,9 @@ func (d pgDuration) IntervalValue() (pgtype.Interval, error) {
 
 // PgCopyOptions are the internal-version dependent conversions of QRecordCopyFromSource.
 type PgCopyOptions struct {
+	// IntervalColumns are the columns with an interval destination_type, whose intervals are written as intervals
+	// instead of PeerDB's interval JSON (text)
+	IntervalColumns map[string]struct{}
 	// GeoSRIDs keeps geometry / geography SRIDs (EWKB) instead of dropping them (InternalVersion_PgGeoKeepSRID)
 	GeoSRIDs bool
 }
@@ -178,7 +181,10 @@ type QRecordCopyFromSource struct {
 	currentRecord []types.QValue
 	pgGeoSRIDs    bool
 	// stripNulBytes removes U+0000 from strings (WithStripNulBytes)
-	stripNulBytes bool
+	stripNulBytes   bool
+	intervalColumns map[string]struct{}
+	// isInterval[i]: column i is one of intervalColumns (from the stream's schema, on the first record)
+	isInterval []bool
 }
 
 // WithStripNulBytes makes src remove NUL bytes from strings, which Postgres can't store (PEERDB_PG_STRIP_NUL_BYTES).
@@ -192,9 +198,10 @@ func NewQRecordCopyFromSource(
 	opts PgCopyOptions,
 ) *QRecordCopyFromSource {
 	return &QRecordCopyFromSource{
-		stream:        stream,
-		currentRecord: nil,
-		pgGeoSRIDs:    opts.GeoSRIDs,
+		stream:          stream,
+		currentRecord:   nil,
+		pgGeoSRIDs:      opts.GeoSRIDs,
+		intervalColumns: opts.IntervalColumns,
 	}
 }
 
@@ -240,6 +247,20 @@ func (src *QRecordCopyFromSource) geoWkb(wkt string, fallbackSRID uint32) ([]byt
 }
 
 func (src *QRecordCopyFromSource) Values() ([]any, error) {
+	if src.isInterval == nil {
+		src.isInterval = make([]bool, len(src.currentRecord))
+		if len(src.intervalColumns) > 0 {
+			schema, err := src.stream.Schema()
+			if err != nil {
+				return nil, err
+			}
+			for i, field := range schema.Fields {
+				if _, ok := src.intervalColumns[field.Name]; ok && i < len(src.isInterval) {
+					src.isInterval[i] = true
+				}
+			}
+		}
+	}
 	if err := src.Err(); err != nil {
 		return nil, err
 	}
@@ -301,7 +322,15 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		case types.QValueTimeTZ:
 			values[i] = pgTimeTZ{v.Val}
 		case types.QValueInterval:
-			values[i] = v.Val
+			if src.isInterval[i] {
+				iv, err := newPgInterval(v.Val)
+				if err != nil {
+					return nil, err
+				}
+				values[i] = iv
+			} else {
+				values[i] = v.Val
+			}
 		case types.QValueTimestamp:
 			values[i] = pgtype.Timestamp{Time: v.Val, InfinityModifier: pgInfinity(v.Special), Valid: true}
 		case types.QValueTimestampTZ:
@@ -351,7 +380,15 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 				values[i] = constructNullableArray(v.Val, v.Nulls)
 			}
 		case types.QValueArrayInterval:
-			values[i] = constructNullableArray(v.Val, v.Nulls)
+			if src.isInterval[i] {
+				arr, err := pgIntervalArray(v.Val, v.Nulls)
+				if err != nil {
+					return nil, err
+				}
+				values[i] = arr
+			} else {
+				values[i] = constructNullableArray(v.Val, v.Nulls)
+			}
 		case types.QValueArrayTimestamp:
 			if v.Specials != nil {
 				values[i] = constructSpecialArray(v.Val, v.Nulls, v.Specials, func(t time.Time, sv types.SpecialValue) pgtype.Timestamp {

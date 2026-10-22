@@ -40,6 +40,7 @@ func (c *PostgresConnector) SyncQRepRecords(
 		DestinationType: protos.DBType_POSTGRES,
 		Version:         config.Version,
 		StripNulBytes:   stripNulBytes,
+		IntervalColumns: intervalColumns(config.Columns),
 	})
 }
 

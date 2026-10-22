@@ -23,6 +23,8 @@ type RecordStreamSink struct {
 	Version         uint32 // the mirror's, for CopyInto
 	// StripNulBytes removes NUL bytes from strings (PEERDB_PG_STRIP_NUL_BYTES)
 	StripNulBytes bool
+	// IntervalColumns have an interval destination_type: their intervals are written as intervals
+	IntervalColumns map[string]struct{}
 }
 
 func (stream RecordStreamSink) ExecuteQueryWithTx(
@@ -120,7 +122,8 @@ func (stream RecordStreamSink) CopyInto(ctx context.Context, _ *PostgresConnecto
 		return 0, err
 	}
 	src := model.NewQRecordCopyFromSource(stream.QRecordStream, model.PgCopyOptions{
-		GeoSRIDs: stream.Version >= shared.InternalVersion_PgGeoKeepSRID,
+		IntervalColumns: stream.IntervalColumns,
+		GeoSRIDs:        stream.Version >= shared.InternalVersion_PgGeoKeepSRID,
 	})
 	if stream.StripNulBytes {
 		src.WithStripNulBytes()
