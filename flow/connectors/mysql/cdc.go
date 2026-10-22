@@ -229,6 +229,14 @@ func (c *MySqlConnector) getTableSchemaForTable(
 	if err != nil {
 		return nil, err
 	}
+	tinyInt1AsInt, err := internal.PeerDBMySQLTinyInt1AsInt(ctx, env)
+	if err != nil {
+		return nil, err
+	}
+	columnSettings := make(map[string]*protos.ColumnSetting, len(tm.Columns))
+	for _, setting := range tm.Columns {
+		columnSettings[setting.SourceName] = setting
+	}
 
 	// CAST(... AS BINARY) forces a case-sensitive, collation-independent comparison on the join keys so it works with
 	// lower_case_table_names=0. The LEFT JOIN leaves seq_in_index NULL for non-primary-key columns.
@@ -289,6 +297,7 @@ func (c *MySqlConnector) getTableSchemaForTable(
 		if err != nil {
 			return nil, err
 		}
+		qkind = tinyInt1Kind(qkind, dataType, columnSettings[columnName], tinyInt1AsInt)
 
 		column := &protos.FieldDescription{
 			Name:         columnName,
@@ -1351,6 +1360,10 @@ func (c *MySqlConnector) processAlterTableQuery(ctx context.Context, catalogPool
 		sourceSchemaName = stmtSchema
 	}
 	sourceTableName := sourceSchemaName + "." + stmt.Table.Name.String()
+	tinyInt1AsInt, err := internal.PeerDBMySQLTinyInt1AsInt(ctx, req.Env)
+	if err != nil {
+		return err
+	}
 
 	destinationTableName := req.TableNameMapping[sourceTableName].Name
 	if destinationTableName == "" {
@@ -1399,6 +1412,8 @@ func (c *MySqlConnector) processAlterTableQuery(ctx context.Context, catalogPool
 				if err != nil {
 					return err
 				}
+				// added columns have no column setting, only the mirror's choice
+				fd.Type = string(tinyInt1Kind(types.QValueKind(fd.Type), col.Tp.InfoSchemaStr(), nil, tinyInt1AsInt))
 				qkind := types.QValueKind(fd.Type)
 
 				if oldType, exists := existingColTypes[col.Name.OrigColName()]; exists && oldType != string(qkind) {

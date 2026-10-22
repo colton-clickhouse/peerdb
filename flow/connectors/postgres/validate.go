@@ -17,6 +17,7 @@ import (
 	pkg_pg "github.com/PeerDB-io/peerdb/flow/pkg/postgres"
 	"github.com/PeerDB-io/peerdb/flow/shared"
 	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
+	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
 func (c *PostgresConnector) ValidateCheck(ctx context.Context) error {
@@ -310,6 +311,9 @@ func (c *PostgresConnector) ValidateMirrorDestination(
 	if err := longPeerDBNamesError(cfg); err != nil {
 		return err
 	}
+	if err := columnTypeSettingsError(cfg.TableMappings, tableNameSchemaMapping); err != nil {
+		return err
+	}
 
 	if cfg.Resync {
 		return nil // no need to validate schema for resync, as we will create or replace the tables
@@ -480,4 +484,42 @@ func longPeerDBNamesError(cfg *protos.FlowConnectionConfigsCore) error {
 	return fmt.Errorf("names longer than %d bytes can't be used with Postgres, which would truncate them: %s; "+
 		"use a shorter mirror name (at most %d bytes) or column name", maxIdentifierBytes, strings.Join(long, ", "),
 		maxIdentifierBytes-len(getRawTableIdentifier("")))
+}
+
+// columnTypeSettingsError names the column settings whose destination_type Postgres doesn't apply, or is nil.
+// Postgres creates columns from the source's types; destination_type only picks a MySQL TINYINT(1) column's
+// decoding (smallint or boolean), which the source schema then carries.
+func columnTypeSettingsError(tableMappings []*protos.TableMapping, schemas map[string]*protos.TableSchema) error {
+	var unsupported []string
+	for _, tableMapping := range tableMappings {
+		kinds := make(map[string]types.QValueKind)
+		if schema, ok := schemas[tableMapping.SourceTableIdentifier]; ok {
+			for _, column := range schema.Columns {
+				kinds[column.Name] = types.QValueKind(column.Type)
+			}
+		}
+		for _, setting := range tableMapping.Columns {
+			if setting.DestinationType == "" {
+				continue
+			}
+			switch kind := kinds[setting.SourceName]; strings.ToLower(strings.TrimSpace(setting.DestinationType)) {
+			case "smallint", "int2":
+				if kind == types.QValueKindInt8 || kind == types.QValueKindUInt8 {
+					continue
+				}
+			case "boolean", "bool":
+				if kind == types.QValueKindBoolean {
+					continue
+				}
+			}
+			unsupported = append(unsupported,
+				fmt.Sprintf("%s.%s %s", tableMapping.SourceTableIdentifier, setting.SourceName, setting.DestinationType))
+		}
+	}
+	if len(unsupported) == 0 {
+		return nil
+	}
+	return fmt.Errorf("column destination types aren't applied for Postgres destinations: %s; "+
+		"the only one supported is smallint or boolean on a MySQL TINYINT(1) column; remove the others "+
+		"(pre-create the target table for other types)", strings.Join(unsupported, ", "))
 }
