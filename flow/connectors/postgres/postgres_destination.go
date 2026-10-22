@@ -100,6 +100,7 @@ func syncRecordsCore[Items model.Items](
 	if err != nil {
 		return nil, err
 	}
+	pgBCDates := req.Version >= shared.InternalVersion_PgBCDates
 	intervalColumnsByTable := make(map[string]map[string]struct{}, len(req.TableMappings))
 	for _, tm := range req.TableMappings {
 		intervalColumnsByTable[tm.DestinationTableIdentifier] = intervalColumns(tm.Columns)
@@ -111,6 +112,7 @@ func syncRecordsCore[Items model.Items](
 		StripNulBytes:     stripNulBytes,
 		ArrayNullElements: true,
 		NonFiniteFloats:   true,
+		PgBCDates:         pgBCDates,
 	}
 	recordOpts := func(dstTable string) model.ToJSONOptions {
 		opts := jsonOpts

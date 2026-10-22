@@ -224,6 +224,7 @@ type ToJSONOptions struct {
 	StripNulBytes        bool // drop U+0000 from strings (PG destinations can't store it)
 	ArrayNullElements    bool // write marked NULL array elements (types.ArrayNulls) as JSON null
 	NonFiniteFloats      bool // write NaN and +-Inf floats as their Postgres input text instead of JSON null
+	PgBCDates            bool // write years before 1 AD as Postgres's "YYYY-MM-DD BC" instead of Go's astronomical -YYYY
 	// columns with an interval destination_type: their intervals are written as Postgres interval text instead of
 	// PeerDB's interval JSON
 	PgIntervalColumns map[string]struct{}

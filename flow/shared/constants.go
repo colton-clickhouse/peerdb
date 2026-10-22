@@ -58,6 +58,9 @@ const (
 	// CockroachDB: NULL elements inside arrays are marked (types.ArrayNulls), and Postgres destinations write them as
 	// NULL. Older mirrors write the element type's zero value ({1,NULL,3} -> {1,0,3}, text '', bool false, ...).
 	InternalVersion_ArrayConversionIntegrity
+	// Postgres destinations: CDC writes dates and timestamps before 1 AD as Postgres's "0044-03-15 BC" instead of Go's
+	// astronomical "-0043-03-15", which normalize rejects. Older mirrors stall normalize on them.
+	InternalVersion_PgBCDates
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
