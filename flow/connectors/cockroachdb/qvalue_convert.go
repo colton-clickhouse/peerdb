@@ -152,6 +152,20 @@ func crdbOIDToQValueKind(oid uint32) types.QValueKind {
 	}
 }
 
+// pgValues are the conversions a Postgres destination gets from the mirror's internal version: values other
+// destinations can't hold, so they keep the older fallbacks. The snapshot and changefeed paths share them.
+type pgValues struct {
+	// specialValues marks NaN and infinity values (InternalVersion_PgSpecialValues)
+	specialValues bool
+}
+
+func newPgValues(version uint32, dstType protos.DBType) pgValues {
+	pg := dstType == protos.DBType_POSTGRES
+	return pgValues{
+		specialValues: pg && version >= shared.InternalVersion_PgSpecialValues,
+	}
+}
+
 // qvalueFromCrdbValue converts a value decoded by pgx into the QValue matching field.Type.
 func qvalueFromCrdbValue(
 	field types.QField,
@@ -159,7 +173,7 @@ func qvalueFromCrdbValue(
 	oid uint32,
 	typeMap *pgtype.Map,
 	value any,
-	special bool,
+	pg pgValues,
 ) (types.QValue, error) {
 	if value == nil {
 		return types.QValueNull(field.Type), nil
@@ -199,7 +213,7 @@ func qvalueFromCrdbValue(
 		if v, ok := value.(pgtype.Numeric); ok {
 			num, valid := numericToDecimal(v)
 			if !valid {
-				if sv := numericSpecial(v, field.Precision); special && sv != types.SpecialNone {
+				if sv := numericSpecial(v, field.Precision); pg.specialValues && sv != types.SpecialNone {
 					return types.QValueNumeric{Precision: field.Precision, Scale: field.Scale, Special: sv}, nil
 				}
 				if field.Nullable {
@@ -232,7 +246,7 @@ func qvalueFromCrdbValue(
 		case time.Time:
 			return types.QValueTimestamp{Val: v}, nil
 		case pgtype.InfinityModifier:
-			if special {
+			if pg.specialValues {
 				return types.QValueTimestamp{Special: infinitySpecial(v)}, nil
 			}
 			if field.Nullable {
@@ -245,7 +259,7 @@ func qvalueFromCrdbValue(
 		case time.Time:
 			return types.QValueTimestampTZ{Val: v}, nil
 		case pgtype.InfinityModifier:
-			if special {
+			if pg.specialValues {
 				return types.QValueTimestampTZ{Special: infinitySpecial(v)}, nil
 			}
 			if field.Nullable {
@@ -258,7 +272,7 @@ func qvalueFromCrdbValue(
 		case time.Time:
 			return types.QValueDate{Val: v}, nil
 		case pgtype.InfinityModifier:
-			if special {
+			if pg.specialValues {
 				return types.QValueDate{Special: infinitySpecial(v)}, nil
 			}
 			if field.Nullable {
@@ -363,7 +377,7 @@ func qvalueFromCrdbValue(
 			return nil, err
 		}
 		var specials []types.SpecialValue
-		if elems, ok := value.([]any); ok && special {
+		if elems, ok := value.([]any); ok && pg.specialValues {
 			// pgx decodes infinity elements as pgtype.InfinityModifier, which convertToArray left as zero times
 			specials = make([]types.SpecialValue, len(elems))
 			for i, el := range elems {
@@ -391,7 +405,7 @@ func qvalueFromCrdbValue(
 		if v, ok := value.([]any); ok {
 			numArr := make([]decimal.Decimal, 0, len(v))
 			var specials []types.SpecialValue
-			if special {
+			if pg.specialValues {
 				specials = make([]types.SpecialValue, len(v))
 			}
 			for i, anyVal := range v {
@@ -406,7 +420,7 @@ func qvalueFromCrdbValue(
 				num, valid := numericToDecimal(numVal)
 				if !valid {
 					num = decimal.Decimal{}
-					if special {
+					if pg.specialValues {
 						specials[i] = numericSpecial(numVal, field.Precision)
 					}
 				}
