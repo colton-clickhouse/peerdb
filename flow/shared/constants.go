@@ -69,6 +69,8 @@ const (
 	// Postgres: geometry and geography keep their SRID (EWKB in the snapshot, EWKT in CDC). Older mirrors write
 	// the snapshot with SRID 0, and MySQL's SRID through CDC too.
 	InternalVersion_PgGeoKeepSRID
+	// Postgres: tables created with the source's column defaults (MySQL: literals and CURRENT_TIMESTAMP).
+	InternalVersion_PgColumnDefaults
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
