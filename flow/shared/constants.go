@@ -84,6 +84,9 @@ const (
 	// Postgres destinations: INTERVAL and INTERVAL[] (TypeSystem_Q, e.g. from CockroachDB) are created as interval and
 	// interval[] and written as intervals. Older mirrors create text / text[] holding PeerDB's interval JSON (#7).
 	InternalVersion_PgInterval
+	// Postgres destinations: CDC writes dates and timestamps before 1 AD as Postgres's "0044-03-15 BC" instead of Go's
+	// astronomical "-0043-03-15", which normalize rejects (#5). Older mirrors stall normalize on them.
+	InternalVersion_PgBCDates
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
