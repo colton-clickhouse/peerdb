@@ -574,10 +574,6 @@ func parseUUIDArray(value any) ([]uuid.UUID, error) {
 // legal TIME '24:00:00' extreme, shared by the snapshot and changefeed paths.
 const maxTimeMicroseconds = 24*3600*1000000 - 1
 
-// normalizeInetText strips full-length masks from INET text ("192.168.1.5/32"
-// becomes "192.168.1.5"): CockroachDB's inet::text always renders a mask, but
-// changefeed JSON and Postgres render host addresses bare, and both paths must
-// deliver the same value.
 // inetPrefixText renders an INET value decoded by pgx with host addresses bare ("192.168.1.5", not the
 // "192.168.1.5/32" netip form), to match the changefeed path and the Postgres text convention.
 func inetPrefixText(p netip.Prefix) string {
@@ -587,6 +583,10 @@ func inetPrefixText(p netip.Prefix) string {
 	return p.String()
 }
 
+// normalizeInetText strips full-length masks from INET text ("192.168.1.5/32"
+// becomes "192.168.1.5"): CockroachDB's inet::text always renders a mask, but
+// changefeed JSON and Postgres render host addresses bare, and both paths must
+// deliver the same value.
 func normalizeInetText(s string) string {
 	if p, err := netip.ParsePrefix(s); err == nil && p.Bits() == p.Addr().BitLen() {
 		return p.Addr().String()
