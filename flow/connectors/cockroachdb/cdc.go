@@ -325,8 +325,7 @@ func (c *CockroachDBConnector) PullRecords(
 		if schema, ok := req.TableNameSchemaMapping[target.Name]; ok {
 			state.schemas[source] = newChangefeedTableSchema(schema, target.Exclude)
 			state.schemas[source].arrayNullElements = req.InternalVersion >= shared.InternalVersion_ArrayNullElements
-			state.schemas[source].specialValues = req.InternalVersion >= shared.InternalVersion_PgSpecialValues &&
-				req.DestinationType == protos.DBType_POSTGRES
+			state.schemas[source].pg = newPgValues(req.InternalVersion, req.DestinationType)
 		}
 	}
 	state.finishIndexing()
