@@ -241,7 +241,8 @@ func (c *MySqlConnector) getTableSchemaForTable(
 	// CAST(... AS BINARY) forces a case-sensitive, collation-independent comparison on the join keys so it works with
 	// lower_case_table_names=0. The LEFT JOIN leaves seq_in_index NULL for non-primary-key columns.
 	rs, err := c.Execute(ctx, fmt.Sprintf(`
-		select c.column_name, c.column_type, c.is_nullable, c.numeric_precision, c.numeric_scale, s.seq_in_index
+		select c.column_name, c.column_type, c.is_nullable, c.numeric_precision, c.numeric_scale, s.seq_in_index,
+			c.column_default, c.extra
 		from information_schema.columns c
 		left join information_schema.statistics s
 			on cast(s.table_schema as binary) = cast(c.table_schema as binary)
@@ -298,12 +299,29 @@ func (c *MySqlConnector) getTableSchemaForTable(
 			return nil, err
 		}
 		qkind = tinyInt1Kind(qkind, dataType, columnSettings[columnName], tinyInt1AsInt)
+		var defaultExpr *string
+		if defaultIsNull, err := rs.IsNull(idx, 6); err != nil {
+			return nil, err
+		} else if !defaultIsNull {
+			columnDefault, err := rs.GetString(idx, 6)
+			if err != nil {
+				return nil, err
+			}
+			extra, err := rs.GetString(idx, 7)
+			if err != nil {
+				return nil, err
+			}
+			if literal, ok := defaultExprFromInfoSchema(qkind, columnDefault, extra, c.Flavor() == mysql.MariaDBFlavor); ok {
+				defaultExpr = &literal
+			}
+		}
 
 		column := &protos.FieldDescription{
 			Name:         columnName,
 			Type:         string(qkind),
 			TypeModifier: datatypes.MakeNumericTypmod(int32(numericPrecision), int32(numericScale)),
 			Nullable:     isNullable == "YES",
+			DefaultExpr:  defaultExpr,
 		}
 		columns = append(columns, column)
 
