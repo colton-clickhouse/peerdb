@@ -102,6 +102,7 @@ func syncRecordsCore[Items model.Items](
 		return nil, fmt.Errorf("failed to get the destination's version: %w", err)
 	}
 	noNumericInfinity := pgVersion < shared.POSTGRES_14
+	pgIntervals := req.Version >= shared.InternalVersion_PgInterval
 	streamReadFunc := func() ([]any, error) {
 		for record := range req.Records.GetRecords() {
 			var row []any
@@ -114,6 +115,7 @@ func syncRecordsCore[Items model.Items](
 					ArrayNullElements: true,
 					NonFiniteFloats:   nonFiniteFloats,
 					NoNumericInfinity: noNumericInfinity,
+					PgIntervals:       pgIntervals,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize insert record items to JSON: %w", err)
@@ -138,6 +140,7 @@ func syncRecordsCore[Items model.Items](
 					ArrayNullElements: true,
 					NonFiniteFloats:   nonFiniteFloats,
 					NoNumericInfinity: noNumericInfinity,
+					PgIntervals:       pgIntervals,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize update record new items to JSON: %w", err)
@@ -149,6 +152,7 @@ func syncRecordsCore[Items model.Items](
 					ArrayNullElements: true,
 					NonFiniteFloats:   nonFiniteFloats,
 					NoNumericInfinity: noNumericInfinity,
+					PgIntervals:       pgIntervals,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize update record old items to JSON: %w", err)
@@ -173,6 +177,7 @@ func syncRecordsCore[Items model.Items](
 					ArrayNullElements: true,
 					NonFiniteFloats:   nonFiniteFloats,
 					NoNumericInfinity: noNumericInfinity,
+					PgIntervals:       pgIntervals,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize delete record items to JSON: %w", err)

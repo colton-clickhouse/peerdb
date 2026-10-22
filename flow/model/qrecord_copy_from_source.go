@@ -105,6 +105,8 @@ func pgSpecialNumeric(sv types.SpecialValue) pgtype.Numeric {
 type QRecordCopyFromSource struct {
 	stream        *QRecordStream
 	currentRecord []types.QValue
+	// pgIntervals writes intervals as intervals, and as their Postgres text into text columns (InternalVersion_PgInterval)
+	pgIntervals bool
 	// noNumericInfinity writes numeric +-Infinity as NULL (WithoutNumericInfinity), for Postgres before 14
 	noNumericInfinity bool
 }
@@ -117,10 +119,12 @@ func (src *QRecordCopyFromSource) WithoutNumericInfinity() *QRecordCopyFromSourc
 
 func NewQRecordCopyFromSource(
 	stream *QRecordStream,
+	pgIntervals bool,
 ) *QRecordCopyFromSource {
 	return &QRecordCopyFromSource{
 		stream:        stream,
 		currentRecord: nil,
+		pgIntervals:   pgIntervals,
 	}
 }
 
@@ -200,7 +204,15 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		case types.QValueTimeTZ:
 			values[i] = timetzBinary(v.Val)
 		case types.QValueInterval:
-			values[i] = v.Val
+			if src.pgIntervals {
+				iv, err := newPgInterval(v.Val)
+				if err != nil {
+					return nil, err
+				}
+				values[i] = iv
+			} else {
+				values[i] = v.Val
+			}
 		case types.QValueTimestamp:
 			values[i] = pgtype.Timestamp{Time: v.Val, InfinityModifier: pgInfinity(v.Special), Valid: true}
 		case types.QValueTimestampTZ:
@@ -250,7 +262,15 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 				values[i] = constructNullableArray(v.Val, v.Nulls)
 			}
 		case types.QValueArrayInterval:
-			values[i] = constructNullableArray(v.Val, v.Nulls)
+			if src.pgIntervals {
+				arr, err := pgIntervalArray(v.Val, v.Nulls)
+				if err != nil {
+					return nil, err
+				}
+				values[i] = arr
+			} else {
+				values[i] = constructNullableArray(v.Val, v.Nulls)
+			}
 		case types.QValueArrayTimestamp:
 			if v.Specials != nil {
 				values[i] = constructSpecialArray(v.Val, v.Nulls, v.Specials, func(t time.Time, sv types.SpecialValue) pgtype.Timestamp {
