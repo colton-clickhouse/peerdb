@@ -1237,8 +1237,17 @@ func checkTableMapForCompressedColumns(ev *replication.TableMapEvent) error {
 }
 
 // defaultExprFromMysqlColumnOption renders a MySQL column DEFAULT as a SQL literal that
-// destinations can splice into DDL verbatim.
-func (c *MySqlConnector) defaultExprFromMysqlColumnOption(expr ast.ExprNode) (string, bool) {
+// destinations can splice into DDL verbatim, in defaultExprFromInfoSchema's forms: a current-time
+// default of a timestamp column gives CURRENT_TIMESTAMP, and a bit literal of a numeric column its number.
+func (c *MySqlConnector) defaultExprFromMysqlColumnOption(expr ast.ExprNode, qkind types.QValueKind) (string, bool) {
+	if fn, ok := expr.(*ast.FuncCallExpr); ok {
+		if mysqlCurrentTimestampRegex.MatchString(fn.FnName.L) &&
+			(qkind == types.QValueKindTimestamp || qkind == types.QValueKindTimestampTZ) {
+			return "CURRENT_TIMESTAMP", true
+		}
+		return "", false
+	}
+
 	negate := false
 	if unary, ok := expr.(*ast.UnaryOperationExpr); ok {
 		switch unary.Op {
@@ -1272,8 +1281,16 @@ func (c *MySqlConnector) defaultExprFromMysqlColumnOption(expr ast.ExprNode) (st
 			return "", false
 		}
 		return "'" + strings.ReplaceAll(v, "'", "''") + "'", true
-	case nil, tidbtypes.BinaryLiteral:
-		// DEFAULT NULL and bit literals are deliberately not translated.
+	case tidbtypes.BinaryLiteral:
+		if negate || len(v) > 8 || !isNumericKind(qkind) {
+			return "", false
+		}
+		var n uint64
+		for _, b := range v {
+			n = n<<8 | uint64(b)
+		}
+		return strconv.FormatUint(n, 10), true
+	case nil:
 		return "", false
 	default:
 		typeName := fmt.Sprintf("%T", v)
@@ -1312,7 +1329,7 @@ func (c *MySqlConnector) fieldDescriptionFromMysqlColumn(
 			// Servers without binlog row metadata carry enums and sets as their ordinal or
 			// bitmask, so the member name MySQL states as the default would not convert.
 			if option.Expr != nil && qkind != types.QValueKindUint16Enum && qkind != types.QValueKindUint64Set {
-				if literal, ok := c.defaultExprFromMysqlColumnOption(option.Expr); ok {
+				if literal, ok := c.defaultExprFromMysqlColumnOption(option.Expr, qkind); ok {
 					defaultExpr = &literal
 				}
 			}

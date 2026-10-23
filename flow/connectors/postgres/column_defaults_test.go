@@ -35,6 +35,22 @@ func TestPgDefaultExpr(t *testing.T) {
 		{"'100:00:00'", types.QValueKindTime, "TIME", ""},
 		{"'100:00:00'", types.QValueKindTime, "INTERVAL", "'100:00:00'"},
 		{"'abc'", types.QValueKindBytes, "BYTEA", ""},
+		// TINYINT(1) given as a string
+		{"'1'", types.QValueKindBoolean, "BOOLEAN", "true"},
+		// a Postgres source doubles backslashes, which Postgres would read literally
+		{`'a\\b'`, types.QValueKindString, "TEXT", ""},
+		// out of the created type's range: accepted by CREATE TABLE, refused by every insert that uses it
+		{"18446744073709551615", types.QValueKindUInt64, "BIGINT", ""},
+		{"4294967295", types.QValueKindUInt32, "BIGINT", "4294967295"},
+		{"65535", types.QValueKindUInt16, "SMALLINT", ""},
+		{"-32768", types.QValueKindInt16, "SMALLINT", "-32768"},
+		{"18446744073709551615", types.QValueKindUInt64, "NUMERIC(20,0)", "18446744073709551615"},
+		// impossible dates (MySQL's ALLOW_INVALID_DATES)
+		{"'2020-02-31'", types.QValueKindDate, "DATE", ""},
+		{"'2020-02-29 25:00:00'", types.QValueKindTimestamp, "TIMESTAMP", ""},
+		{"'2020-02-29 23:59:59.123456'", types.QValueKindTimestamp, "TIMESTAMP", "'2020-02-29 23:59:59.123456'"},
+		// a Postgres source gives timestamptz in UTC without an offset; the literal is coerced in PeerDB's UTC session
+		{"'2020-01-02 03:04:05'", types.QValueKindTimestampTZ, "TIMESTAMPTZ", "'2020-01-02 03:04:05'"},
 	} {
 		got, ok := pgDefaultExpr(tc.expr, tc.qkind, tc.pgType)
 		require.Equal(t, tc.want != "", ok, "%s %s", tc.expr, tc.qkind)
