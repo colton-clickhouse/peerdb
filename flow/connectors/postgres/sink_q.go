@@ -22,6 +22,8 @@ type RecordStreamSink struct {
 	DestinationType protos.DBType
 	// PgIntervals writes intervals into interval columns as intervals (InternalVersion_PgInterval)
 	PgIntervals bool
+	// PgGeoSRIDs keeps geometry / geography SRIDs (InternalVersion_PgConstrainedGeo)
+	PgGeoSRIDs bool
 }
 
 func (stream RecordStreamSink) ExecuteQueryWithTx(
@@ -118,7 +120,10 @@ func (stream RecordStreamSink) CopyInto(ctx context.Context, _ *PostgresConnecto
 	if err != nil {
 		return 0, err
 	}
-	return tx.CopyFrom(ctx, table, columnNames, model.NewQRecordCopyFromSource(stream.QRecordStream, stream.PgIntervals))
+	return tx.CopyFrom(ctx, table, columnNames, model.NewQRecordCopyFromSource(stream.QRecordStream, model.PgCopyOptions{
+		Intervals: stream.PgIntervals,
+		GeoSRIDs:  stream.PgGeoSRIDs,
+	}))
 }
 
 func (stream RecordStreamSink) GetColumnNames() ([]string, error) {
