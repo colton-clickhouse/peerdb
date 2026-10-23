@@ -34,6 +34,7 @@ func (c *PostgresConnector) SyncQRepRecords(
 		QRecordStream:   stream,
 		DestinationType: protos.DBType_POSTGRES,
 		PgIntervals:     config.Version >= shared.InternalVersion_PgInterval,
+		PgGeoSRIDs:      config.Version >= shared.InternalVersion_PgConstrainedGeo,
 	})
 }
 

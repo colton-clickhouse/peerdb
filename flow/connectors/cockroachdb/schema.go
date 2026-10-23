@@ -12,6 +12,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
 	"github.com/PeerDB-io/peerdb/flow/internal"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
+	"github.com/PeerDB-io/peerdb/flow/shared"
 	"github.com/PeerDB-io/peerdb/flow/shared/datatypes"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
@@ -23,7 +24,7 @@ func (c *CockroachDBConnector) GetTableSchema(
 	system protos.TypeSystem,
 	tableMappings []*protos.TableMapping,
 ) (map[string]*protos.TableSchema, error) {
-	return c.getTableSchema(ctx, env, system, tableMappings, crdbHLC{})
+	return c.getTableSchema(ctx, env, version, system, tableMappings, crdbHLC{})
 }
 
 // getTableSchema resolves table schemas, optionally AS OF SYSTEM TIME asOf
@@ -33,6 +34,7 @@ func (c *CockroachDBConnector) GetTableSchema(
 func (c *CockroachDBConnector) getTableSchema(
 	ctx context.Context,
 	env map[string]string,
+	version uint32,
 	system protos.TypeSystem,
 	tableMappings []*protos.TableMapping,
 	asOf crdbHLC,
@@ -91,6 +93,10 @@ func (c *CockroachDBConnector) getTableSchema(
 			}
 
 			qkind := crdbTypeToQValueKind(dataType, udtName)
+			geoTypmod, constrainedGeo := constrainedGeoTypmod(dataType, udtName, version)
+			if constrainedGeo {
+				qkind = crdbTypeToQValueKind(udtName, udtName)
+			}
 			colType := udtName
 			if system == protos.TypeSystem_Q {
 				colType = string(qkind)
@@ -107,6 +113,9 @@ func (c *CockroachDBConnector) getTableSchema(
 					scale = *numericScale
 				}
 				typeModifier = datatypes.MakeNumericTypmod(*numericPrecision, scale)
+			}
+			if constrainedGeo {
+				typeModifier = geoTypmod
 			}
 			return &protos.FieldDescription{
 				Name:         colName,
@@ -370,4 +379,19 @@ func referencesColumn(expression, column string) bool {
 		return true
 	}
 	return false
+}
+
+// constrainedGeoTypmod reads a constrained geometry / geography column's PostGIS typmod: CockroachDB's data_type is
+// then "geometry(point,4326)", which crdbTypeToQValueKind doesn't recognize (it falls back to text). ok is false for
+// other columns, and before InternalVersion_PgConstrainedGeo.
+func constrainedGeoTypmod(dataType string, udtName string, version uint32) (int32, bool) {
+	if version < shared.InternalVersion_PgConstrainedGeo || (udtName != "geometry" && udtName != "geography") {
+		return 0, false
+	}
+	base, args, ok := strings.Cut(dataType, "(")
+	args, closed := strings.CutSuffix(args, ")")
+	if !ok || !closed || !strings.EqualFold(base, udtName) {
+		return 0, false
+	}
+	return datatypes.MakeGeoTypmod(args)
 }

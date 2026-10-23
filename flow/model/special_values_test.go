@@ -43,7 +43,7 @@ func specialValueRecord() []types.QValue {
 func TestCopyFromSpecialValues(t *testing.T) {
 	stream := NewQRecordStream(1)
 	stream.Records <- specialValueRecord()
-	src := NewQRecordCopyFromSource(stream, false)
+	src := NewQRecordCopyFromSource(stream, PgCopyOptions{})
 	require.True(t, src.Next())
 	values, err := src.Values()
 	require.NoError(t, err)
