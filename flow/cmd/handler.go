@@ -495,6 +495,11 @@ func (h *FlowRequestHandler) FlowStateChange(
 			return nil, NewInvalidArgumentApiError(
 				errors.New("PEERDB_MYSQL_TINYINT1_AS_INT can't be changed on an existing mirror; recreate the mirror"))
 		}
+		if len(cdcUpdate.AdditionalTables) > 0 {
+			if apiErr := h.validateAdditionalTables(ctx, req.FlowJobName, cdcUpdate.AdditionalTables); apiErr != nil {
+				return nil, apiErr
+			}
+		}
 	}
 
 	if req.FlowConfigUpdate != nil && req.FlowConfigUpdate.GetCdcFlowConfigUpdate() != nil &&
