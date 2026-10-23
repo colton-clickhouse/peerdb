@@ -12,6 +12,7 @@ import (
 
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
 	"github.com/PeerDB-io/peerdb/flow/internal"
+	"github.com/PeerDB-io/peerdb/flow/shared"
 )
 
 // getTableSchema with an asOf timestamp is what the changefeed uses to type columns added since the schema was
@@ -64,7 +65,7 @@ func TestGetTableSchemaAsOf(t *testing.T) {
 			added bool
 		}{{before, false}, {after, true}, {crdbHLC{}, true}} {
 			source := schema + "." + name
-			schemas, err := c.getTableSchema(ctx, nil, protos.TypeSystem_Q,
+			schemas, err := c.getTableSchema(ctx, nil, shared.InternalVersion_Latest, protos.TypeSystem_Q,
 				[]*protos.TableMapping{{SourceTableIdentifier: source}}, tc.at)
 			require.NoError(t, err, "%s as of %q", name, tc.at)
 			names := make([]string, 0, len(schemas[source].Columns))

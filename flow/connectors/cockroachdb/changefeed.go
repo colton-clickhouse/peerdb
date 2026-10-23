@@ -151,6 +151,8 @@ type changefeedTableSchema struct {
 	arrayNullElements bool
 	// pg are the conversions for a Postgres destination
 	pg pgValues
+	// geoSRIDs are the SRIDs of constrained geometry / geography columns: changefeed GeoJSON has none
+	geoSRIDs map[string]int
 }
 
 // newChangefeedTableSchema builds the cached per-table schema for envelope
@@ -159,7 +161,17 @@ type changefeedTableSchema struct {
 // newly added columns and re-enter through a schema delta.
 func newChangefeedTableSchema(schema *protos.TableSchema, exclude map[string]struct{}) *changefeedTableSchema {
 	fields := make(map[string]types.QField, len(schema.Columns))
+	var geoSRIDs map[string]int
 	for _, col := range schema.Columns {
+		kind := types.QValueKind(col.Type)
+		if kind == types.QValueKindGeometry || kind == types.QValueKindGeography {
+			if srid := datatypes.GeoTypmodSRID(col.TypeModifier); srid != 0 {
+				if geoSRIDs == nil {
+					geoSRIDs = make(map[string]int)
+				}
+				geoSRIDs[col.Name] = srid
+			}
+		}
 		precision, scale := common.ParseNumericTypmod(col.TypeModifier)
 		fields[col.Name] = types.QField{
 			Name:      col.Name,
@@ -178,6 +190,7 @@ func newChangefeedTableSchema(schema *protos.TableSchema, exclude map[string]str
 		ignored:         ignored,
 		primaryKeys:     schema.PrimaryKeyColumns,
 		nullableEnabled: schema.NullableEnabled,
+		geoSRIDs:        geoSRIDs,
 	}
 }
 
@@ -226,6 +239,9 @@ func changefeedRecordItems(
 		}
 		if schema.arrayNullElements && field.Type.IsArray() {
 			qv = types.WithArrayNulls(qv, jsonNullElements(raw))
+		}
+		if srid, ok := schema.geoSRIDs[col]; ok {
+			qv = withGeoSRID(qv, srid)
 		}
 		items.AddColumn(col, qv)
 	}
@@ -1016,6 +1032,34 @@ func geoJSONToWKT(raw json.RawMessage) (string, error) {
 		wkt = fmt.Sprintf("SRID=%d;%s", srid, wkt)
 	}
 	return wkt, nil
+}
+
+// withGeoSRID gives a geometry / geography value from changefeed GeoJSON its column's SRID (a constrained column's
+// type says what it is), as the snapshot reads it from EWKB.
+func withGeoSRID(qv types.QValue, srid int) types.QValue {
+	switch v := qv.(type) {
+	case types.QValueGeometry:
+		if v.Val != "" {
+			v.Val = setWKTSRID(v.Val, srid)
+		}
+		return v
+	case types.QValueGeography:
+		if v.Val != "" {
+			v.Val = setWKTSRID(v.Val, srid)
+		}
+		return v
+	}
+	return qv
+}
+
+// setWKTSRID replaces or adds the SRID=n; prefix of a WKT value.
+func setWKTSRID(wkt string, srid int) string {
+	if rest, ok := strings.CutPrefix(wkt, "SRID="); ok {
+		if _, w, found := strings.Cut(rest, ";"); found {
+			wkt = w
+		}
+	}
+	return fmt.Sprintf("SRID=%d;%s", srid, wkt)
 }
 
 // changefeedBackoff computes the exponential reconnect delay for the given

@@ -22,6 +22,8 @@ type RecordStreamSink struct {
 	DestinationType protos.DBType
 	// PgIntervals writes intervals into interval columns as intervals (InternalVersion_PgInterval)
 	PgIntervals bool
+	// PgGeoSRIDs keeps geometry / geography SRIDs (InternalVersion_PgConstrainedGeo)
+	PgGeoSRIDs bool
 }
 
 func (stream RecordStreamSink) ExecuteQueryWithTx(
@@ -122,7 +124,10 @@ func (stream RecordStreamSink) CopyInto(ctx context.Context, c *PostgresConnecto
 	if err != nil {
 		return 0, fmt.Errorf("failed to get the destination's version: %w", err)
 	}
-	src := model.NewQRecordCopyFromSource(stream.QRecordStream, stream.PgIntervals)
+	src := model.NewQRecordCopyFromSource(stream.QRecordStream, model.PgCopyOptions{
+		Intervals: stream.PgIntervals,
+		GeoSRIDs:  stream.PgGeoSRIDs,
+	})
 	if pgVersion < shared.POSTGRES_14 {
 		src.WithoutNumericInfinity()
 	}
