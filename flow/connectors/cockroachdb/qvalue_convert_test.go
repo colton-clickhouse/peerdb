@@ -301,6 +301,13 @@ func TestQValueFromCrdbValue(t *testing.T) {
 			}},
 		},
 		{
+			// bytea hex, like the changefeed path, not Go's [0 255]
+			name:     "bytes array",
+			field:    field(types.QValueKindArrayString),
+			value:    []any{[]byte{0x00, 0xff}, []byte{}, nil, []byte("A")},
+			expected: types.QValueArrayString{Val: []string{`\x00ff`, `\x`, "", `\x41`}},
+		},
+		{
 			name:  "array numeric",
 			field: field(types.QValueKindArrayNumeric),
 			value: []any{pgtype.Numeric{Int: big.NewInt(5), Exp: 0, Valid: true}},
