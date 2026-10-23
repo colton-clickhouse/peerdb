@@ -474,6 +474,11 @@ func (h *FlowRequestHandler) FlowStateChange(
 		for _, tm := range cdcUpdate.AdditionalTables {
 			structured.NormalizeStructuredIngestionTypes(tm.StructuredIngestionConfig, tm.Columns)
 		}
+		if len(cdcUpdate.AdditionalTables) > 0 {
+			if apiErr := h.validateAdditionalTables(ctx, req.FlowJobName, cdcUpdate.AdditionalTables); apiErr != nil {
+				return nil, apiErr
+			}
+		}
 	}
 
 	if req.FlowConfigUpdate != nil && req.FlowConfigUpdate.GetCdcFlowConfigUpdate() != nil &&
