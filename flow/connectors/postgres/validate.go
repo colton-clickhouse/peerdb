@@ -16,6 +16,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	pkg_pg "github.com/PeerDB-io/peerdb/flow/pkg/postgres"
 	"github.com/PeerDB-io/peerdb/flow/shared"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 )
 
 func (c *PostgresConnector) ValidateCheck(ctx context.Context) error {
@@ -400,6 +401,5 @@ func keylessTablesError(names []string, schemas map[string]*protos.TableSchema) 
 	if len(keyless) == 0 {
 		return nil
 	}
-	return fmt.Errorf("tables without a primary key can't be replicated with CDC to Postgres: %s; "+
-		"add a primary key on the source or remove them from the mirror", strings.Join(keyless, ", "))
+	return exceptions.NewKeylessTablesError(keyless)
 }

@@ -1,6 +1,9 @@
 package exceptions
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 type PrimaryKeyModifiedError struct {
 	error
@@ -54,4 +57,19 @@ func NewMissingPrimaryKeyError(table string) error {
 
 func (e *MissingPrimaryKeyError) Error() string {
 	return fmt.Sprintf("table %s has no primary keys and does not have REPLICA IDENTITY FULL", e.Table)
+}
+
+// KeylessTablesError names tables without a primary key in a CDC mirror to a destination that applies changes
+// by primary key (Postgres)
+type KeylessTablesError struct {
+	Tables []string
+}
+
+func NewKeylessTablesError(tables []string) error {
+	return &KeylessTablesError{Tables: tables}
+}
+
+func (e *KeylessTablesError) Error() string {
+	return fmt.Sprintf("tables without a primary key can't be replicated with CDC to Postgres: %s; "+
+		"add a primary key on the source or remove them from the mirror", strings.Join(e.Tables, ", "))
 }
