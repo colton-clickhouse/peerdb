@@ -58,6 +58,10 @@ const (
 	// CockroachDB: NULL elements inside arrays are marked (types.ArrayNulls), and Postgres destinations write them as
 	// NULL. Older mirrors write the element type's zero value ({1,NULL,3} -> {1,0,3}, text '', bool false, ...).
 	InternalVersion_ArrayConversionIntegrity
+	// CockroachDB sources: constrained geometry / geography columns (GEOMETRY(POINT,4326)) replicate as geometry /
+	// geography with their PostGIS typmod; Postgres destinations create them constrained and COPY keeps SRIDs. Older
+	// mirrors replicate them as text holding hex EWKB, and CDC writes to them fail.
+	InternalVersion_PgConstrainedGeo
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
