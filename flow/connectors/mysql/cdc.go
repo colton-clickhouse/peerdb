@@ -241,7 +241,8 @@ func (c *MySqlConnector) getTableSchemaForTable(
 	// CAST(... AS BINARY) forces a case-sensitive, collation-independent comparison on the join keys so it works with
 	// lower_case_table_names=0. The LEFT JOIN leaves seq_in_index NULL for non-primary-key columns.
 	rs, err := c.Execute(ctx, fmt.Sprintf(`
-		select c.column_name, c.column_type, c.is_nullable, c.numeric_precision, c.numeric_scale, s.seq_in_index
+		select c.column_name, c.column_type, c.is_nullable, c.numeric_precision, c.numeric_scale, s.seq_in_index,
+			c.column_default, c.extra
 		from information_schema.columns c
 		left join information_schema.statistics s
 			on cast(s.table_schema as binary) = cast(c.table_schema as binary)
@@ -298,12 +299,29 @@ func (c *MySqlConnector) getTableSchemaForTable(
 			return nil, err
 		}
 		qkind = tinyInt1Kind(qkind, dataType, columnSettings[columnName], tinyInt1AsInt)
+		var defaultExpr *string
+		if defaultIsNull, err := rs.IsNull(idx, 6); err != nil {
+			return nil, err
+		} else if !defaultIsNull {
+			columnDefault, err := rs.GetString(idx, 6)
+			if err != nil {
+				return nil, err
+			}
+			extra, err := rs.GetString(idx, 7)
+			if err != nil {
+				return nil, err
+			}
+			if literal, ok := defaultExprFromInfoSchema(qkind, columnDefault, extra, c.Flavor() == mysql.MariaDBFlavor); ok {
+				defaultExpr = &literal
+			}
+		}
 
 		column := &protos.FieldDescription{
 			Name:         columnName,
 			Type:         string(qkind),
 			TypeModifier: datatypes.MakeNumericTypmod(int32(numericPrecision), int32(numericScale)),
 			Nullable:     isNullable == "YES",
+			DefaultExpr:  defaultExpr,
 		}
 		columns = append(columns, column)
 
@@ -1219,8 +1237,17 @@ func checkTableMapForCompressedColumns(ev *replication.TableMapEvent) error {
 }
 
 // defaultExprFromMysqlColumnOption renders a MySQL column DEFAULT as a SQL literal that
-// destinations can splice into DDL verbatim.
-func (c *MySqlConnector) defaultExprFromMysqlColumnOption(expr ast.ExprNode) (string, bool) {
+// destinations can splice into DDL verbatim, in defaultExprFromInfoSchema's forms: a current-time
+// default of a timestamp column gives CURRENT_TIMESTAMP, and a bit literal of a numeric column its number.
+func (c *MySqlConnector) defaultExprFromMysqlColumnOption(expr ast.ExprNode, qkind types.QValueKind) (string, bool) {
+	if fn, ok := expr.(*ast.FuncCallExpr); ok {
+		if mysqlCurrentTimestampRegex.MatchString(fn.FnName.L) &&
+			(qkind == types.QValueKindTimestamp || qkind == types.QValueKindTimestampTZ) {
+			return "CURRENT_TIMESTAMP", true
+		}
+		return "", false
+	}
+
 	negate := false
 	if unary, ok := expr.(*ast.UnaryOperationExpr); ok {
 		switch unary.Op {
@@ -1254,8 +1281,16 @@ func (c *MySqlConnector) defaultExprFromMysqlColumnOption(expr ast.ExprNode) (st
 			return "", false
 		}
 		return "'" + strings.ReplaceAll(v, "'", "''") + "'", true
-	case nil, tidbtypes.BinaryLiteral:
-		// DEFAULT NULL and bit literals are deliberately not translated.
+	case tidbtypes.BinaryLiteral:
+		if negate || len(v) > 8 || !isNumericKind(qkind) {
+			return "", false
+		}
+		var n uint64
+		for _, b := range v {
+			n = n<<8 | uint64(b)
+		}
+		return strconv.FormatUint(n, 10), true
+	case nil:
 		return "", false
 	default:
 		typeName := fmt.Sprintf("%T", v)
@@ -1294,7 +1329,7 @@ func (c *MySqlConnector) fieldDescriptionFromMysqlColumn(
 			// Servers without binlog row metadata carry enums and sets as their ordinal or
 			// bitmask, so the member name MySQL states as the default would not convert.
 			if option.Expr != nil && qkind != types.QValueKindUint16Enum && qkind != types.QValueKindUint64Set {
-				if literal, ok := c.defaultExprFromMysqlColumnOption(option.Expr); ok {
+				if literal, ok := c.defaultExprFromMysqlColumnOption(option.Expr, qkind); ok {
 					defaultExpr = &literal
 				}
 			}

@@ -275,6 +275,9 @@ func (c *ClickHouseConnector) ReplayTableSchemaDeltas(
 			}
 
 			defaultExpr := addedColumn.DefaultExpr
+			if defaultExpr != nil && *defaultExpr == "CURRENT_TIMESTAMP" {
+				defaultExpr = nil // the MySQL reader's current-time default, which Postgres destinations translate
+			}
 			if defaultExpr != nil && (qvKind == types.QValueKindTime || qvKind == types.QValueKindTimeTZ) &&
 				!slices.Contains(flags, shared.Flag_ClickHouseTime64Enabled) {
 				// on the legacy path time lands in DateTime64 as an offset from the epoch,

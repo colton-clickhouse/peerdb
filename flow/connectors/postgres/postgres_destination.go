@@ -19,6 +19,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/model"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared"
+	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
 // NeedsSetupMetadataTables returns true if the metadata tables need to be set up.
@@ -626,14 +627,47 @@ func (c *PostgresConnector) ReplayTableSchemaDeltas(
 				return fmt.Errorf("error parsing schema and table for %s: %w", schemaDelta.DstTableName, err)
 			}
 
-			_, err = c.execWithLoggingTx(ctx, fmt.Sprintf(
-				"ALTER TABLE %s.%s ADD COLUMN IF NOT EXISTS %s %s",
+			addColumnSQL := fmt.Sprintf("ALTER TABLE %s.%s ADD COLUMN IF NOT EXISTS %s %s",
 				common.QuoteIdentifier(dstSchemaTable.Namespace),
 				common.QuoteIdentifier(dstSchemaTable.Table),
-				common.QuoteIdentifier(addedColumn.Name), columnType), tableSchemaModifyTx)
-			if err != nil {
-				return fmt.Errorf("failed to add column %s for table %s: %w", addedColumn.Name,
-					schemaDelta.DstTableName, err)
+				common.QuoteIdentifier(addedColumn.Name), columnType)
+
+			// The source's default also fills the rows that predate the column, as on the source (MySQL writes
+			// no row events for them). The column is added nullable even when the source's is NOT NULL: changes
+			// captured before the ALTER but normalized after it don't carry the column, and normalize writes NULL
+			// for them.
+			var columnDefault string
+			if addedColumn.DefaultExpr != nil && schemaDelta.System == protos.TypeSystem_Q {
+				if expr, ok := pgDefaultExpr(*addedColumn.DefaultExpr, types.QValueKind(addedColumn.Type), columnType); ok {
+					columnDefault = " DEFAULT " + expr
+				}
+			}
+			if schemaDelta.NullableEnabled && !addedColumn.Nullable {
+				c.logger.Warn("[schema delta replay] adding NOT NULL column as nullable: changes captured before the ALTER "+
+					"don't carry it", slog.String("column", addedColumn.Name), slog.String("dstTableName", schemaDelta.DstTableName))
+			}
+
+			added := false
+			if columnDefault != "" {
+				// a savepoint, so that a default Postgres rejects falls back to the plain column
+				if _, err := tableSchemaModifyTx.Exec(ctx, "SAVEPOINT peerdb_add_column"); err != nil {
+					return fmt.Errorf("failed to create savepoint: %w", err)
+				}
+				if _, err := c.execWithLoggingTx(ctx, addColumnSQL+columnDefault, tableSchemaModifyTx); err != nil {
+					c.logger.Warn("[schema delta replay] adding column without its default, which Postgres rejected",
+						slog.String("column", addedColumn.Name), slog.String("default", columnDefault), slog.Any("error", err))
+					if _, err := tableSchemaModifyTx.Exec(ctx, "ROLLBACK TO SAVEPOINT peerdb_add_column"); err != nil {
+						return fmt.Errorf("failed to roll back to savepoint: %w", err)
+					}
+				} else {
+					added = true
+				}
+			}
+			if !added {
+				if _, err := c.execWithLoggingTx(ctx, addColumnSQL, tableSchemaModifyTx); err != nil {
+					return fmt.Errorf("failed to add column %s for table %s: %w", addedColumn.Name,
+						schemaDelta.DstTableName, err)
+				}
 			}
 			c.logger.Info(fmt.Sprintf("[schema delta replay] added column %s with data type %s",
 				addedColumn.Name, addedColumn.Type),
