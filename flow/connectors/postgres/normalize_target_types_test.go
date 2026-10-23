@@ -43,6 +43,9 @@ func TestGenerateMergeStatement_TargetColumnTypes(t *testing.T) {
 			{Name: "c_bytes", Type: string(types.QValueKindBytes), TypeModifier: -1},
 			{Name: "c_text", Type: string(types.QValueKindString), TypeModifier: -1},
 			{Name: "c_code", Type: string(types.QValueKindString), TypeModifier: -1},
+			{Name: "c_dec", Type: string(types.QValueKindNumeric), TypeModifier: -1},
+			{Name: "c_dbl", Type: string(types.QValueKindFloat64), TypeModifier: -1},
+			{Name: "c_dec_text", Type: string(types.QValueKindNumeric), TypeModifier: -1},
 		},
 	}
 	gen := func(targetTypes map[string]map[string]string) string {
@@ -62,6 +65,7 @@ func TestGenerateMergeStatement_TargetColumnTypes(t *testing.T) {
 	// doesn't report (c_text) falls back to PeerDB's mapping
 	stmt := gen(map[string]map[string]string{table: {
 		"id": "integer", "c_int": "bigint", "c_big": "numeric", "c_bytes": "bytea", "c_code": "bpchar",
+		"c_dec": "integer", "c_dbl": "bigint", "c_dec_text": "text",
 	}})
 	for _, want := range []string{
 		`(_peerdb_data->>'id')::integer`,
@@ -71,6 +75,10 @@ func TestGenerateMergeStatement_TargetColumnTypes(t *testing.T) {
 		`(_peerdb_data->>'c_text')::TEXT AS "c_text"`,
 		// char(n) as bpchar: casting to "character" would mean char(1) and truncate
 		`(_peerdb_data->>'c_code')::bpchar AS "c_code"`,
+		// decimal and float text isn't integer input: through PeerDB's type, rounded on the way to the target
+		`(_peerdb_data->>'c_dec')::NUMERIC::integer AS "c_dec"`,
+		`(_peerdb_data->>'c_dbl')::DOUBLE PRECISION::bigint AS "c_dbl"`,
+		`(_peerdb_data->>'c_dec_text')::text AS "c_dec_text"`,
 	} {
 		require.Contains(t, stmt, want)
 	}
