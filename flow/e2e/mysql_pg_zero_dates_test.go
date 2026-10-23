@@ -106,3 +106,45 @@ func (s MySQLPGSuite) zeroDateRows(srcTable string, version uint32, zeroYears bo
 	RequireEnvCanceled(t, env)
 	return got
 }
+
+// A DATE or DATETIME primary key is the snapshot's default partition key. Its MIN/MAX became the partition
+// bounds through the value conversion, so a zero-part bound turned into the epoch: a partial-zero MAX put the
+// end before the start, and a zero MIN dropped every row before 1970. Every row must arrive. Each table holds
+// one zero-part value, since they all arrive as the epoch and a key can hold it once.
+func (s MySQLPGSuite) Test_Zero_Date_Partition_Bounds() {
+	t := s.t
+	for _, tc := range []struct{ name, colType, zeroPart string }{
+		{"zero_date_pk_date_min", "DATE", "0000-00-00"},
+		{"zero_date_pk_date_year0", "DATE", "0000-05-10"},
+		{"zero_date_pk_date_max", "DATE", "2025-03-00"},
+		{"zero_date_pk_datetime_min", "DATETIME", "0000-00-00"},
+		{"zero_date_pk_datetime_max", "DATETIME", "2025-03-00"},
+	} {
+		srcFull := AttachSchema(s, tc.name)
+		dstFull := s.DestinationTable(tc.name)
+		require.NoError(t, s.source.Exec(t.Context(), `SET SESSION sql_mode = ''`))
+		require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+			`CREATE TABLE %s (k %s PRIMARY KEY, v INT)`, srcFull, tc.colType)))
+		require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES
+			('%s', 1), ('1960-01-01', 2), ('2024-05-10', 3), ('2024-07-01', 4), ('2024-09-15', 5)`,
+			srcFull, tc.zeroPart)))
+		require.NoError(t, s.source.Exec(t.Context(), `ANALYZE TABLE `+srcFull))
+
+		connectionGen := FlowConnectionGenerationConfig{
+			FlowJobName:   AddSuffix(s, tc.name),
+			TableMappings: TableMappings(s, tc.name, tc.name),
+			Destination:   s.Peer().Name,
+		}
+		flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
+		flowConnConfig.DoInitialSnapshot = true
+		flowConnConfig.SnapshotNumRowsPerPartition = 2
+		temporal := NewTemporalClient(t)
+		env := ExecutePeerflow(t, temporal, flowConnConfig)
+		SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+		EnvWaitFor(t, env, 3*time.Minute, "initial load "+tc.name, func() bool {
+			return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 5
+		})
+		env.Cancel(t.Context())
+		RequireEnvCanceled(t, env)
+	}
+}
