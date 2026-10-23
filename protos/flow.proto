@@ -320,6 +320,8 @@ message FieldDescription {
   bool nullable = 4;
   string type_schema_name = 5;
   optional string default_expr = 6;
+  // the source generates the column's values (MySQL AUTO_INCREMENT); Postgres creates it as an identity
+  bool auto_increment = 7;
 }
 
 message SetupTableSchemaBatchInput {

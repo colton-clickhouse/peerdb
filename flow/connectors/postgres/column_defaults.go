@@ -82,3 +82,9 @@ func pgValidDateTime(literal string) bool {
 	}
 	return false
 }
+
+// isIdentityType reports whether a column of this Postgres type can be an identity
+func isIdentityType(pgType string) bool {
+	_, ok := pgIntegerBits[strings.ToUpper(pgType)]
+	return ok
+}
