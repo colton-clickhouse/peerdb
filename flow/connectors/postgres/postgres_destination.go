@@ -603,8 +603,8 @@ func (c *PostgresConnector) ReplayTableSchemaDeltas(
 			columnType := addedColumn.Type
 			switch schemaDelta.System {
 			case protos.TypeSystem_Q:
-				// schema-delta replay isn't passed the mirror's version: added columns keep the original mapping
-				columnType = qValueKindToPostgresType(columnType, shared.InternalVersion_First)
+				// as at creation; deltas from sources that don't set the version keep the original mapping
+				columnType = pgColumnTypeForKind(columnType, schemaDelta.Version, schemaDelta.SourcePeerType)
 			case protos.TypeSystem_PG:
 				// schema qualification handled after numeric typmod check
 			default:
