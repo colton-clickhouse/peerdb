@@ -48,6 +48,9 @@ func (n *normalizeStmtGenerator) columnTypeToPg(
 		// varchar(n) or char(n) would truncate silently)
 		if targetType, ok := n.targetColumnTypes[dstTableName][column.Name]; ok {
 			pgType = targetType
+			if castThroughKindType(types.QValueKind(column.Type), targetType) {
+				pgType = qValueKindToPostgresType(column.Type, n.version) + "::" + targetType
+			}
 		} else {
 			pgType = qValueKindToPostgresType(column.Type, n.version)
 		}
@@ -66,6 +69,21 @@ func (n *normalizeStmtGenerator) columnTypeToPg(
 	}
 
 	return pgType
+}
+
+// castThroughKindType reports whether a value of kind goes through its own Postgres type on the way to the
+// target column's type: a DECIMAL's or float's text ('5.00', '1e+15') isn't integer input, while numeric
+// and float convert to integers by rounding, as they did by assignment before casts followed the target.
+// Every other target (enum, bit, interval, time, geometry, ...) is cast to directly.
+func castThroughKindType(kind types.QValueKind, targetType string) bool {
+	switch kind {
+	case types.QValueKindNumeric, types.QValueKindFloat32, types.QValueKindFloat64:
+		switch targetType {
+		case "smallint", "integer", "bigint":
+			return true
+		}
+	}
+	return false
 }
 
 func (n *normalizeStmtGenerator) generateExpr(
