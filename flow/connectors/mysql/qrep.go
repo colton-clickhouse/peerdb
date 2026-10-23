@@ -154,6 +154,21 @@ func (c *MySqlConnector) GetQRepPartitions(
 		return nil, fmt.Errorf("failed to convert partition maximum to qvalue: %w", err)
 	}
 
+	if watermarkQKind == types.QValueKindDate || watermarkQKind == types.QValueKindTimestamp {
+		fullTable, err := temporalPartitionBounds(rs.Values[0][0], rs.Values[0][1], &val1, &val2)
+		if err != nil {
+			return nil, err
+		} else if fullTable {
+			if last != nil && last.Range != nil {
+				return nil, fmt.Errorf("watermark minimum %q has a zero part and can't start a partition",
+					rs.Values[0][0].AsString())
+			}
+			c.logger.Warn("[mysql] watermark minimum has a zero part, defaulting to full table snapshot",
+				slog.String("table", config.WatermarkTable), slog.String("column", config.WatermarkColumn))
+			return utils.FullTablePartition(), nil
+		}
+	}
+
 	start, startIsString := val1.Value().(string)
 	end, endIsString := val2.Value().(string)
 	if startIsString && endIsString {
@@ -182,6 +197,63 @@ func (c *MySqlConnector) GetQRepPartitions(
 	}
 
 	return partitionHelper.GetPartitions(), nil
+}
+
+// temporalPartitionBounds replaces DATE/DATETIME partition bounds converted as values: a zero date, and by
+// version a zero month, day or year, converts to the epoch, so a MAX like '2025-03-00' ended the range before
+// its start and a zero MIN skipped every row before 1970. A MAX with a zero month or day rounds up to a real
+// date that MySQL sorts after it ('2025-03-00' -> '2025-03-01'). A MIN with a zero part has no real date at or
+// below it (year 0 is outside the range a partition can carry), so fullTable reports that the table can't be
+// range partitioned.
+func temporalPartitionBounds(minFV, maxFV mysql.FieldValue, minVal, maxVal *types.QValue) (bool, error) {
+	if minFV.Type != mysql.FieldValueTypeString || maxFV.Type != mysql.FieldValueTypeString {
+		return false, nil
+	}
+	minStr, maxStr := string(minFV.AsString()), string(maxFV.AsString())
+	if hasZeroDatePart(minStr) || strings.HasPrefix(minStr, "0000") {
+		return true, nil
+	}
+	minTime, err := parseMysqlDateTime(minStr)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse partition minimum %q: %w", minStr, err)
+	}
+	maxTime, err := parseMysqlDateTime(rollZeroDatePartsForward(maxStr))
+	if err != nil {
+		return false, fmt.Errorf("failed to parse partition maximum %q: %w", maxStr, err)
+	}
+	if _, isDate := (*minVal).(types.QValueDate); isDate {
+		*minVal, *maxVal = types.QValueDate{Val: minTime}, types.QValueDate{Val: maxTime}
+	} else {
+		*minVal, *maxVal = types.QValueTimestamp{Val: minTime}, types.QValueTimestamp{Val: maxTime}
+	}
+	return false, nil
+}
+
+// hasZeroDatePart reports a zero month or day
+func hasZeroDatePart(s string) bool {
+	return len(s) >= 10 && (s[5:7] == "00" || s[8:10] == "00")
+}
+
+// rollZeroDatePartsForward turns a zero month or day into 01, which sorts after it
+func rollZeroDatePartsForward(s string) string {
+	if !hasZeroDatePart(s) {
+		return s
+	}
+	b := []byte(s)
+	if s[5:7] == "00" {
+		b[6] = '1'
+	}
+	if s[8:10] == "00" {
+		b[9] = '1'
+	}
+	return string(b)
+}
+
+func parseMysqlDateTime(s string) (time.Time, error) {
+	if len(s) == len(time.DateOnly) {
+		return time.Parse(time.DateOnly, s)
+	}
+	return time.Parse("2006-01-02 15:04:05.999999", s)
 }
 
 func supportsRangePartition(qkind types.QValueKind) bool {
