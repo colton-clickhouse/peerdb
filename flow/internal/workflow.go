@@ -93,6 +93,10 @@ func keepStalled(status protos.FlowStatus) string {
 const lastProgressSQL = `coalesce((SELECT max(b.end_time) FROM peerdb_stats.cdc_batches b
 	WHERE b.flow_name = f.name AND b.sync_time >= f.created_at), f.created_at)`
 
+// actionableErrorSQL selects the flow_errors rows e that count for STALLED: errors the classifier marked
+// user-actionable (alerting.NotifyUser). Transient errors before them don't start the streak.
+const actionableErrorSQL = `e.error_type = 'error' AND e.error_action = 'notify_user'`
+
 // retryGapSQL is the longest gap between two errors of one ongoing failure: the threshold, but at least
 // 15 minutes, since the CDC flow waits up to 10 minutes before retrying a failed sync (cdc_flow.go). $N is
 // the threshold in minutes.
@@ -100,18 +104,18 @@ func retryGapSQL(n int) string {
 	return fmt.Sprintf("make_interval(mins => greatest($%d, 15))", n)
 }
 
-// MarkFlowStalledIfPersistent sets a RUNNING CDC flow to STALLED if it has failed without progress for longer
-// than thresholdMinutes: its errors since the last progress form one streak, without a gap longer than
-// retryGapSQL, that started before it. Called when a user-actionable error is recorded. Returns whether the
-// flow became STALLED.
+// MarkFlowStalledIfPersistent sets a RUNNING CDC flow to STALLED if it has failed with user-actionable errors
+// without progress for longer than thresholdMinutes: those errors since the last progress form one streak,
+// without a gap longer than retryGapSQL, that started before it. Called when a user-actionable error is
+// recorded. Returns whether the flow became STALLED.
 func MarkFlowStalledIfPersistent(ctx context.Context, pool shared.CatalogPool, flowName string, thresholdMinutes uint32,
 ) (bool, error) {
 	tag, err := pool.Exec(ctx, `UPDATE flows f SET status = $1, updated_at = now()
 		WHERE f.name = $2 AND f.status = $3 AND f.query_string IS NULL AND (
 			SELECT max(e.t) FILTER (WHERE e.gap IS NULL OR e.gap > `+retryGapSQL(4)+`)
 			FROM (SELECT error_timestamp AS t, error_timestamp - lag(error_timestamp) OVER (ORDER BY error_timestamp) AS gap
-				FROM peerdb_stats.flow_errors
-				WHERE flow_name = f.name AND error_type = 'error' AND error_timestamp > `+lastProgressSQL+`) e
+				FROM peerdb_stats.flow_errors e
+				WHERE e.flow_name = f.name AND `+actionableErrorSQL+` AND e.error_timestamp > `+lastProgressSQL+`) e
 		) < now() - make_interval(mins => $4)`,
 		protos.FlowStatus_STATUS_STALLED, flowName, protos.FlowStatus_STATUS_RUNNING, int32(thresholdMinutes))
 	if err != nil {
@@ -121,12 +125,12 @@ func MarkFlowStalledIfPersistent(ctx context.Context, pool shared.CatalogPool, f
 }
 
 // ClearStalledFlows sets STALLED flows back to RUNNING once they've made progress within the last
-// thresholdMinutes, or stopped failing (no error within retryGapSQL); all of them when the STALLED status is
-// disabled (thresholdMinutes 0). Returns the flows it cleared.
+// thresholdMinutes, or stopped failing (no user-actionable error within retryGapSQL); all of them when the
+// STALLED status is disabled (thresholdMinutes 0). Returns the flows it cleared.
 func ClearStalledFlows(ctx context.Context, pool shared.CatalogPool, thresholdMinutes uint32) ([]string, error) {
 	rows, err := pool.Query(ctx, `UPDATE flows f SET status = $1, updated_at = now()
 		WHERE f.status = $2 AND ($3 = 0 OR `+lastProgressSQL+` > now() - make_interval(mins => $3)
-			OR NOT EXISTS (SELECT 1 FROM peerdb_stats.flow_errors e WHERE e.flow_name = f.name AND e.error_type = 'error'
+			OR NOT EXISTS (SELECT 1 FROM peerdb_stats.flow_errors e WHERE e.flow_name = f.name AND `+actionableErrorSQL+`
 				AND e.error_timestamp > now() - `+retryGapSQL(3)+`))
 		RETURNING f.name`,
 		protos.FlowStatus_STATUS_RUNNING, protos.FlowStatus_STATUS_STALLED, int32(thresholdMinutes))
