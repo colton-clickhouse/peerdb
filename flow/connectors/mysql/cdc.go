@@ -1391,6 +1391,8 @@ func (c *MySqlConnector) processAlterTableQuery(ctx context.Context, catalogPool
 		AddedColumns:    nil,
 		System:          protos.TypeSystem_Q,
 		NullableEnabled: currentSchema != nil && currentSchema.NullableEnabled,
+		Version:         mirrorVersion,
+		SourcePeerType:  protos.DBType_MYSQL,
 	}
 
 	existingColTypes := make(map[string]string)
@@ -1707,6 +1709,8 @@ func (c *MySqlConnector) processTableMapEventSchema(
 			AddedColumns:    addedColumns,
 			System:          protos.TypeSystem_Q,
 			NullableEnabled: schema.NullableEnabled,
+			Version:         req.InternalVersion,
+			SourcePeerType:  protos.DBType_MYSQL,
 		}
 
 		c.logger.Info("Schema change detected from TABLE_MAP_EVENT",
