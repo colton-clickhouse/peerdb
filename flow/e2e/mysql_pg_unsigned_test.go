@@ -74,6 +74,36 @@ func (s MySQLPGSuite) Test_Unsigned_CDC_Into_Wider_Target() {
 	RequireEnvCanceled(t, env)
 }
 
+// CDC of DECIMAL and DOUBLE columns into integer target columns (pre-created or altered by the user). Their
+// text form ('5.00') isn't integer input, so a direct cast to the target's type fails normalize; numeric and
+// float convert to integers by rounding, as they did by assignment before casts followed the target's types.
+func (s MySQLPGSuite) Test_Decimal_CDC_Into_Integer_Target() {
+	t := s.t
+	srcTable := "decimal_cdc_int"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY,
+		c_dec DECIMAL(10,2), c_dbl DOUBLE)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 1, 1)`, srcFull)))
+
+	env := s.startUnsignedFlow(srcTable, shared.InternalVersion_Latest)
+	EnvWaitFor(t, env, 3*time.Minute, "initial load", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 1
+	})
+	_, err := s.dest.Conn().Exec(t.Context(), fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN c_dec TYPE integer,
+		ALTER COLUMN c_dbl TYPE bigint`, dstFull))
+	EnvNoError(t, env, err)
+
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(
+		`INSERT INTO %s VALUES (2, 5.00, 7), (3, 6.50, 1e15)`, srcFull)))
+	EnvWaitFor(t, env, 2*time.Minute, "decimal and double values in integer columns through CDC", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE (id, c_dec, c_dbl) IN
+			((2, 5, 7), (3, 7, 1000000000000000))`, dstFull)) == 2
+	})
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+}
+
 // startUnsignedFlow starts a mirror of srcTable at the given internal version
 func (s MySQLPGSuite) startUnsignedFlow(srcTable string, version uint32) WorkflowRun {
 	connectionGen := FlowConnectionGenerationConfig{
