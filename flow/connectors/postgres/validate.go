@@ -294,7 +294,7 @@ func (c *PostgresConnector) ValidateMirrorDestination(
 	if err := longIdentifiersError(cfg.TableMappings, tableNameSchemaMapping); err != nil {
 		return err
 	}
-	if err := columnTypeSettingsError(cfg.TableMappings, tableNameSchemaMapping); err != nil {
+	if err := columnTypeSettingsError(cfg.TableMappings, tableNameSchemaMapping, cfg.Version); err != nil {
 		return err
 	}
 
@@ -445,29 +445,29 @@ func longIdentifiersError(tableMappings []*protos.TableMapping, schemas map[stri
 
 // columnTypeSettingsError names the column settings whose destination_type Postgres doesn't apply, or is nil.
 // Postgres creates columns from the source's types; destination_type only picks a MySQL TINYINT(1) column's
-// decoding (smallint or boolean), which the source schema then carries.
-func columnTypeSettingsError(tableMappings []*protos.TableMapping, schemas map[string]*protos.TableSchema) error {
+// decoding (smallint or boolean), which the source schema then carries. A destination_type naming the type the
+// column gets anyway is accepted. Tables without a schema (resync doesn't read it) aren't checked: their
+// settings were checked when they were added.
+func columnTypeSettingsError(
+	tableMappings []*protos.TableMapping, schemas map[string]*protos.TableSchema, version uint32,
+) error {
 	var unsupported []string
 	for _, tableMapping := range tableMappings {
-		kinds := make(map[string]types.QValueKind)
-		if schema, ok := schemas[tableMapping.SourceTableIdentifier]; ok {
-			for _, column := range schema.Columns {
-				kinds[column.Name] = types.QValueKind(column.Type)
-			}
+		schema, ok := schemas[tableMapping.SourceTableIdentifier]
+		if !ok {
+			continue
+		}
+		kinds := make(map[string]types.QValueKind, len(schema.Columns))
+		for _, column := range schema.Columns {
+			kinds[column.Name] = types.QValueKind(column.Type)
 		}
 		for _, setting := range tableMapping.Columns {
 			if setting.DestinationType == "" {
 				continue
 			}
-			switch kind := kinds[setting.SourceName]; strings.ToLower(strings.TrimSpace(setting.DestinationType)) {
-			case "smallint", "int2":
-				if kind == types.QValueKindInt8 || kind == types.QValueKindUInt8 {
-					continue
-				}
-			case "boolean", "bool":
-				if kind == types.QValueKindBoolean {
-					continue
-				}
+			if kind, ok := kinds[setting.SourceName]; ok &&
+				pgTypeAlias(setting.DestinationType) == pgTypeAlias(qValueKindToPostgresType(string(kind), version)) {
+				continue
 			}
 			unsupported = append(unsupported,
 				fmt.Sprintf("%s.%s %s", tableMapping.SourceTableIdentifier, setting.SourceName, setting.DestinationType))
@@ -479,4 +479,24 @@ func columnTypeSettingsError(tableMappings []*protos.TableMapping, schemas map[s
 	return fmt.Errorf("column destination types aren't applied for Postgres destinations: %s; "+
 		"the only one supported is smallint or boolean on a MySQL TINYINT(1) column; remove the others "+
 		"(pre-create the target table for other types)", strings.Join(unsupported, ", "))
+}
+
+// pgTypeAlias spells a Postgres type name one way, for comparing names.
+func pgTypeAlias(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	switch name {
+	case "int2":
+		return "smallint"
+	case "int", "int4":
+		return "integer"
+	case "int8":
+		return "bigint"
+	case "bool":
+		return "boolean"
+	case "float4":
+		return "real"
+	case "float8", "float":
+		return "double precision"
+	}
+	return name
 }
