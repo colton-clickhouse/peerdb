@@ -274,7 +274,8 @@ func (c *MySqlConnector) PullQRepRecords(
 	stream *model.QRecordStream,
 ) (int64, int64, error) {
 	tableSchema, err := c.getTableSchemaForTable(ctx, config.Env,
-		&protos.TableMapping{SourceTableIdentifier: config.WatermarkTable}, protos.TypeSystem_Q,
+		// with the column settings, which can pick a column's decoding (TINYINT(1)), as when the table was set up
+		&protos.TableMapping{SourceTableIdentifier: config.WatermarkTable, Columns: config.Columns}, protos.TypeSystem_Q,
 		config.Version)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to get schema for watermark table %s: %w", config.WatermarkTable, err)

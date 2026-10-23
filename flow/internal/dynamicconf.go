@@ -578,6 +578,15 @@ var DynamicSettings = [...]*protos.DynamicSetting{
 		TargetForSetting: protos.DynconfTarget_ALL,
 	},
 	{
+		Name: "PEERDB_MYSQL_TINYINT1_AS_INT",
+		Description: "Read MySQL TINYINT(1) columns as integers instead of booleans, keeping values other than 0 and 1. " +
+			"A column setting's destination_type wins for that column",
+		DefaultValue:     "false",
+		ValueType:        protos.DynconfValueType_BOOL,
+		ApplyMode:        protos.DynconfApplyMode_APPLY_MODE_NEW_MIRROR,
+		TargetForSetting: protos.DynconfTarget_ALL,
+	},
+	{
 		Name: "PEERDB_MYSQL_SKIP_GTID_SET",
 		Description: "GTID set merged into MySQL CDC checkpoint at stream start, skipping those transactions, " +
 			"which can cause data loss. Set per mirror to recover from purged binlogs, using missing set reported by error 1236",
@@ -839,6 +848,10 @@ func PeerDBMySQLBinlogStalenessSeconds(ctx context.Context, env map[string]strin
 		return 0, err
 	}
 	return time.Duration(x) * time.Second, nil
+}
+
+func PeerDBMySQLTinyInt1AsInt(ctx context.Context, env map[string]string) (bool, error) {
+	return dynamicConfBool(ctx, env, "PEERDB_MYSQL_TINYINT1_AS_INT")
 }
 
 func PeerDBMySQLSkipGTIDSet(ctx context.Context, env map[string]string) (string, error) {
