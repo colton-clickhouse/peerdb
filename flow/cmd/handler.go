@@ -488,6 +488,11 @@ func (h *FlowRequestHandler) FlowStateChange(
 		if err := internal.ValidateEnv(cdcUpdate.UpdatedEnv); err != nil {
 			return nil, NewInvalidArgumentApiError(fmt.Errorf("invalid settings override: %w", err))
 		}
+		if len(cdcUpdate.AdditionalTables) > 0 {
+			if apiErr := h.validateAdditionalTables(ctx, req.FlowJobName, cdcUpdate.AdditionalTables); apiErr != nil {
+				return nil, apiErr
+			}
+		}
 	}
 
 	if req.FlowConfigUpdate != nil && req.FlowConfigUpdate.GetCdcFlowConfigUpdate() != nil &&
