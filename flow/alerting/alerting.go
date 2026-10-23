@@ -402,8 +402,8 @@ func (a *Alerter) recordFlowErrorInternal(
 		return
 	}
 
-	// 2. Insert log to flow_errors table
-	if err := InsertFlowLog(ctx, a.CatalogPool, flowName, errMessage, errorType); err != nil {
+	// 2. Insert log to flow_errors table, with its class: the STALLED status counts user-actionable errors
+	if err := insertFlowLog(ctx, a.CatalogPool, flowName, errMessage, errorType, &errClass); err != nil {
 		logger.Error("failed to insert flow error", slog.Any("error", err))
 	} else if errorType == FlowErrorTypeError && errClass.ErrorAction() == NotifyUser {
 		a.markStalledIfPersistent(ctx, flowName, errClass)
@@ -451,9 +451,9 @@ func (a *Alerter) markStalledIfPersistent(ctx context.Context, flowName string, 
 		return
 	}
 	if stalled {
-		message := fmt.Sprintf("Mirror is STALLED: it has failed for more than %d minutes without making progress "+
-			"(error class %s) and isn't expected to recover without intervention. "+
-			"It returns to RUNNING once it makes progress again or stops failing.", threshold, errClass.String())
+		message := fmt.Sprintf("Mirror is STALLED: user-actionable errors have kept it from making progress for more "+
+			"than %d minutes (error class %s). It returns to RUNNING once it makes progress again or stops failing.",
+			threshold, errClass.String())
 		logger.Warn(message, slog.String("flowName", flowName))
 		if err := InsertFlowLog(ctx, a.CatalogPool, flowName, message, FlowErrorTypeWarn); err != nil {
 			logger.Warn("failed to insert flow warning", slog.Any("error", err))
@@ -486,6 +486,22 @@ func InsertFlowLog(
 	message string,
 	errorType FlowErrorType,
 ) error {
+	return insertFlowLog(ctx, catalogPool, flowName, message, errorType, nil)
+}
+
+// insertFlowLog inserts a flow log, with the error's class and action when errClass isn't nil
+func insertFlowLog(
+	ctx context.Context,
+	catalogPool shared.CatalogPool,
+	flowName string,
+	message string,
+	errorType FlowErrorType,
+	errClass *ErrorClass,
+) error {
+	var class, action *string
+	if errClass != nil {
+		class, action = &errClass.Class, (*string)(&errClass.action)
+	}
 	logger := internal.SlogLoggerFromCtx(ctx)
 	logger.InfoContext(ctx, fmt.Sprintf("inserting user-facing flow log: [%s] %s", errorType.String(), message),
 		slog.String("flowName", flowName),
@@ -493,9 +509,7 @@ func InsertFlowLog(
 		slog.String("message", message),
 		slog.String("logAudience", "user"),
 	)
-	_, err := catalogPool.Exec(
-		ctx, "INSERT INTO peerdb_stats.flow_errors(flow_name,error_message,error_type) VALUES($1,$2,$3)",
-		flowName, message, errorType.String(),
-	)
+	_, err := catalogPool.Exec(ctx, `INSERT INTO peerdb_stats.flow_errors(flow_name,error_message,error_type,error_class,error_action)
+		VALUES($1,$2,$3,$4,$5)`, flowName, message, errorType.String(), class, action)
 	return err
 }
