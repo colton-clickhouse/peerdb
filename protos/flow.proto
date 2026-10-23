@@ -564,6 +564,10 @@ message TableSchemaDelta {
   repeated FieldDescription added_columns = 3;
   TypeSystem system = 4;
   bool nullable_enabled = 5;
+  // the mirror's internal version and source, so that destinations map added columns as at table creation;
+  // set by the MySQL reader (0 elsewhere: the original mapping)
+  uint32 version = 6;
+  peerdb_peers.DBType source_peer_type = 7;
 }
 
 message QRepFlowState {
