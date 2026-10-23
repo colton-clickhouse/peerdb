@@ -644,19 +644,18 @@ func (c *PostgresConnector) ReplayTableSchemaDeltas(
 				common.QuoteIdentifier(addedColumn.Name), columnType)
 
 			// The source's default also fills the rows that predate the column, as on the source (MySQL writes
-			// no row events for them). NOT NULL needs it: without a default the existing rows would violate it.
+			// no row events for them). The column is added nullable even when the source's is NOT NULL: changes
+			// captured before the ALTER but normalized after it don't carry the column, and normalize writes NULL
+			// for them.
 			var columnDefault string
 			if addedColumn.DefaultExpr != nil && schemaDelta.System == protos.TypeSystem_Q {
 				if expr, ok := pgDefaultExpr(*addedColumn.DefaultExpr, types.QValueKind(addedColumn.Type), columnType); ok {
 					columnDefault = " DEFAULT " + expr
-					if schemaDelta.NullableEnabled && !addedColumn.Nullable {
-						columnDefault += " NOT NULL"
-					}
 				}
 			}
-			if columnDefault == "" && schemaDelta.NullableEnabled && !addedColumn.Nullable {
-				c.logger.Warn("[schema delta replay] adding NOT NULL column as nullable: no default for the existing rows",
-					slog.String("column", addedColumn.Name), slog.String("dstTableName", schemaDelta.DstTableName))
+			if schemaDelta.NullableEnabled && !addedColumn.Nullable {
+				c.logger.Warn("[schema delta replay] adding NOT NULL column as nullable: changes captured before the ALTER "+
+					"don't carry it", slog.String("column", addedColumn.Name), slog.String("dstTableName", schemaDelta.DstTableName))
 			}
 
 			added := false

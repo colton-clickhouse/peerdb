@@ -7,9 +7,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// NOT NULL and column defaults must reach the target, at table creation and on a mid-stream ADD COLUMN, with the
-// mirror propagating nullability (PEERDB_NULLABLE). MySQL's ADD COLUMN ... DEFAULT fills existing rows without row
-// events, so the target must fill them too.
+// NOT NULL and column defaults must reach the target at table creation, with the mirror propagating nullability
+// (PEERDB_NULLABLE), and defaults on a mid-stream ADD COLUMN. MySQL's ADD COLUMN ... DEFAULT fills existing rows
+// without row events, so the target must fill them too. The added column stays nullable: a row inserted just
+// before the ALTER is normalized without it, and must not wedge normalize on a NOT NULL constraint.
 func (s MySQLPGSuite) Test_Defaults_And_Not_Null_Carried() {
 	t := s.t
 	srcTable := "defaults_not_null"
@@ -37,12 +38,13 @@ func (s MySQLPGSuite) Test_Defaults_And_Not_Null_Carried() {
 	EnvWaitFor(t, env, 3*time.Minute, "initial load", func() bool {
 		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 2
 	})
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s (id, name) VALUES (4, 'd')`, srcFull)))
 	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(
 		`ALTER TABLE %s ADD COLUMN added VARCHAR(10) NOT NULL DEFAULT 'dflt'`, srcFull)))
 	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(
 		`INSERT INTO %s (id, name, added) VALUES (3, 'c', 'given')`, srcFull)))
 	EnvWaitFor(t, env, 2*time.Minute, "cdc insert after ADD COLUMN", func() bool {
-		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id = 3`, dstFull)) == 1
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id IN (3, 4)`, dstFull)) == 2
 	})
 
 	// column -> "NOT NULL" / "" and its default expression ("" for none)
@@ -77,7 +79,10 @@ func (s MySQLPGSuite) Test_Defaults_And_Not_Null_Carried() {
 		"name":  {"NOT NULL", ""},
 		"qty":   {"NOT NULL", "5"},
 		"note":  {"", "'x'::text"},
-		"added": {"NOT NULL", "'dflt'::text"},
+		"added": {"", "'dflt'::text"},
 	}, columns)
+	// row 4 holds the default if it was normalized before the ALTER, NULL if in the same batch
+	require.Contains(t, []string{"dflt", "NULL"}, added[4])
+	delete(added, 4)
 	require.Equal(t, map[int32]string{1: "dflt", 2: "dflt", 3: "given"}, added)
 }
