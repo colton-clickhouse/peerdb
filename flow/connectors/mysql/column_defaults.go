@@ -44,10 +44,8 @@ func defaultExprFromInfoSchema(qkind types.QValueKind, columnDefault string, ext
 		return "", false
 	}
 
-	switch qkind {
-	case types.QValueKindBoolean, types.QValueKindInt8, types.QValueKindInt16, types.QValueKindInt32,
-		types.QValueKindInt64, types.QValueKindUInt8, types.QValueKindUInt16, types.QValueKindUInt32,
-		types.QValueKindUInt64, types.QValueKindFloat32, types.QValueKindFloat64, types.QValueKindNumeric:
+	switch {
+	case isNumericKind(qkind):
 		if bits := mysqlBitLiteralRegex.FindStringSubmatch(value); bits != nil {
 			n, err := strconv.ParseUint(bits[1], 2, 64)
 			if err != nil {
@@ -59,8 +57,8 @@ func defaultExprFromInfoSchema(qkind types.QValueKind, columnDefault string, ext
 			return "", false
 		}
 		return value, true
-	case types.QValueKindString, types.QValueKindEnum, types.QValueKindDate, types.QValueKindTimestamp,
-		types.QValueKindTimestampTZ, types.QValueKindTime:
+	case qkind == types.QValueKindString, qkind == types.QValueKindEnum, qkind == types.QValueKindDate,
+		qkind == types.QValueKindTimestamp, qkind == types.QValueKindTimestampTZ, qkind == types.QValueKindTime:
 		if strings.ContainsAny(value, "\\\t\n\r\x00") {
 			return "", false
 		}
@@ -68,4 +66,15 @@ func defaultExprFromInfoSchema(qkind types.QValueKind, columnDefault string, ext
 	default:
 		return "", false
 	}
+}
+
+// isNumericKind is whether a column of kind qkind takes a numeric default (TINYINT(1) read as a boolean included).
+func isNumericKind(qkind types.QValueKind) bool {
+	switch qkind {
+	case types.QValueKindBoolean, types.QValueKindInt8, types.QValueKindInt16, types.QValueKindInt32,
+		types.QValueKindInt64, types.QValueKindUInt8, types.QValueKindUInt16, types.QValueKindUInt32,
+		types.QValueKindUInt64, types.QValueKindFloat32, types.QValueKindFloat64, types.QValueKindNumeric:
+		return true
+	}
+	return false
 }
