@@ -55,6 +55,11 @@ func (s MySQLPGSuite) Test_Normalize_Error_Names_Failing_Table() {
 		}
 		return count > 0
 	})
+	// and never under the batch's first table
+	count, err := GetLogCount(t.Context(), catalogPool, flowConnConfig.FlowJobName, "error",
+		"normalize statement for table "+s.DestinationTable(tables[0]))
+	EnvNoError(t, env, err)
+	EnvTrue(t, env, count == 0)
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
 }
