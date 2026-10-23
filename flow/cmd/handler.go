@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -215,12 +216,40 @@ func (h *FlowRequestHandler) CreateCDCFlow(
 		}
 	}
 
+	if err := h.pinTinyInt1Setting(ctx, connectionConfigsCore); err != nil {
+		return nil, NewInternalApiError(err)
+	}
+
 	if resp, err := h.createCDCFlow(ctx, connectionConfigsCore, workflowID); err != nil {
 		return nil, NewInternalApiError(err)
 	} else {
 		telemetry.LogActivityCreateFlow(ctx, connectionConfigsCore.FlowJobName)
 		return resp, nil
 	}
+}
+
+// pinTinyInt1Setting stores PEERDB_MYSQL_TINYINT1_AS_INT in a MySQL mirror's env when the mirror doesn't set it.
+// Table setup, the snapshot and later ADD COLUMNs each read it, so a change of the global setting mid-mirror
+// would decode one table's TINYINT(1) columns two ways.
+func (h *FlowRequestHandler) pinTinyInt1Setting(ctx context.Context, cfg *protos.FlowConnectionConfigsCore) error {
+	const key = "PEERDB_MYSQL_TINYINT1_AS_INT"
+	if _, ok := cfg.Env[key]; ok {
+		return nil
+	}
+	if srcType, err := connectors.LoadPeerType(ctx, h.pool, cfg.SourceName); err != nil {
+		return fmt.Errorf("failed to load source peer type: %w", err)
+	} else if srcType != protos.DBType_MYSQL {
+		return nil
+	}
+	asInt, err := internal.PeerDBMySQLTinyInt1AsInt(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if cfg.Env == nil {
+		cfg.Env = make(map[string]string, 1)
+	}
+	cfg.Env[key] = strconv.FormatBool(asInt)
+	return nil
 }
 
 func (h *FlowRequestHandler) createCDCFlow(
