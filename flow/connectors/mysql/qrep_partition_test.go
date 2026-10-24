@@ -9,8 +9,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
+	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
+	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
 func TestUUIDToBigIntRoundTrip(t *testing.T) {
@@ -499,4 +502,44 @@ func TestBuildAdaptiveStringPartitions_MixedCase_UUID(t *testing.T) {
 	partitions := runAdaptiveStringPartitions(t, keys, binaryLess, numPartitions)
 	require.Len(t, partitions, numPartitions)
 	verifyFullCoverage(t, partitions, keys, binaryLess)
+}
+
+func TestTemporalPartitionBounds(t *testing.T) {
+	str := func(s string) mysql.FieldValue { return mysql.NewFieldValue(mysql.FieldValueTypeString, 0, []byte(s)) }
+	epochDate := types.QValueDate{Val: time.Unix(0, 0).UTC()}
+	epochTs := types.QValueTimestamp{Val: time.Unix(0, 0).UTC()}
+	for _, tc := range []struct {
+		name, min, max   string
+		date, fullTable  bool
+		wantMin, wantMax string
+	}{
+		{"partial zero max", "2024-05-10", "2025-03-00", true, false, "2024-05-10", "2025-03-01"},
+		{"zero month max", "1960-01-01 10:00:00", "2025-00-15 01:02:03", false, false, "1960-01-01 10:00:00", "2025-01-15 01:02:03"},
+		{"real bounds", "2024-05-10 00:00:00.5", "2024-06-01 00:00:00", false, false, "2024-05-10 00:00:00.5", "2024-06-01 00:00:00"},
+		{"zero min", "0000-00-00", "2025-01-01", true, true, "", ""},
+		{"partial zero min", "2024-03-00 00:00:00", "2025-01-01 00:00:00", false, true, "", ""},
+		{"zero year min", "0000-05-10", "2025-01-01", true, true, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var minVal, maxVal types.QValue = epochTs, epochTs
+			if tc.date {
+				minVal, maxVal = epochDate, epochDate
+			}
+			fullTable, err := temporalPartitionBounds(str(tc.min), str(tc.max), &minVal, &maxVal)
+			require.NoError(t, err)
+			require.Equal(t, tc.fullTable, fullTable)
+			if fullTable {
+				return
+			}
+			format := "2006-01-02 15:04:05.999999999"
+			if tc.date {
+				format = time.DateOnly
+				require.IsType(t, types.QValueDate{}, minVal)
+			} else {
+				require.IsType(t, types.QValueTimestamp{}, minVal)
+			}
+			require.Equal(t, tc.wantMin, minVal.Value().(time.Time).Format(format))
+			require.Equal(t, tc.wantMax, maxVal.Value().(time.Time).Format(format))
+		})
+	}
 }
