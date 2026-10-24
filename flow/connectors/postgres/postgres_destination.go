@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -451,6 +452,16 @@ func (c *PostgresConnector) normalizeBatch(
 	for _, entry := range entries {
 		ct, err := results.Exec()
 		if err != nil {
+			// a statement that fails to prepare fails the whole batch, and its error comes back with the
+			// first result: name the table whose statement it was, or none if it was the metadata update
+			var preprocessingErr pgx.ErrPreprocessingBatch
+			if errors.As(err, &preprocessingErr) {
+				i := slices.IndexFunc(entries, func(e batchEntry) bool { return e.statement == preprocessingErr.SQL() })
+				if i < 0 {
+					return 0, fmt.Errorf("failed to update metadata for NormalizeTables: %w", err)
+				}
+				entry = entries[i]
+			}
 			c.logger.Error("error executing normalize statement",
 				slog.String("statement", entry.statement),
 				slog.Int64("batchID", batchID),
