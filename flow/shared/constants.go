@@ -78,6 +78,9 @@ const (
 	// (from every source). Older mirrors write NULL (0, or 0001-01-01, when NOT NULL or inside an array), CDC floats
 	// NULL, and fail in CDC on an infinity date or timestamp (#6, #10).
 	InternalVersion_PgSpecialValues
+	// Postgres destinations, CockroachDB sources: TIME '24:00:00' is kept (Postgres time holds it). Older mirrors, and
+	// other destinations, clamp it to 23:59:59.999999 (#8).
+	InternalVersion_PgTime2400
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
