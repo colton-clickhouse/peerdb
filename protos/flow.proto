@@ -598,6 +598,11 @@ enum FlowStatus {
   STATUS_RESYNC = 9 [(peerdb_maintenance_wait) = true];;
   STATUS_FAILED = 10;
   STATUS_MODIFYING = 11 [(peerdb_maintenance_wait) = true];;
+  // Running, but user-actionable errors (e.g. a target column the mirror writes was dropped) have blocked
+  // progress for longer than PEERDB_STALLED_THRESHOLD_MINUTES. Not terminal: pause, edit, resync and
+  // terminate work as for a running mirror, and it goes back to RUNNING once the mirror makes progress
+  // again or the errors stop.
+  STATUS_STALLED = 12;
 }
 
 message CDCFlowConfigUpdate {

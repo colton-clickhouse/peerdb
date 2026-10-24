@@ -488,7 +488,8 @@ func (h *FlowRequestHandler) FlowStateChange(
 		var changeErr error
 		switch req.RequestedFlowState {
 		case protos.FlowStatus_STATUS_PAUSED:
-			if currState == protos.FlowStatus_STATUS_RUNNING {
+			// a STALLED mirror is running too; pausing it is how its tables get fixed or removed
+			if currState == protos.FlowStatus_STATUS_RUNNING || currState == protos.FlowStatus_STATUS_STALLED {
 				changeErr = model.FlowSignal.SignalClientWorkflow(ctx, h.temporalClient, workflowID, "", model.PauseSignal)
 				if changeErr == nil {
 					telemetry.LogActivityPauseFlow(ctx, req.FlowJobName)
