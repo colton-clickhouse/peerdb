@@ -857,7 +857,7 @@ func (c *CockroachDBConnector) emitSchemaDelta(
 	// DDL has run since. The timestamp is always readable: it lies at or ahead
 	// of the changefeed cursor, which itself must be inside the GC window for
 	// the feed to run at all.
-	freshSchemas, err := c.getTableSchema(ctx, state.req.Env, protos.TypeSystem_Q,
+	freshSchemas, err := c.getTableSchema(ctx, state.req.Env, state.req.InternalVersion, protos.TypeSystem_Q,
 		[]*protos.TableMapping{{SourceTableIdentifier: source}}, asOf)
 	if err != nil {
 		return fmt.Errorf("failed to refresh schema for %s: %w", source, err)

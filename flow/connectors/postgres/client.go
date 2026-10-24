@@ -20,7 +20,9 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/model"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared"
+	"github.com/PeerDB-io/peerdb/flow/shared/datatypes"
 	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
+	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
 const (
@@ -709,6 +711,12 @@ func generateCreateTableSQLForNormalizedTable(
 		if column.Type == "numeric" && column.TypeModifier != -1 {
 			precision, scale := common.ParseNumericTypmod(column.TypeModifier)
 			pgColumnType = fmt.Sprintf("numeric(%d,%d)", precision, scale)
+		}
+		// constrained geometry / geography (#14): the PostGIS typmod gives the shape and SRID
+		if tableSchema.System == protos.TypeSystem_Q && config.Version >= shared.InternalVersion_PgConstrainedGeo &&
+			column.TypeModifier > 0 &&
+			(column.Type == string(types.QValueKindGeometry) || column.Type == string(types.QValueKindGeography)) {
+			pgColumnType = datatypes.FormatGeoType(column.Type, column.TypeModifier)
 		}
 
 		var notNull string
