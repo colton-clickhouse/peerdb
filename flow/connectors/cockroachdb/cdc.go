@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -281,6 +282,9 @@ func (c *CockroachDBConnector) PullRecords(
 		}
 	}
 	state.finishIndexing()
+	if err := c.loadSourceKeys(ctx, state); err != nil {
+		return err
+	}
 	slices.SortFunc(state.tables, func(a, b *common.QualifiedTable) int {
 		return strings.Compare(a.String(), b.String())
 	})
@@ -844,6 +848,57 @@ func (c *CockroachDBConnector) emitSchemaDelta(
 		state.req.RecordStream.AddSchemaDelta(state.req.TableNameMapping, delta)
 		c.logger.Info("[cockroachdb] detected added columns from changefeed",
 			slog.String("table", source), slog.Any("delta", delta))
+	}
+	return nil
+}
+
+// loadSourceKeys gives each table's cached schema its source primary key in key order, when that differs from the
+// destination's (virtual key columns, #12): deletes without a row image are rebuilt from the changefeed key, which
+// follows the source key. Read before the changefeed starts, as the session's connection is busy afterwards.
+func (c *CockroachDBConnector) loadSourceKeys(ctx context.Context, state *changefeedPullState) error {
+	if len(state.schemas) == 0 {
+		return nil
+	}
+	namespaces := make([]string, 0, len(state.schemas))
+	tables := make([]string, 0, len(state.schemas))
+	sources := make(map[[2]string]string, len(state.schemas))
+	for source := range state.schemas {
+		parsed, err := common.ParseTableIdentifier(source)
+		if err != nil {
+			return fmt.Errorf("invalid source table %s: %w", source, err)
+		}
+		namespaces = append(namespaces, parsed.Namespace)
+		tables = append(tables, parsed.Table)
+		sources[[2]string{parsed.Namespace, parsed.Table}] = source
+	}
+	rows, err := c.conn.Query(ctx, `
+		SELECT k.table_schema, k.table_name, k.column_name
+		FROM information_schema.key_column_usage k
+		JOIN information_schema.table_constraints tc
+			ON tc.constraint_schema = k.constraint_schema AND tc.constraint_name = k.constraint_name
+			AND tc.table_schema = k.table_schema AND tc.table_name = k.table_name
+		JOIN unnest($1::STRING[], $2::STRING[]) AS t (table_schema, table_name)
+			ON t.table_schema = k.table_schema AND t.table_name = k.table_name
+		WHERE tc.constraint_type = 'PRIMARY KEY'
+		ORDER BY k.table_schema, k.table_name, k.ordinal_position
+	`, namespaces, tables)
+	if err != nil {
+		return fmt.Errorf("failed to read source primary keys: %w", err)
+	}
+	keys := make(map[string][]string, len(state.schemas))
+	var namespace, table, column string
+	if _, err := pgx.ForEachRow(rows, []any{&namespace, &table, &column}, func() error {
+		if source, ok := sources[[2]string{namespace, table}]; ok {
+			keys[source] = append(keys[source], column)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to read source primary keys: %w", err)
+	}
+	for source, key := range keys {
+		if schema := state.schemas[source]; !slices.Equal(key, schema.primaryKeys) {
+			schema.sourceKey = key
+		}
 	}
 	return nil
 }
