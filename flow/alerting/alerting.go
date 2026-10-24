@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +25,8 @@ import (
 type Alerter struct {
 	shared.CatalogPool
 	otelManager *otel_metrics.OtelManager
+	// normalizeGapLogged is when each flow last logged its normalize gap, to log it once per alerting gap
+	normalizeGapLogged sync.Map
 }
 
 type AlertSenderConfig struct {
@@ -251,6 +254,18 @@ func (a *Alerter) AlertIfTooLongSinceLastNormalize(ctx context.Context, alertKey
 		internal.LoggerFromCtx(ctx).Info("Alerting disabled via environment variable, returning")
 		return
 	}
+	if intervalSinceLastNormalize <= time.Duration(intervalSinceLastNormalizeThreshold)*time.Minute {
+		return
+	}
+	// logged whether or not alert senders are configured, so a stalled normalize is never silent, but once per
+	// alerting gap like the alert: the check runs every minute
+	if logGap, err := internal.PeerDBAlertingGapMinutesAsDuration(ctx, nil); err == nil {
+		if last, ok := a.normalizeGapLogged.Load(alertKeys.FlowName); !ok || time.Since(last.(time.Time)) >= logGap {
+			a.normalizeGapLogged.Store(alertKeys.FlowName, time.Now())
+			internal.LoggerFromCtx(ctx).Warn("too long since last data normalize", slog.String("flowName", alertKeys.FlowName),
+				slog.Duration("intervalSinceLastNormalize", intervalSinceLastNormalize))
+		}
+	}
 	alertSenderConfigs, err := a.registerSendersFromPool(ctx)
 	if err != nil {
 		internal.LoggerFromCtx(ctx).Warn("failed to set alert senders", slog.Any("error", err))
@@ -262,20 +277,18 @@ func (a *Alerter) AlertIfTooLongSinceLastNormalize(ctx context.Context, alertKey
 		deploymentUIDPrefix = fmt.Sprintf("[%s] - ", internal.PeerDBDeploymentUID())
 	}
 
-	if intervalSinceLastNormalize > time.Duration(intervalSinceLastNormalizeThreshold)*time.Minute {
-		alertKey := fmt.Sprintf("%s Too long since last data normalize for PeerDB mirror %s",
-			deploymentUIDPrefix, alertKeys.FlowName)
-		alertMessage := fmt.Sprintf("%sData hasn't been synced to the target for mirror `%s` since the last `%s`."+
-			` This could indicate an issue with the pipeline — please check the UI and logs to confirm.`+
-			` Alternatively, it might be that the source database is idle and not receiving new updates.`, deploymentUIDPrefix,
-			alertKeys.FlowName, intervalSinceLastNormalize)
+	alertKey := fmt.Sprintf("%s Too long since last data normalize for PeerDB mirror %s",
+		deploymentUIDPrefix, alertKeys.FlowName)
+	alertMessage := fmt.Sprintf("%sData hasn't been synced to the target for mirror `%s` since the last `%s`."+
+		` This could indicate an issue with the pipeline — please check the UI and logs to confirm.`+
+		` Alternatively, it might be that the source database is idle and not receiving new updates.`, deploymentUIDPrefix,
+		alertKeys.FlowName, intervalSinceLastNormalize)
 
-		for _, alertSenderConfig := range alertSenderConfigs {
-			if len(alertSenderConfig.AlertForMirrors) == 0 ||
-				slices.Contains(alertSenderConfig.AlertForMirrors, alertKeys.FlowName) {
-				if a.checkAndAddAlertToCatalog(ctx, alertSenderConfig.Id, alertKey, alertMessage) {
-					a.alertToProvider(ctx, alertSenderConfig, alertKey, alertMessage)
-				}
+	for _, alertSenderConfig := range alertSenderConfigs {
+		if len(alertSenderConfig.AlertForMirrors) == 0 ||
+			slices.Contains(alertSenderConfig.AlertForMirrors, alertKeys.FlowName) {
+			if a.checkAndAddAlertToCatalog(ctx, alertSenderConfig.Id, alertKey, alertMessage) {
+				a.alertToProvider(ctx, alertSenderConfig, alertKey, alertMessage)
 			}
 		}
 	}
