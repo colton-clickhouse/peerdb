@@ -331,6 +331,8 @@ func TestParseTimeTZ(t *testing.T) {
 		{"10:00:00.123456+00", 10*time.Hour + 123456*time.Microsecond},
 		{"10:00:00+03:00:00", 7 * time.Hour},
 		{"24:00:00+00", 23*time.Hour + 59*time.Minute + 59*time.Second + 999999*time.Microsecond},
+		{"23:30:00-05", 4*time.Hour + 30*time.Minute},
+		{"01:00:00+05", 20 * time.Hour},
 	}
 
 	for _, tc := range testCases {
