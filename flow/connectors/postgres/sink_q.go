@@ -20,6 +20,8 @@ import (
 type RecordStreamSink struct {
 	*model.QRecordStream
 	DestinationType protos.DBType
+	// PgIntervals writes intervals into interval columns as intervals (InternalVersion_PgInterval)
+	PgIntervals bool
 }
 
 func (stream RecordStreamSink) ExecuteQueryWithTx(
@@ -116,7 +118,7 @@ func (stream RecordStreamSink) CopyInto(ctx context.Context, _ *PostgresConnecto
 	if err != nil {
 		return 0, err
 	}
-	return tx.CopyFrom(ctx, table, columnNames, model.NewQRecordCopyFromSource(stream.QRecordStream))
+	return tx.CopyFrom(ctx, table, columnNames, model.NewQRecordCopyFromSource(stream.QRecordStream, stream.PgIntervals))
 }
 
 func (stream RecordStreamSink) GetColumnNames() ([]string, error) {

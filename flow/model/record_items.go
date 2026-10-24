@@ -224,6 +224,26 @@ func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 				nullableFloatArr = append(nullableFloatArr, nonFiniteFloat(float64(val), opts))
 			}
 			jsonStruct[col] = nullableFloatArr
+		case types.QValueInterval:
+			if opts.PgIntervals {
+				text, err := pgIntervalJSONText(v.Val)
+				if err != nil {
+					return nil, err
+				}
+				jsonStruct[col] = text
+			} else {
+				jsonStruct[col] = v.Val
+			}
+		case types.QValueArrayInterval:
+			if opts.PgIntervals {
+				arr, err := pgIntervalJSONArray(v.Val, v.Nulls)
+				if err != nil {
+					return nil, err
+				}
+				jsonStruct[col] = arr
+			} else {
+				jsonStruct[col] = v.Value()
+			}
 		default:
 			jsonStruct[col] = v.Value()
 		}
