@@ -220,3 +220,23 @@ func TestProcessGeometryData(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "POINT (1 2)", qv.Val)
 }
+
+// NULL stays NULL; an empty NOT NULL binary value is empty on every version, since NULL can't come from the source
+func TestQValueFromMysql_NullAndNotNullBinary(t *testing.T) {
+	ev := &replication.TableMapEvent{ColumnType: []byte{mysql.MYSQL_TYPE_VARCHAR}, ColumnMeta: []uint16{16}}
+	logger := log.NewStructuredLogger(nil)
+	var coercionReported bool
+	for _, version := range []uint32{shared.InternalVersion_MySQLEmptyBinaryAsEmpty - 1, shared.InternalVersion_Latest} {
+		qv, err := QValueFromMysqlFieldValue(types.QValueKindBytes, mysql.MYSQL_TYPE_VAR_STRING,
+			mysql.NewFieldValue(mysql.FieldValueTypeNull, 0, nil), version)
+		require.NoError(t, err)
+		require.IsType(t, types.QValueNull(""), qv, "snapshot NULL, version %d", version)
+		qv, err = QValueFromMysqlRowEvent(ev, 0, nil, nil, types.QValueKindBytes, nil, nil, logger, &coercionReported, version)
+		require.NoError(t, err)
+		require.IsType(t, types.QValueNull(""), qv, "cdc NULL, version %d", version)
+		require.IsType(t, types.QValueNull(""), notNullBinary(qv, true), "a NULL isn't made empty")
+	}
+	old := types.QValueBytes{Val: nil} // what older mirrors emit for an empty value
+	require.Nil(t, notNullBinary(old, false).(types.QValueBytes).Val, "nullable columns keep the old behaviour")
+	require.NotNil(t, notNullBinary(old, true).(types.QValueBytes).Val, "NOT NULL columns get the empty value")
+}

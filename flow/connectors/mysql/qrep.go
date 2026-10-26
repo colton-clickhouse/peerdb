@@ -317,7 +317,7 @@ func (c *MySqlConnector) PullQRepRecords(
 			if err != nil {
 				return fmt.Errorf("could not convert mysql value for %s: %w", schema.Fields[idx].Name, err)
 			}
-			record = append(record, qv)
+			record = append(record, notNullBinary(qv, rs.Fields[idx].Flag&mysql.NOT_NULL_FLAG != 0))
 		}
 
 		if err := stream.Send(ctx, record); err != nil {

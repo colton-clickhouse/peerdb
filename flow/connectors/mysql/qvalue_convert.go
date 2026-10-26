@@ -242,6 +242,16 @@ func nonNilBinary(b []byte, version uint32) []byte {
 	return b
 }
 
+// notNullBinary keeps an empty value of a NOT NULL binary column empty on mirrors of every version: NULL can't
+// come from the source there, so the nil slice that mirrors from before InternalVersion_MySQLEmptyBinaryAsEmpty
+// emit for it only made the destination refuse the row (a NOT NULL or key column).
+func notNullBinary(qv types.QValue, notNull bool) types.QValue {
+	if b, ok := qv.(types.QValueBytes); ok && notNull && b.Val == nil {
+		return types.QValueBytes{Val: []byte{}}
+	}
+	return qv
+}
+
 // padTrimmedBinary restores a fixed-width binary value
 func padTrimmedBinary(data []byte, width int) []byte {
 	if width <= len(data) {
