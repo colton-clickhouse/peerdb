@@ -307,6 +307,9 @@ func (c *PostgresConnector) ValidateMirrorDestination(
 	if err := longIdentifiersError(cfg.TableMappings, tableNameSchemaMapping); err != nil {
 		return err
 	}
+	if err := longPeerDBNamesError(cfg); err != nil {
+		return err
+	}
 
 	if cfg.Resync {
 		return nil // no need to validate schema for resync, as we will create or replace the tables
@@ -452,4 +455,26 @@ func longIdentifiersError(tableMappings []*protos.TableMapping, schemas map[stri
 	return fmt.Errorf("identifiers longer than %d bytes can't be replicated to Postgres, which would truncate them: %s; "+
 		"rename them on the source, map the table to a shorter destination name, or exclude the columns",
 		maxIdentifierBytes, strings.Join(long, ", "))
+}
+
+// longPeerDBNamesError refuses names PeerDB derives or adds that Postgres would truncate: the mirror's raw table
+// (two mirrors to one database whose names share their first 51 bytes would share it, and one's raw-batch cleanup
+// would delete the other's unnormalized rows), and the soft delete and synced-at columns.
+func longPeerDBNamesError(cfg *protos.FlowConnectionConfigsCore) error {
+	var long []string
+	if raw := getRawTableIdentifier(cfg.FlowJobName); len(raw) > maxIdentifierBytes {
+		long = append(long, fmt.Sprintf("mirror name %s (its raw table %s)", cfg.FlowJobName, raw))
+	}
+	if len(cfg.SoftDeleteColName) > maxIdentifierBytes {
+		long = append(long, "soft delete column "+cfg.SoftDeleteColName)
+	}
+	if len(cfg.SyncedAtColName) > maxIdentifierBytes {
+		long = append(long, "synced-at column "+cfg.SyncedAtColName)
+	}
+	if len(long) == 0 {
+		return nil
+	}
+	return fmt.Errorf("names longer than %d bytes can't be used with Postgres, which would truncate them: %s; "+
+		"use a shorter mirror name (at most %d bytes) or column name", maxIdentifierBytes, strings.Join(long, ", "),
+		maxIdentifierBytes-len(getRawTableIdentifier("")))
 }

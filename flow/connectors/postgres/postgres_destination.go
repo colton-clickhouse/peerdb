@@ -514,12 +514,14 @@ func (c *PostgresConnector) CreateRawTable(ctx context.Context, req *protos.Crea
 		return nil, fmt.Errorf("error creating raw table: %w", err)
 	}
 	if _, err := createRawTableTx.Exec(ctx,
-		fmt.Sprintf(createRawTableBatchIDIndexSQL, rawTableIdentifier, c.metadataSchema, rawTableIdentifier),
+		fmt.Sprintf(createRawTableBatchIDIndexSQL, rawTableIndexName(rawTableIdentifier, "_batchid_idx"), c.metadataSchema,
+			rawTableIdentifier),
 	); err != nil {
 		return nil, fmt.Errorf("error creating batch ID index on raw table: %w", err)
 	}
 	if _, err := createRawTableTx.Exec(ctx,
-		fmt.Sprintf(createRawTableDstTableIndexSQL, rawTableIdentifier, c.metadataSchema, rawTableIdentifier),
+		fmt.Sprintf(createRawTableDstTableIndexSQL, rawTableIndexName(rawTableIdentifier, "_dst_table_idx"), c.metadataSchema,
+			rawTableIdentifier),
 	); err != nil {
 		return nil, fmt.Errorf("error creating destination table index on raw table: %w", err)
 	}

@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/stretchr/testify/require"
 
@@ -47,4 +48,14 @@ func (s MySQLPGSuite) Test_Long_Identifiers_Refused_At_Validation() {
 	require.Contains(t, err.Error(), long, "the refusal must name the table")
 	require.Contains(t, err.Error(), colA, "the refusal must name the column")
 	require.NotContains(t, err.Error(), short, "the refusal must not name other tables")
+
+	// a mirror name whose raw table _peerdb_raw_<name> Postgres would truncate
+	connectionGen := FlowConnectionGenerationConfig{
+		FlowJobName:   strings.Repeat("m", 63-len("_peerdb_raw_")+1),
+		TableMappings: TableMappings(s, short, short),
+		Destination:   s.Peer().Name,
+	}
+	flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
+	_, err = client.ValidateCDCMirror(t.Context(), &protos.CreateCDCFlowRequest{ConnectionConfigs: flowConnConfig})
+	require.ErrorContains(t, err, "mirror name "+flowConnConfig.FlowJobName)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"log/slog"
 	"slices"
 	"strings"
@@ -34,8 +35,8 @@ const (
 		_peerdb_timestamp BIGINT NOT NULL,_peerdb_destination_table_name TEXT NOT NULL,_peerdb_data JSONB NOT NULL,
 		_peerdb_record_type INTEGER NOT NULL, _peerdb_match_data JSONB,_peerdb_batch_id INTEGER,
 		_peerdb_unchanged_toast_columns TEXT)`
-	createRawTableBatchIDIndexSQL  = "CREATE INDEX IF NOT EXISTS %s_batchid_idx ON %s.%s(_peerdb_batch_id)"
-	createRawTableDstTableIndexSQL = "CREATE INDEX IF NOT EXISTS %s_dst_table_idx ON %s.%s(_peerdb_destination_table_name)"
+	createRawTableBatchIDIndexSQL  = "CREATE INDEX IF NOT EXISTS %s ON %s.%s(_peerdb_batch_id)"
+	createRawTableDstTableIndexSQL = "CREATE INDEX IF NOT EXISTS %s ON %s.%s(_peerdb_destination_table_name)"
 
 	getLastOffsetSQL            = "SELECT lsn_offset FROM %s.%s WHERE mirror_job_name=$1"
 	setLastOffsetSQL            = "UPDATE %s.%s SET lsn_offset=GREATEST(lsn_offset, $1) WHERE mirror_job_name=$2"
@@ -686,6 +687,19 @@ func (c *PostgresConnector) createMetadataSchema(ctx context.Context) error {
 
 func getRawTableIdentifier(jobName string) string {
 	return rawTablePrefix + "_" + strings.ToLower(shared.ReplaceIllegalCharactersWithUnderscores(jobName))
+}
+
+// rawTableIndexName names an index of a raw table: the raw table's name and the suffix, or, if that's longer than
+// Postgres keeps (validation refuses raw table names that are), the name shortened and made unique by a hash of
+// it, since truncation would give two mirrors' indexes the same name and the second's CREATE INDEX IF NOT EXISTS
+// would skip it
+func rawTableIndexName(rawTableIdentifier string, suffix string) string {
+	name := rawTableIdentifier + suffix
+	if len(name) <= maxIdentifierBytes {
+		return name
+	}
+	hash := fmt.Sprintf("%08x", crc32.ChecksumIEEE([]byte(rawTableIdentifier)))
+	return rawTableIdentifier[:maxIdentifierBytes-len(suffix)-len(hash)-1] + "_" + hash + suffix
 }
 
 func generateCreateTableSQLForNormalizedTable(
