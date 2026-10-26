@@ -9,7 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/log"
 
+	"github.com/PeerDB-io/peerdb/flow/generated/protos"
 	"github.com/PeerDB-io/peerdb/flow/shared"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
@@ -289,4 +291,30 @@ func TestQValueFromMysql_PartialZeroDates(t *testing.T) {
 	// older mirrors keep rolling a zero month or day forward
 	require.Equal(t, time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC), snapshot("2024-00-15", gate-1))
 	require.Equal(t, time.Date(2024, 2, 1, 12, 0, 0, 0, time.UTC), cdc("2024-02-00 12:00:00", gate-1))
+}
+
+// Zero-part dates in key columns are refused from InternalVersion_MySQLZeroDatePartsAsZero on, in the MySQL
+// reader, so for every destination (ClickHouse would dedup the merged keys silently).
+func TestCheckZeroDateKey(t *testing.T) {
+	gate := shared.InternalVersion_MySQLZeroDatePartsAsZero
+	key := &protos.FieldDescription{Name: "k", Type: string(types.QValueKindDate)}
+	ts := &protos.FieldDescription{Name: "k", Type: string(types.QValueKindTimestamp)}
+	other := &protos.FieldDescription{Name: "d", Type: string(types.QValueKindDate)}
+	keys := []string{"k"}
+	var zeroKey *exceptions.MySQLZeroDateKeyError
+	for _, tc := range []struct {
+		val any
+		fd  *protos.FieldDescription
+	}{
+		{"0000-00-00", key}, {"2025-03-00", key}, {"0000-05-10", key}, {"2025-00-00 10:00:00", ts},
+		{time.Date(0, 5, 10, 0, 0, 0, 0, time.UTC), ts},
+	} {
+		err := checkZeroDateKey(tc.val, tc.fd, keys, "db.t", gate)
+		require.ErrorAs(t, err, &zeroKey, "%v", tc.val)
+		require.Equal(t, "k", zeroKey.ColumnName)
+	}
+	require.NoError(t, checkZeroDateKey("2025-03-00", other, keys, "db.t", gate), "not a key column")
+	require.NoError(t, checkZeroDateKey("2025-03-01", key, keys, "db.t", gate), "a real date")
+	require.NoError(t, checkZeroDateKey(time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC), ts, keys, "db.t", gate))
+	require.NoError(t, checkZeroDateKey("2025-03-00", key, keys, "db.t", gate-1), "older mirrors unchanged")
 }

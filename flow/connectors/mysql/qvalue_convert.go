@@ -599,6 +599,10 @@ func QValueFromMysqlRowEvent(
 		// YEAR: https://dev.mysql.com/doc/refman/8.4/en/year.html
 		return types.QValueInt16{Val: int16(val)}, nil
 	case time.Time:
+		// legacy DATETIME (MariaDB's old temporal format) decodes year 0 as a time, not a string
+		if val.Year() == 0 && version >= shared.InternalVersion_MySQLZeroDatePartsAsZero {
+			return types.QValueTimestamp{Val: time.Unix(0, 0).UTC()}, nil
+		}
 		return types.QValueTimestamp{Val: val}, nil
 	case *replication.JsonDiff:
 		// Partial JSON updates (binlog_row_value_options=PARTIAL_JSON) cannot be applied; the caller
