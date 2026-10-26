@@ -44,11 +44,20 @@ func TestArrayConversionByVersionAndDestination(t *testing.T) {
 			types.QValueArrayDate{Val: []time.Time{day, epoch, epoch, epoch}, Nulls: nulls}},
 		{"timestamptz clickhouse", pgtype.TimestamptzArrayOID, protos.DBType_CLICKHOUSE, latest,
 			types.QValueArrayTimestampTZ{Val: []time.Time{day, epoch, epoch, epoch}, Nulls: nulls}},
+		{"timestamp clickhouse", pgtype.TimestampArrayOID, protos.DBType_CLICKHOUSE, latest,
+			types.QValueArrayTimestamp{Val: []time.Time{day, epoch, epoch, epoch}, Nulls: nulls}},
+		// a destination whose DefaultTime is the zero time
+		{"date snowflake", pgtype.DateArrayOID, protos.DBType_SNOWFLAKE, latest,
+			types.QValueArrayDate{Val: []time.Time{day, {}, {}, {}}, Nulls: nulls}},
 		// older mirrors keep the zero time for both, whatever the destination
 		{"date pg old", pgtype.DateArrayOID, protos.DBType_POSTGRES, old,
 			types.QValueArrayDate{Val: []time.Time{day, {}, {}, {}}}},
 		{"date clickhouse old", pgtype.DateArrayOID, protos.DBType_CLICKHOUSE, old,
 			types.QValueArrayDate{Val: []time.Time{day, {}, {}, {}}}},
+		{"timestamp pg old", pgtype.TimestampArrayOID, protos.DBType_POSTGRES, old,
+			types.QValueArrayTimestamp{Val: []time.Time{day, {}, {}, {}}}},
+		{"timestamptz pg old", pgtype.TimestamptzArrayOID, protos.DBType_POSTGRES, old,
+			types.QValueArrayTimestampTZ{Val: []time.Time{day, {}, {}, {}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			qv, err := c.parseFieldFromPostgresOID(tc.oid, -1, true, tc.dst, elems(), nil, tc.version)
@@ -74,10 +83,18 @@ func TestArrayConversionByVersionAndDestination(t *testing.T) {
 		for _, tc := range []struct {
 			dst     protos.DBType
 			version uint32
-		}{{protos.DBType_CLICKHOUSE, latest}, {protos.DBType_POSTGRES, old}} {
+		}{{protos.DBType_CLICKHOUSE, latest}, {protos.DBType_CLICKHOUSE, old}, {protos.DBType_POSTGRES, old}} {
 			qv, err := c.parseFieldFromPostgresOID(pgtype.NumericArrayOID, -1, true, tc.dst, numeric(), nil, tc.version)
 			require.NoError(t, err)
 			require.Nil(t, qv.(types.QValueArrayNumeric).Specials, "%v at %d", tc.dst, tc.version)
 		}
+	})
+	t.Run("numeric with precision pg", func(t *testing.T) {
+		// numeric(10,2): NaN is marked, infinity isn't (numeric(p, s) can't hold it) and stays 0
+		const typmod = (10<<16 | 2) + 4
+		qv, err := c.parseFieldFromPostgresOID(pgtype.NumericArrayOID, typmod, true, protos.DBType_POSTGRES, numeric(), nil, latest)
+		require.NoError(t, err)
+		require.Equal(t, []types.SpecialValue{types.SpecialNone, types.SpecialNone, types.SpecialNaN, types.SpecialNone},
+			qv.(types.QValueArrayNumeric).Specials)
 	})
 }

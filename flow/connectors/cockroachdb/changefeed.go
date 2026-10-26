@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgerrcode"
@@ -753,12 +754,18 @@ func changefeedArraySpecials(raw json.RawMessage, field types.QField) []types.Sp
 	return types.CompactSpecials(specials)
 }
 
-// truncateForError shortens a value quoted in an error message (and flow_errors) to at most 64 bytes.
+// truncateForError shortens a value quoted in an error message (and flow_errors) to at most 64 bytes, cutting at a
+// rune boundary: the catalog rejects invalid UTF-8, which would lose the error.
 func truncateForError(s string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
 	if len(s) <= 64 {
 		return s
 	}
-	return s[:61] + "..."
+	cut := 61
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }
 
 // changefeedNumericSpecial recognises the JSON strings "NaN", "Infinity" and "-Infinity"; like numericSpecial,
