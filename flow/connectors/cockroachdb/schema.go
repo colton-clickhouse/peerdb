@@ -139,9 +139,11 @@ func (c *CockroachDBConnector) getTableSchema(
 					WHERE pn.nspname = k.table_schema AND pc.relname = k.table_name AND pa.attname = k.column_name
 				), false),
 				COALESCE(c.generation_expression, '')
-			FROM information_schema.key_column_usage k`+aostClause+`
+			FROM information_schema.key_column_usage k
 			JOIN information_schema.columns c
-				ON c.table_schema = k.table_schema AND c.table_name = k.table_name AND c.column_name = k.column_name
+				ON c.table_schema = k.table_schema AND c.table_name = k.table_name AND c.column_name = k.column_name`+
+			// AS OF SYSTEM TIME follows the whole FROM clause, joins included; it applies to the subqueries too
+			aostClause+`
 			WHERE k.table_schema = $1 AND k.table_name = $2
 			AND k.constraint_name = (
 				SELECT constraint_name
