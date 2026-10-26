@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 
 	"google.golang.org/protobuf/proto"
@@ -371,8 +372,9 @@ func (h *FlowRequestHandler) checkFlagsCompatibility(
 // as mirror creation does on its first tables. A table the destination can't take would otherwise fail the
 // table addition's setup on every retry, or reach normalize and stall the whole mirror.
 func (h *FlowRequestHandler) validateAdditionalTables(
-	ctx context.Context, flowJobName string, tables []*protos.TableMapping,
+	ctx context.Context, flowJobName string, update *protos.CDCFlowConfigUpdate,
 ) APIError {
+	tables := update.AdditionalTables
 	cfg, err := h.getFlowConfigFromCatalog(ctx, flowJobName)
 	if err != nil {
 		return NewInternalApiError(fmt.Errorf("unable to get flow config: %w", err))
@@ -383,6 +385,21 @@ func (h *FlowRequestHandler) validateAdditionalTables(
 	core := proto_conversions.FlowConnectionConfigsToCore(cfg)
 	core.TableMappings = tables
 	core.Resync = false
+	// as the table addition runs them: snapshotted unless the update skips it, then replicated by the mirror's CDC
+	core.DoInitialSnapshot = !update.SkipInitialSnapshotForTableAdditions
+	core.InitialSnapshotOnly = false
+	// with the settings of the same update applied
+	core.Env = maps.Clone(core.Env)
+	if core.Env == nil {
+		core.Env = make(map[string]string, len(update.UpdatedEnv))
+	}
+	maps.Copy(core.Env, update.UpdatedEnv)
+	for _, key := range update.RemovedEnv {
+		delete(core.Env, key)
+	}
+	if err := h.checkTableMappings(ctx, core); err != nil {
+		return err
+	}
 
 	srcConn, srcClose, err := connectors.GetByNameAs[connectors.GetTableSchemaConnector](
 		ctx, core.Env, h.pool, core.SourceName)

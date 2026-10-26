@@ -495,8 +495,11 @@ func (h *FlowRequestHandler) FlowStateChange(
 			return nil, NewInvalidArgumentApiError(
 				errors.New("PEERDB_MYSQL_TINYINT1_AS_INT can't be changed on an existing mirror; recreate the mirror"))
 		}
-		if len(cdcUpdate.AdditionalTables) > 0 {
-			if apiErr := h.validateAdditionalTables(ctx, req.FlowJobName, cdcUpdate.AdditionalTables); apiErr != nil {
+		// not when the mirror is being terminated, which ignores the update (a source outage mustn't block it)
+		terminating := req.RequestedFlowState == protos.FlowStatus_STATUS_TERMINATING ||
+			req.RequestedFlowState == protos.FlowStatus_STATUS_TERMINATED
+		if len(cdcUpdate.AdditionalTables) > 0 && !terminating {
+			if apiErr := h.validateAdditionalTables(ctx, req.FlowJobName, cdcUpdate); apiErr != nil {
 				return nil, apiErr
 			}
 		}
@@ -568,12 +571,15 @@ func (h *FlowRequestHandler) FlowStateChange(
 				config.Resync = true
 				config.DoInitialSnapshot = true
 
-				// validate mirror first because once the mirror is dropped, there's no going back
+				// validate mirror first because once the mirror is dropped, there's no going back, unless the
+				// mirror skips validation, as at its creation
 				// Note: We do not validate snapshot parameters (SnapshotNumRowsPerPartition, etc)
-				if _, err := h.ValidateCDCMirror(ctx, &protos.CreateCDCFlowRequest{
-					ConnectionConfigs: config,
-				}); err != nil {
-					return nil, err
+				if !config.GetSkipValidation() {
+					if _, err := h.ValidateCDCMirror(ctx, &protos.CreateCDCFlowRequest{
+						ConnectionConfigs: config,
+					}); err != nil {
+						return nil, err
+					}
 				}
 				changeErr = model.FlowSignalStateChange.SignalClientWorkflow(ctx, h.temporalClient, workflowID, "", req)
 				if changeErr == nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -304,19 +305,22 @@ func (c *PostgresConnector) ValidateMirrorDestination(
 		}
 	}
 
-	// also before the resync shortcut: recreated tables would get the same truncated names
-	if err := longIdentifiersError(cfg.TableMappings, tableNameSchemaMapping); err != nil {
-		return err
-	}
-	if err := longPeerDBNamesError(cfg); err != nil {
-		return err
-	}
-	if err := columnTypeSettingsError(cfg.TableMappings, tableNameSchemaMapping, cfg.Version); err != nil {
+	// also before the resync shortcut: recreated tables would get the same truncated names. A resync recovers a
+	// mirror that exists, so it's refused only for what would break the recreated tables: names that collide
+	// once truncated. A long name alone, a long mirror name and a column setting are the mirror's as it runs.
+	if err := longIdentifiersError(cfg.TableMappings, tableNameSchemaMapping, cfg.Resync); err != nil {
 		return err
 	}
 
 	if cfg.Resync {
 		return nil // no need to validate schema for resync, as we will create or replace the tables
+	}
+
+	if err := longPeerDBNamesError(cfg); err != nil {
+		return err
+	}
+	if err := columnTypeSettingsError(cfg.TableMappings, tableNameSchemaMapping, cfg.Version); err != nil {
+		return err
 	}
 
 	if cfg.System == protos.TypeSystem_PG && cfg.Env["PEERDB_PG_AUTOMATED_SCHEMA_DUMP"] == "true" {
@@ -439,20 +443,45 @@ const MaxIdentifierBytes = maxIdentifierBytes
 
 // longIdentifiersError names the destination schemas, tables and columns longer than maxIdentifierBytes, or
 // is nil. Postgres truncates longer names silently, so the target's names would differ from the source's,
-// and two names sharing their first 63 bytes collide, which fails table setup for the whole mirror.
-func longIdentifiersError(tableMappings []*protos.TableMapping, schemas map[string]*protos.TableSchema) error {
+// and two names sharing their first 63 bytes collide, which fails table setup for the whole mirror. With
+// onlyCollisions (a resync), only names that collide with another once truncated.
+func longIdentifiersError(
+	tableMappings []*protos.TableMapping, schemas map[string]*protos.TableSchema, onlyCollisions bool,
+) error {
+	truncate := func(s string) string { return s[:min(len(s), maxIdentifierBytes)] }
 	var long []string
+	tables := make(map[string][]string) // truncated schema.table -> destination tables
 	for _, tableMapping := range tableMappings {
 		dst := tableMapping.DestinationTableIdentifier
 		namespace, table, _ := strings.Cut(dst, ".")
-		if len(namespace) > maxIdentifierBytes || len(table) > maxIdentifierBytes {
+		tables[truncate(namespace)+"."+truncate(table)] = append(tables[truncate(namespace)+"."+truncate(table)], dst)
+		if !onlyCollisions && (len(namespace) > maxIdentifierBytes || len(table) > maxIdentifierBytes) {
 			long = append(long, "table "+dst)
 		}
 		if schema, ok := schemas[tableMapping.SourceTableIdentifier]; ok {
+			columns := make(map[string][]string) // truncated name -> columns
 			for _, column := range schema.Columns {
-				if len(column.Name) > maxIdentifierBytes && !slices.Contains(tableMapping.Exclude, column.Name) {
+				if slices.Contains(tableMapping.Exclude, column.Name) {
+					continue
+				}
+				columns[truncate(column.Name)] = append(columns[truncate(column.Name)], column.Name)
+				if !onlyCollisions && len(column.Name) > maxIdentifierBytes {
 					long = append(long, "column "+dst+"."+column.Name)
 				}
+			}
+			if onlyCollisions {
+				for _, key := range slices.Sorted(maps.Keys(columns)) {
+					if names := columns[key]; len(names) > 1 {
+						long = append(long, "columns "+dst+"."+strings.Join(names, ", "+dst+"."))
+					}
+				}
+			}
+		}
+	}
+	if onlyCollisions {
+		for _, key := range slices.Sorted(maps.Keys(tables)) {
+			if names := tables[key]; len(names) > 1 {
+				long = append(long, "tables "+strings.Join(names, ", "))
 			}
 		}
 	}
