@@ -374,7 +374,7 @@ func qvalueFromCrdbValue(
 		}
 		return types.QValueArrayInt32{Val: a}, nil
 	case types.QValueKindArrayInt64:
-		a, err := convertToArray[int64](field.Type, widenOIDElements(value))
+		a, err := convertToArray[int64](field.Type, widenOIDElements(oid, value))
 		if err != nil {
 			return nil, err
 		}
@@ -400,26 +400,11 @@ func qvalueFromCrdbValue(
 	case types.QValueKindArrayDate, types.QValueKindArrayTimestamp, types.QValueKindArrayTimestampTZ:
 		var specials []types.SpecialValue
 		if elems, ok := value.([]any); ok {
-			// pgx decodes infinity elements as pgtype.InfinityModifier, which the element cast doesn't accept:
-			// marked as specials for Postgres destinations, DefaultTime for others, the zero time on older mirrors
-			replaced := slices.Clone(elems)
-			if pg.specialValues {
-				specials = make([]types.SpecialValue, len(elems))
-			}
-			for i, el := range elems {
-				inf, ok := el.(pgtype.InfinityModifier)
-				if !ok {
-					continue
-				}
-				replaced[i] = time.Time{}
-				if pg.specialValues {
-					specials[i] = infinitySpecial(inf)
-				} else if pg.arrayInfinity {
-					replaced[i] = pg.defaultTime
-				}
-			}
-			specials = types.CompactSpecials(specials)
-			value = replaced
+			// +-infinity and NULL elements: specials for Postgres destinations, DefaultTime for others, the zero
+			// time on older mirrors (qvalue.PrepareTimeArray)
+			value, specials = qvalue.PrepareTimeArray(elems, qvalue.TimeArrayOptions{
+				Specials: pg.specialValues, DefaultTime: pg.arrayInfinity, Destination: dstType,
+			})
 		}
 		a, err := convertToArray[time.Time](field.Type, value)
 		if err != nil {
@@ -544,7 +529,7 @@ func convertToString(typeMap *pgtype.Map, oid uint32, value any) string {
 			return string(buf)
 		}
 	}
-	if _, logged := fmtFallbackOIDs.LoadOrStore(oid, true); !logged {
+	if _, logged := fmtFallbackOIDs.LoadOrStore(fmt.Sprintf("%d %T", oid, value), true); !logged {
 		slog.Warn("[cockroachdb] no Postgres text form for a value, writing Go's formatting",
 			slog.Uint64("oid", uint64(oid)), slog.String("goType", fmt.Sprintf("%T", value)))
 	}
@@ -561,7 +546,8 @@ func timeText(micros int64) string {
 	return s
 }
 
-// fmtFallbackOIDs are the OIDs convertToString has logged its fmt.Sprint fallback for (once per process each).
+// fmtFallbackOIDs are the OID and Go type pairs convertToString has logged its fmt.Sprint fallback for (once per
+// process each; the OID alone would hide every value without one, OID 0).
 var fmtFallbackOIDs sync.Map
 
 // arrayElementOID is the element type's OID of an array type, so elements render as Postgres text (TIME[] as
@@ -575,10 +561,11 @@ func arrayElementOID(typeMap *pgtype.Map, arrayOID uint32) uint32 {
 	return 0
 }
 
-// widenOIDElements turns OID[] elements, which pgx decodes as uint32, into the int64 the column's kind holds.
-func widenOIDElements(value any) any {
+// widenOIDElements turns OID[] elements, which pgx decodes as uint32, into the int64 the column's kind holds. Only
+// for an OID[] value: any other array decoded as uint32 under an int64 kind still fails the element cast.
+func widenOIDElements(oid uint32, value any) any {
 	elems, ok := value.([]any)
-	if !ok {
+	if !ok || oid != pgtype.OIDArrayOID {
 		return value
 	}
 	var widened []any
@@ -617,19 +604,7 @@ func numericToDecimal(numVal pgtype.Numeric) (decimal.Decimal, bool) {
 // numericSpecial is the special value of a NaN or infinite numeric, or SpecialNone. Postgres can't store +-Infinity
 // in a numeric(p, s) column (CockroachDB can), so with a precision infinities keep the old fallback (NULL or 0).
 func numericSpecial(numVal pgtype.Numeric, precision int16) types.SpecialValue {
-	switch {
-	case !numVal.Valid:
-		return types.SpecialNone
-	case numVal.NaN:
-		return types.SpecialNaN
-	case precision != 0:
-		return types.SpecialNone
-	case numVal.InfinityModifier == pgtype.Infinity:
-		return types.SpecialInfinity
-	case numVal.InfinityModifier == pgtype.NegativeInfinity:
-		return types.SpecialNegInfinity
-	}
-	return types.SpecialNone
+	return qvalue.NumericSpecial(numVal, precision)
 }
 
 func infinitySpecial(inf pgtype.InfinityModifier) types.SpecialValue {

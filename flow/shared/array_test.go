@@ -47,8 +47,9 @@ func TestArrayCastElements(t *testing.T) {
 
 func TestArrayElementTypeErrorMessage(t *testing.T) {
 	err := exceptions.NewArrayElementTypeError(3, int64(1), int32(0)).WithColumn("ids")
-	require.Equal(t, "array column ids: element 3 decoded as int64, expected int32; the column's type probably changed"+
-		" since the mirror was created: recreate the mirror (or resync it from COMPLETED/FAILED), or exclude the column",
-		err.Error())
+	require.Equal(t, "array column ids: element 3 is int64, expected int32; the column's type probably changed"+
+		" since the mirror read its schema: resync the mirror, or exclude the column", err.Error())
+	require.Equal(t, "array column ids: element 3 is int64, expected int32; "+exceptions.HintUnexpected,
+		exceptions.NewArrayElementTypeError(3, int64(1), int32(0)).WithColumn("ids").WithHint(exceptions.HintUnexpected).Error())
 	require.Equal(t, "ids", err.WithColumn("other").Column, "the first column name set stays")
 }
