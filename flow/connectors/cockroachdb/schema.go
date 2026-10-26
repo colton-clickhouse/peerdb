@@ -69,7 +69,8 @@ func (c *CockroachDBConnector) getTableSchema(
 				c.udt_name,
 				c.is_nullable,
 				c.numeric_precision,
-				c.numeric_scale
+				c.numeric_scale,
+				c.is_hidden = 'YES'
 			FROM information_schema.columns c`+aostClause+`
 			WHERE c.table_schema = $1 AND c.table_name = $2
 			AND NOT EXISTS (
@@ -88,8 +89,13 @@ func (c *CockroachDBConnector) getTableSchema(
 		columns, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (*protos.FieldDescription, error) {
 			var colName, dataType, udtName, isNullable string
 			var numericPrecision, numericScale *int32
-			if err := row.Scan(&colName, &dataType, &udtName, &isNullable, &numericPrecision, &numericScale); err != nil {
+			var hidden bool
+			if err := row.Scan(&colName, &dataType, &udtName, &isNullable, &numericPrecision, &numericScale,
+				&hidden); err != nil {
 				return nil, fmt.Errorf("failed to scan column info: %w", err)
+			}
+			if hidden && isInternalColumn(colName) && version >= shared.InternalVersion_CockroachOmitInternalColumns {
+				return nil, nil
 			}
 
 			qkind := crdbTypeToQValueKind(dataType, udtName)
@@ -127,6 +133,7 @@ func (c *CockroachDBConnector) getTableSchema(
 		if err != nil {
 			return nil, fmt.Errorf("failed to read schema for table %s: %w", parsedTable, err)
 		}
+		columns = slices.DeleteFunc(columns, func(col *protos.FieldDescription) bool { return col == nil })
 
 		pkRows, err := c.conn.Query(ctx, `
 			SELECT
@@ -228,10 +235,11 @@ func (c *CockroachDBConnector) GetColumns(
 	schema string,
 	table string,
 ) (*protos.TableColumnsResponse, error) {
-	// virtual computed columns are hidden here too, matching GetTableSchema:
-	// they never replicate, so offering them in column pickers only misleads
+	// virtual computed columns and CockroachDB's internal ones are hidden here
+	// too, matching GetTableSchema: they never replicate, so offering them in
+	// column pickers only misleads
 	rows, err := c.conn.Query(ctx, `
-		SELECT c.column_name, c.data_type, c.is_nullable
+		SELECT c.column_name, c.data_type, c.is_nullable, c.is_hidden = 'YES'
 		FROM information_schema.columns c
 		WHERE c.table_schema = $1 AND c.table_name = $2
 		AND NOT EXISTS (
@@ -249,8 +257,12 @@ func (c *CockroachDBConnector) GetColumns(
 
 	columns, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (*protos.ColumnsItem, error) {
 		var colName, dataType, isNullable string
-		if err := row.Scan(&colName, &dataType, &isNullable); err != nil {
+		var hidden bool
+		if err := row.Scan(&colName, &dataType, &isNullable, &hidden); err != nil {
 			return nil, fmt.Errorf("failed to scan column: %w", err)
+		}
+		if hidden && isInternalColumn(colName) && version >= shared.InternalVersion_CockroachOmitInternalColumns {
+			return nil, nil
 		}
 		return &protos.ColumnsItem{
 			Name:     colName,
@@ -262,7 +274,9 @@ func (c *CockroachDBConnector) GetColumns(
 		return nil, fmt.Errorf("failed to read columns: %w", err)
 	}
 
-	return &protos.TableColumnsResponse{Columns: columns}, nil
+	return &protos.TableColumnsResponse{
+		Columns: slices.DeleteFunc(columns, func(col *protos.ColumnsItem) bool { return col == nil }),
+	}, nil
 }
 
 func (c *CockroachDBConnector) GetSchemas(ctx context.Context) (*protos.PeerSchemasResponse, error) {
@@ -398,4 +412,11 @@ func constrainedGeoTypmod(dataType string, udtName string, version uint32) (int3
 		return 0, false
 	}
 	return datatypes.MakeGeoTypmod(args)
+}
+
+// isInternalColumn reports whether a hidden column is one CockroachDB adds and maintains itself, such as row-level
+// TTL's crdb_internal_expiration (a hash-sharded key's shard column is virtual and already left out). A keyless
+// table's hidden rowid is not one of them: it keys the destination.
+func isInternalColumn(name string) bool {
+	return strings.HasPrefix(name, "crdb_internal_")
 }
