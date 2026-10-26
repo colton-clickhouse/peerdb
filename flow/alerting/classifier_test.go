@@ -2093,3 +2093,16 @@ func TestKeylessTablesErrorShouldNotifyUser(t *testing.T) {
 	assert.Equal(t, ErrorInfo{Source: ErrorSourcePostgres, Code: "TABLES_WITHOUT_PRIMARY_KEY"}, errInfo)
 	assert.Contains(t, err.Error(), "public.t1, public.t2")
 }
+
+// The normalize-gap warning is logged once per alerting gap per flow, and flows not seen for two gaps are forgotten.
+func TestNormalizeGapDue(t *testing.T) {
+	var a Alerter
+	now := time.Now()
+	require.True(t, a.normalizeGapDue("f", 15*time.Minute, now))
+	require.False(t, a.normalizeGapDue("f", 15*time.Minute, now.Add(14*time.Minute)))
+	require.True(t, a.normalizeGapDue("f", 15*time.Minute, now.Add(15*time.Minute)))
+	require.True(t, a.normalizeGapDue("g", 15*time.Minute, now.Add(15*time.Minute)), "per flow")
+	require.True(t, a.normalizeGapDue("h", 15*time.Minute, now.Add(46*time.Minute)))
+	_, kept := a.normalizeGapLogged.Load("f")
+	require.False(t, kept, "a flow not logged for two gaps is forgotten")
+}

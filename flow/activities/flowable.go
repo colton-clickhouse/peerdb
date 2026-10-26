@@ -1573,6 +1573,8 @@ func normalizeHeldByStatus(status protos.FlowStatus) bool {
 // alertIfNormalizeStalled raises the normalize-gap alert for a flow whose oldest synced batch has waited lag
 // for normalize, unless its source is Postgres, which alerts from its slot handling.
 func (a *FlowableActivity) alertIfNormalizeStalled(ctx context.Context, info flowInformation, lag time.Duration) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	flowMetadata, err := a.GetFlowMetadata(ctx, &protos.FlowContextMetadataInput{
 		FlowName:        info.config.FlowJobName,
 		SourceName:      info.config.SourceName,
@@ -1584,7 +1586,7 @@ func (a *FlowableActivity) alertIfNormalizeStalled(ctx context.Context, info flo
 	}
 	if flowMetadata.Source.Type != protos.DBType_POSTGRES {
 		a.Alerter.AlertIfTooLongSinceLastNormalize(ctx,
-			&alerting.AlertKeys{FlowName: info.config.FlowJobName, PeerName: info.config.SourceName}, lag)
+			&alerting.AlertKeys{FlowName: info.config.FlowJobName, PeerName: info.config.SourceName, PendingBatches: true}, lag)
 	}
 }
 
