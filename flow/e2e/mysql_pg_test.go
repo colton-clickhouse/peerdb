@@ -187,6 +187,6 @@ func (s MySQLPGSuite) Test_PKey_Update_Removes_Old_Row() {
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
 
-	require.EqualValues(t, 0, oldKeys, "rows under the old primary keys were left behind (#19)")
+	require.EqualValues(t, 0, oldKeys, "rows under the old primary keys were left behind")
 	require.EqualValues(t, 3, total, "destination row count")
 }
