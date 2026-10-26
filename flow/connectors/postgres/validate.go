@@ -430,6 +430,9 @@ func keylessTablesError(names []string, schemas map[string]*protos.TableSchema, 
 // maxIdentifierBytes is Postgres's identifier limit (NAMEDATALEN - 1)
 const maxIdentifierBytes = 63
 
+// MaxIdentifierBytes is Postgres's identifier limit (NAMEDATALEN - 1)
+const MaxIdentifierBytes = maxIdentifierBytes
+
 // longIdentifiersError names the destination schemas, tables and columns longer than maxIdentifierBytes, or
 // is nil. Postgres truncates longer names silently, so the target's names would differ from the source's,
 // and two names sharing their first 63 bytes collide, which fails table setup for the whole mirror.

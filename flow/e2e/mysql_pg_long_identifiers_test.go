@@ -1,12 +1,18 @@
 package e2e
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
+	"github.com/PeerDB-io/peerdb/flow/activities"
+	connpostgres "github.com/PeerDB-io/peerdb/flow/connectors/postgres"
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
+	"github.com/PeerDB-io/peerdb/flow/internal"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 )
 
 // MySQL identifiers can be 64 characters, Postgres truncates them to 63 bytes: two columns that share their
@@ -58,4 +64,34 @@ func (s MySQLPGSuite) Test_Long_Identifiers_Refused_At_Validation() {
 	flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
 	_, err = client.ValidateCDCMirror(t.Context(), &protos.CreateCDCFlowRequest{ConnectionConfigs: flowConnConfig})
 	require.ErrorContains(t, err, "mirror name "+flowConnConfig.FlowJobName)
+}
+
+// Mirrors created before validation refused long names: two mirrors into one database whose raw table names
+// Postgres truncates to the same name share the raw table. The sync refuses that, naming both, even when they use
+// different peers for the same database.
+func (s MySQLPGSuite) Test_Shared_Raw_Table_Refused() {
+	t := s.t
+	ctx := t.Context()
+	pool, err := internal.GetCatalogConnectionPoolFromEnv(ctx)
+	require.NoError(t, err)
+	peer := s.Peer()
+	alias := proto.Clone(peer).(*protos.Peer)
+	alias.Name = peer.Name + "_alias"
+	CreatePeer(t, alias)
+	prefix := strings.Repeat("m", connpostgres.MaxIdentifierBytes-len(connpostgres.RawTableIdentifier("")))
+	a, b := prefix+"_a_"+s.Suffix(), prefix+"_b_"+s.Suffix()
+	for _, f := range []struct{ name, peer string }{{a, peer.Name}, {b, alias.Name}} {
+		_, err := pool.Exec(ctx, `INSERT INTO flows(name, source_peer, destination_peer, workflow_id, status)
+			SELECT $1::text, p.id, p.id, $1::text, 1 FROM peers p WHERE p.name = $2`, f.name, f.peer)
+		require.NoError(t, err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM flows WHERE name = ANY($1)`, []string{a, b})
+		_, _ = pool.Exec(context.Background(), `DELETE FROM peers WHERE name = $1`, alias.Name)
+	})
+	var shared *exceptions.SharedRawTableError
+	require.ErrorAs(t, activities.CheckSharedRawTable(ctx, pool, a, peer.Name), &shared)
+	require.Equal(t, b, shared.OtherMirror)
+	// a mirror whose raw table name fits isn't affected
+	require.NoError(t, activities.CheckSharedRawTable(ctx, pool, "short_"+s.Suffix(), peer.Name))
 }

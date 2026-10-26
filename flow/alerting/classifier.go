@@ -178,6 +178,9 @@ var (
 	ErrorNotifyMySQLCompressedColumnUnsupported = ErrorClass{
 		Class: "NOTIFY_MYSQL_COMPRESSED_COLUMN_UNSUPPORTED", action: NotifyUser,
 	}
+	ErrorNotifySharedRawTable = ErrorClass{
+		Class: "NOTIFY_SHARED_RAW_TABLE", action: NotifyUser,
+	}
 	ErrorNotifyMySQLZeroDateKey = ErrorClass{
 		Class: "NOTIFY_MYSQL_ZERO_DATE_KEY", action: NotifyUser,
 	}
@@ -349,7 +352,7 @@ var stallingErrorClasses = []ErrorClass{
 	ErrorNotifyLogicalDecodingStandbyNotSupported, ErrorUnsupportedSchemaChange,
 	ErrNotifyPostgresCreatingSlotOnReader, ErrorNotifyChangeStreamHistoryLost, ErrorNotifyWalSegmentRemoved,
 	ErrorNotifyClickHouseSupportIsDisabledError, ErrorNotifyClickHousePermissionsError,
-	ErrorNotifyInvalidDestinationTableDefinition, ErrorNotifyMySQLZeroDateKey,
+	ErrorNotifyInvalidDestinationTableDefinition, ErrorNotifyMySQLZeroDateKey, ErrorNotifySharedRawTable,
 }
 
 // Stalls reports whether errors of this class count toward the STALLED status
@@ -1434,6 +1437,10 @@ func GetErrorClass(ctx context.Context, err error) (ErrorClass, ErrorInfo) {
 				ErrorAttributeKeyTable: fmt.Sprintf("%s.%s", partialJsonUnsupportedError.Schema, partialJsonUnsupportedError.Table),
 			},
 		}
+	}
+
+	if _, ok := errors.AsType[*exceptions.SharedRawTableError](err); ok {
+		return ErrorNotifySharedRawTable, ErrorInfo{Source: ErrorSourcePostgres, Code: "SHARED_RAW_TABLE"}
 	}
 
 	if zeroDateKeyError, ok := errors.AsType[*exceptions.MySQLZeroDateKeyError](err); ok {

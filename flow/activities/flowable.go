@@ -403,6 +403,11 @@ func (a *FlowableActivity) SyncFlow(
 	if err != nil {
 		return a.Alerter.LogFlowError(ctx, config.FlowJobName, fmt.Errorf("failed to load destination peer type: %w", err))
 	}
+	if destinationType == protos.DBType_POSTGRES {
+		if err := CheckSharedRawTable(ctx, a.CatalogPool, config.FlowJobName, config.DestinationName); err != nil {
+			return a.Alerter.LogFlowError(ctx, config.FlowJobName, err)
+		}
+	}
 
 	srcConn, srcClose, err := connectors.GetByNameWithCDCDestinationTypeAs[connectors.CDCPullConnectorCore](
 		ctx, config.Env, a.CatalogPool, config.SourceName, destinationType,

@@ -685,6 +685,11 @@ func (c *PostgresConnector) createMetadataSchema(ctx context.Context) error {
 	return nil
 }
 
+// RawTableIdentifier is the name of a mirror's raw table on a Postgres destination
+func RawTableIdentifier(jobName string) string {
+	return getRawTableIdentifier(jobName)
+}
+
 func getRawTableIdentifier(jobName string) string {
 	return rawTablePrefix + "_" + strings.ToLower(shared.ReplaceIllegalCharactersWithUnderscores(jobName))
 }
