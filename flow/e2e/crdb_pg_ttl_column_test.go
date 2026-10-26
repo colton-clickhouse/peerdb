@@ -65,3 +65,10 @@ func (s CRDBPGSuite) Test_TTL_Column_Left_Out_Keyless() {
 	require.Equal(s.t, "id,v,rowid", columns, "the hidden rowid stays: it keys the target")
 	require.Equal(s.t, "1=updated,2=cdc", rows)
 }
+
+// Mirrors created before InternalVersion_CockroachOmitInternalColumns keep replicating the column.
+func (s CRDBPGSuite) Test_TTL_Column_Old_Version() {
+	columns, rows := s.ttlColumnMirror("ttl_column_old", false, shared.InternalVersion_CockroachOmitInternalColumns-1)
+	require.Equal(s.t, "id,v,crdb_internal_expiration", columns)
+	require.Equal(s.t, "1=updated,2=cdc", rows)
+}

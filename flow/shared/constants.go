@@ -91,6 +91,10 @@ const (
 	// geography with their PostGIS typmod; Postgres destinations create them constrained and COPY keeps SRIDs. Older
 	// mirrors replicate them as text holding hex EWKB, and CDC writes to them fail.
 	InternalVersion_PgConstrainedGeo
+	// CockroachDB sources: hidden columns CockroachDB maintains itself (crdb_internal_*, e.g. row-level TTL's
+	// crdb_internal_expiration) are left out of the table schema, so they are neither created on the destination
+	// nor replicated. Older mirrors replicate them as regular columns. A keyless table's hidden rowid stays.
+	InternalVersion_CockroachOmitInternalColumns
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1

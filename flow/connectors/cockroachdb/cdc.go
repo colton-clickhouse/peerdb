@@ -954,9 +954,17 @@ func (c *CockroachDBConnector) emitSchemaDelta(
 	for _, colName := range unknown {
 		col, ok := freshColumns[colName]
 		if !ok {
+			schema.ignored[colName] = struct{}{}
+			// changefeeds emit hidden columns, so CockroachDB's internal ones
+			// (left out of the schema) arrive here on the first row of a table
+			if isInternalColumn(colName) &&
+				state.req.InternalVersion >= shared.InternalVersion_CockroachOmitInternalColumns {
+				c.logger.Info("[cockroachdb] leaving out CockroachDB internal column",
+					slog.String("table", source), slog.String("column", colName))
+				continue
+			}
 			// column vanished between the row event and the schema read
 			// (e.g. added then dropped); don't look it up again
-			schema.ignored[colName] = struct{}{}
 			c.logger.Warn("[cockroachdb] ignoring unknown changefeed column absent from source schema",
 				slog.String("table", source), slog.String("column", colName))
 			continue
