@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/PeerDB-io/peerdb/flow/generated/protos"
 	"github.com/PeerDB-io/peerdb/flow/shared"
 )
 
@@ -95,10 +96,11 @@ func (s MySQLPGSuite) Test_Decimal_CDC_Into_Integer_Target() {
 	EnvNoError(t, env, err)
 
 	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(
-		`INSERT INTO %s VALUES (2, 5.00, 7), (3, 6.50, 1e15)`, srcFull)))
+		`INSERT INTO %s VALUES (2, 5.00, 7), (3, 6.50, 1e15), (4, 2.50, 6.5)`, srcFull)))
+	// rounding as Postgres converts: numeric half away from zero, double precision half to even
 	EnvWaitFor(t, env, 2*time.Minute, "decimal and double values in integer columns through CDC", func() bool {
 		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE (id, c_dec, c_dbl) IN
-			((2, 5, 7), (3, 7, 1000000000000000))`, dstFull)) == 2
+			((2, 5, 7), (3, 7, 1000000000000000), (4, 3, 6))`, dstFull)) == 3
 	})
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
@@ -140,8 +142,10 @@ func (s MySQLPGSuite) destColumnTypes(table string) map[string]string {
 	return out
 }
 
-// mirrors created before InternalVersion_PgWidenUnsignedInts keep their narrower types, so an existing
-// mirror's resync or new tables don't change type (their casts: TestGenerateMergeStatement_TargetColumnTypes)
+// mirrors created before InternalVersion_PgWidenUnsignedInts keep their narrower types, and so do their new
+// tables and a resync of a running or paused mirror, which keeps the mirror's version
+// (Test_Unsigned_Old_Version_Resync_Keeps_Types); a resync from COMPLETED or FAILED recreates the mirror at the
+// latest version. Their casts: TestGenerateMergeStatement_TargetColumnTypes.
 func (s MySQLPGSuite) Test_Unsigned_Old_Version_Keeps_Types() {
 	t := s.t
 	srcTable := "unsigned_types_old"
@@ -160,4 +164,54 @@ func (s MySQLPGSuite) Test_Unsigned_Old_Version_Keeps_Types() {
 
 	require.Equal(t, "smallint", types["c_small"])
 	require.Equal(t, "integer", types["c_int"])
+}
+
+// A resync of a running mirror keeps the mirror's internal version, so a mirror from before
+// InternalVersion_PgWidenUnsignedInts recreates its tables with the narrower types.
+func (s MySQLPGSuite) Test_Unsigned_Old_Version_Resync_Keeps_Types() {
+	t := s.t
+	srcTable := "unsigned_types_old_resync"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY,
+		c_small SMALLINT UNSIGNED, c_int INT UNSIGNED)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 1, 1)`, srcFull)))
+
+	env := s.startUnsignedFlow(srcTable, shared.InternalVersion_PgWidenUnsignedInts-1)
+	EnvWaitFor(t, env, 3*time.Minute, "initial load", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 1
+	})
+	tableOid := func() int64 {
+		var oid int64
+		if err := s.dest.Conn().QueryRow(t.Context(), `SELECT to_regclass($1)::oid::bigint`, dstFull).Scan(&oid); err != nil {
+			return 0
+		}
+		return oid
+	}
+	before := tableOid()
+	client, err := NewApiClient()
+	require.NoError(t, err)
+	flowName := AddSuffix(s, srcTable)
+	_, err = client.FlowStateChange(t.Context(), &protos.FlowStateChangeRequest{
+		FlowJobName: flowName, RequestedFlowState: protos.FlowStatus_STATUS_RESYNC,
+	})
+	require.NoError(t, err)
+	// the resync drops the mirror and recreates its tables (a new table), then runs again; the workflow
+	// continues as new, so poll the catalog rather than this run
+	require.Eventually(t, func() bool {
+		oid := tableOid()
+		if oid == 0 || oid == before {
+			return false
+		}
+		status, err := client.MirrorStatus(t.Context(), &protos.MirrorStatusRequest{FlowJobName: flowName})
+		return err == nil && status.CurrentFlowState == protos.FlowStatus_STATUS_RUNNING &&
+			s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 1
+	}, 5*time.Minute, 2*time.Second, "resync")
+	types := s.destColumnTypes(srcTable)
+	require.Equal(t, "smallint", types["c_small"])
+	require.Equal(t, "integer", types["c_int"])
+	_, err = client.FlowStateChange(t.Context(), &protos.FlowStateChangeRequest{
+		FlowJobName: flowName, RequestedFlowState: protos.FlowStatus_STATUS_TERMINATING,
+	})
+	require.NoError(t, err)
 }

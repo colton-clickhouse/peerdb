@@ -354,6 +354,11 @@ type batchEntry struct {
 // getTargetColumnTypes reads the column types (without modifiers) of the destination tables whose values
 // normalize casts from PeerDB's own types, in one query. In the normalize transaction, so a column altered
 // since the last batch is picked up.
+// readsTargetColumnTypes: normalize casts to the target columns' own types from this version on
+func readsTargetColumnTypes(version uint32) bool {
+	return version >= shared.InternalVersion_PgNormalizeCastToTargetTypes
+}
+
 func getTargetColumnTypes(
 	ctx context.Context, tx pgx.Tx, tableNames []string, schemas map[string]*protos.TableSchema,
 ) (map[string]map[string]string, error) {
@@ -416,7 +421,7 @@ func (c *PostgresConnector) normalizeBatch(
 	}
 
 	normalizeStmtGen.targetColumnTypes = nil
-	if req.Version >= shared.InternalVersion_PgNormalizeCastToTargetTypes {
+	if readsTargetColumnTypes(req.Version) {
 		targetColumnTypes, err := getTargetColumnTypes(ctx, tx, destinationTableNames, normalizeStmtGen.tableSchemaMapping)
 		if err != nil {
 			return 0, err
