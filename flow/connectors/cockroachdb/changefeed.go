@@ -234,6 +234,9 @@ func changefeedRecordItems(
 		}
 		qv, err := qvalueFromChangefeedJSON(field, raw, schema.pg)
 		if err != nil {
+			if arrayErr, ok := errors.AsType[*exceptions.ArrayElementTypeError](err); ok {
+				arrayErr.WithColumn(col)
+			}
 			return items, fmt.Errorf("column %s as %s: %w"+
 				" (the source column type may have changed; resync the mirror to pick up the new type)",
 				col, field.Type, err)
@@ -625,8 +628,15 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, pg pgValu
 			parseElem = parseChangefeedTimestampTZ
 		}
 		a, err := changefeedArray(raw, func(el json.RawMessage) (time.Time, error) {
-			if isJSONNull(el) || (pg.specialValues && changefeedTimeSpecial(el) != types.SpecialNone) {
+			if isJSONNull(el) {
 				return time.Time{}, nil
+			}
+			if changefeedTimeSpecial(el) != types.SpecialNone {
+				if pg.specialValues {
+					return time.Time{}, nil // marked below
+				} else if pg.arrayInfinity {
+					return pg.defaultTime, nil // as the snapshot path
+				}
 			}
 			return parseWithString(el, parseElem)
 		})
@@ -772,9 +782,12 @@ func changefeedArray[T any](raw json.RawMessage, conv func(json.RawMessage) (T, 
 		return nil, fmt.Errorf("expected JSON array, got %s: %w", raw, err)
 	}
 	out := make([]T, 0, len(elems))
-	for _, el := range elems {
+	for i, el := range elems {
 		v, err := conv(el)
 		if err != nil {
+			if arrayErr, ok := errors.AsType[*exceptions.ArrayElementTypeError](err); ok {
+				arrayErr.Index = i
+			}
 			return nil, err
 		}
 		out = append(out, v)

@@ -36,5 +36,11 @@ func TestTime2400(t *testing.T) {
 func TestNewPgValues(t *testing.T) {
 	// Postgres destinations keep NaN and infinity on every version
 	require.Equal(t, pgValues{specialValues: true}, newPgValues(0, protos.DBType_POSTGRES))
-	require.Equal(t, pgValues{}, newPgValues(shared.InternalVersion_Latest, protos.DBType_CLICKHOUSE))
+	// ClickHouse coerces missing times to the Unix epoch, which is its DefaultTime
+	require.Equal(t, pgValues{arrayInfinity: true, defaultTime: time.Unix(0, 0).UTC()},
+		newPgValues(shared.InternalVersion_Latest, protos.DBType_CLICKHOUSE))
+	require.Equal(t, pgValues{defaultTime: time.Unix(0, 0).UTC()},
+		newPgValues(shared.InternalVersion_ArrayConversionIntegrity-1, protos.DBType_CLICKHOUSE))
+	require.Equal(t, pgValues{specialValues: true, invalidGeo: true, arrayInfinity: true},
+		newPgValues(shared.InternalVersion_Latest, protos.DBType_POSTGRES))
 }

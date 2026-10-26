@@ -181,6 +181,11 @@ var (
 	ErrorNotifyChangefeedInvalid = ErrorClass{
 		Class: "NOTIFY_CHANGEFEED_INVALID", action: NotifyUser,
 	}
+	// an array element decoded as another type than the column's kind (the column's type changed since the mirror
+	// was created); converting it would write zero values, so the user has to recreate the mirror or exclude it
+	ErrorNotifyArrayElementTypeMismatch = ErrorClass{
+		Class: "NOTIFY_ARRAY_ELEMENT_TYPE_MISMATCH", action: NotifyUser,
+	}
 	ErrorNotifyBinlogEventExceededMaxAllowedPacket = ErrorClass{
 		Class: "NOTIFY_BINLOG_EVENT_EXCEEDED_MAX_ALLOWED_PACKET", action: NotifyUser,
 	}
@@ -410,6 +415,13 @@ func GetErrorClass(ctx context.Context, err error) (ErrorClass, ErrorInfo) {
 				Source: pgErrSource,
 				Code:   "UNKNOWN",
 			}
+		}
+	}
+
+	if arrayErr, ok := errors.AsType[*exceptions.ArrayElementTypeError](err); ok {
+		return ErrorNotifyArrayElementTypeMismatch, ErrorInfo{
+			Source: ErrorSourceOther,
+			Code:   arrayErr.Want,
 		}
 	}
 
