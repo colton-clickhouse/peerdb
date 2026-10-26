@@ -20,7 +20,6 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared"
 	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
-	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
 // NeedsSetupMetadataTables returns true if the metadata tables need to be set up.
@@ -643,13 +642,15 @@ func (c *PostgresConnector) ReplayTableSchemaDeltas(
 				common.QuoteIdentifier(dstSchemaTable.Table),
 				common.QuoteIdentifier(addedColumn.Name), columnType)
 
-			// The source's default also fills the rows that predate the column, as on the source (MySQL writes
-			// no row events for them). The column is added nullable even when the source's is NOT NULL: changes
-			// captured before the ALTER but normalized after it don't carry the column, and normalize writes NULL
-			// for them.
+			// The source's default fills the rows that predate the column, as on the source (MySQL writes no row
+			// events for them; a Postgres source reports the value they read back as). It's only the fill: it's
+			// dropped right after, since a Postgres source reports that value, not the column's default
+			// expression. Not a time default: CURRENT_TIMESTAMP would fill the time of this replay, not the
+			// source's ALTER. The column is added nullable even when the source's is NOT NULL: changes captured
+			// before the ALTER don't carry it (normalize then keeps the fill, see literalDefault).
 			var columnDefault string
-			if addedColumn.DefaultExpr != nil && schemaDelta.System == protos.TypeSystem_Q {
-				if expr, ok := pgDefaultExpr(*addedColumn.DefaultExpr, types.QValueKind(addedColumn.Type), columnType); ok {
+			if schemaDelta.System == protos.TypeSystem_Q {
+				if expr, ok := literalDefault(addedColumn, columnType); ok {
 					columnDefault = " DEFAULT " + expr
 				}
 			}
@@ -672,6 +673,12 @@ func (c *PostgresConnector) ReplayTableSchemaDeltas(
 					}
 				} else {
 					added = true
+					if _, err := c.execWithLoggingTx(ctx, fmt.Sprintf("ALTER TABLE %s.%s ALTER COLUMN %s DROP DEFAULT",
+						common.QuoteIdentifier(dstSchemaTable.Namespace), common.QuoteIdentifier(dstSchemaTable.Table),
+						common.QuoteIdentifier(addedColumn.Name)), tableSchemaModifyTx); err != nil {
+						return fmt.Errorf("failed to drop the fill default of column %s for table %s: %w", addedColumn.Name,
+							schemaDelta.DstTableName, err)
+					}
 				}
 			}
 			if !added {

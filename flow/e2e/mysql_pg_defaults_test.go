@@ -38,9 +38,14 @@ func (s MySQLPGSuite) Test_Defaults_And_Not_Null_Carried() {
 	EnvWaitFor(t, env, 3*time.Minute, "initial load", func() bool {
 		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 2
 	})
+	// changes captured just before the ALTER, normalized with or after it: an insert and an update
 	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s (id, name) VALUES (4, 'd')`, srcFull)))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET name = 'b2' WHERE id = 2`, srcFull)))
 	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(
 		`ALTER TABLE %s ADD COLUMN added VARCHAR(10) NOT NULL DEFAULT 'dflt'`, srcFull)))
+	// a time default isn't carried on ADD COLUMN: it would fill the time of the replay, not the source's
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN added_at DATETIME DEFAULT CURRENT_TIMESTAMP`, srcFull)))
 	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(
 		`INSERT INTO %s (id, name, added) VALUES (3, 'c', 'given')`, srcFull)))
 	EnvWaitFor(t, env, 2*time.Minute, "cdc insert after ADD COLUMN", func() bool {
@@ -75,14 +80,17 @@ func (s MySQLPGSuite) Test_Defaults_And_Not_Null_Carried() {
 	RequireEnvCanceled(t, env)
 
 	require.Equal(t, map[string][2]string{
-		"id":    {"NOT NULL", ""},
-		"name":  {"NOT NULL", ""},
-		"qty":   {"NOT NULL", "5"},
-		"note":  {"", "'x'::text"},
-		"added": {"", "'dflt'::text"},
+		"id":   {"NOT NULL", ""},
+		"name": {"NOT NULL", ""},
+		"qty":  {"NOT NULL", "5"},
+		"note": {"", "'x'::text"},
+		// the default only filled the rows that predate the column
+		"added":    {"", ""},
+		"added_at": {"", ""},
 	}, columns)
-	// row 4 holds the default if it was normalized before the ALTER, NULL if in the same batch
-	require.Contains(t, []string{"dflt", "NULL"}, added[4])
-	delete(added, 4)
-	require.Equal(t, map[int32]string{1: "dflt", 2: "dflt", 3: "given"}, added)
+	// rows 2 (updated) and 4 (inserted) were changed before the ALTER: they hold the default too, whether
+	// normalized before the ALTER or with it
+	require.Equal(t, map[int32]string{1: "dflt", 2: "dflt", 3: "given", 4: "dflt"}, added)
+	require.Zero(t, s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id <> 3 AND added_at IS NOT NULL`, dstFull)),
+		"rows that predate a time default stay NULL")
 }

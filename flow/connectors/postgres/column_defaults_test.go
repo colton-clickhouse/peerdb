@@ -82,3 +82,30 @@ func TestCreateTableColumnDefaults(t *testing.T) {
 	require.NotContains(t, sql, "DEFAULT 5")
 	require.NotContains(t, sql, "DEFAULT 'x'")
 }
+
+// A change synced before a column with a literal default existed doesn't carry it: an insert takes the default and
+// an update keeps the row's value, instead of writing NULL. A time default isn't filled (normalize time isn't the
+// source's).
+func TestGenerateMergeStatement_MissingDefaultedColumn(t *testing.T) {
+	const table = `"public"."t"`
+	x, now := "'x'", "CURRENT_TIMESTAMP"
+	schema := &protos.TableSchema{System: protos.TypeSystem_Q, PrimaryKeyColumns: []string{"id"},
+		Columns: []*protos.FieldDescription{
+			{Name: "id", Type: string(types.QValueKindInt32), TypeModifier: -1},
+			{Name: "note", Type: string(types.QValueKindString), TypeModifier: -1, Nullable: true, DefaultExpr: &x},
+			{Name: "at", Type: string(types.QValueKindTimestamp), TypeModifier: -1, Nullable: true, DefaultExpr: &now},
+		}}
+	g := normalizeStmtGenerator{
+		rawTableName:       "_peerdb_raw_test",
+		tableSchemaMapping: map[string]*protos.TableSchema{table: schema},
+		peerdbCols:         &protos.PeerDBColumns{},
+		metadataSchema:     "_peerdb_internal",
+		supportsMerge:      true,
+	}
+	stmt := g.generateMergeStatement(table, schema, []string{""})
+	require.Contains(t, stmt, `(_peerdb_data ? 'note') AS "_peerdb_has_1"`)
+	require.Contains(t, stmt, `CASE WHEN src."_peerdb_has_1" THEN src."note" ELSE 'x' END`)
+	require.Contains(t, stmt, `"note"=CASE WHEN src."_peerdb_has_1" THEN src."note" ELSE dst."note" END`)
+	require.NotContains(t, stmt, `_peerdb_has_2`, "no fill for a time default")
+	require.Contains(t, stmt, `"at"=src."at"`)
+}
