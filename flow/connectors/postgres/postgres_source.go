@@ -87,6 +87,8 @@ func (c *PostgresConnector) CreateReplConn(ctx context.Context, env map[string]s
 	replConfig.Config.RuntimeParams["statement_timeout"] = "0"
 	replConfig.Config.RuntimeParams["replication"] = "database"
 	replConfig.Config.RuntimeParams["bytea_output"] = "hex"
+	// pgoutput sends values in text form: floats exactly, whatever the role's or database's setting
+	replConfig.Config.RuntimeParams["extra_float_digits"] = "3"
 	replConfig.Config.RuntimeParams["intervalstyle"] = "postgres"
 	replConfig.Config.RuntimeParams["DateStyle"] = "ISO, DMY"
 	// Required for QueryExecModeSimpleProtocol below; pgx refuses simple
