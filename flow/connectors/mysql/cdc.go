@@ -588,6 +588,7 @@ func (c *MySqlConnector) PullRecords(
 
 	var skewLossReported bool
 	var coercionReported bool
+	var partialKeyMoveReported bool
 	var updatedOffset string
 	var inTx bool
 	var recordCount uint32
@@ -979,10 +980,20 @@ func (c *MySqlConnector) PullRecords(
 							newItems.AddColumn(fd.Name, notNullBinary(val, !fd.Nullable))
 						}
 						// Normalize matches rows by the new primary key only, so an update that changes the key would
-						// leave the old row behind: send it as delete(old) + insert(new). Not with unchanged TOAST
-						// columns, where the new image isn't a complete row.
-						keyMoved := req.InternalVersion >= shared.InternalVersion_MySQLPKeyChangeAsDeleteInsert &&
-							len(unchangedToastColumns) == 0 && pkeyChanged(schema.PrimaryKeyColumns, oldItems, newItems)
+						// leave the old row behind: send it as delete(old) + insert(new). Only with complete row images:
+						// the insert needs every column, and the delete (a soft delete keeps the row) the old values.
+						// Validation requires binlog_row_image=FULL, but a session can still log less.
+						keyChanged := req.InternalVersion >= shared.InternalVersion_MySQLPKeyChangeAsDeleteInsert &&
+							pkeyChanged(schema.PrimaryKeyColumns, oldItems, newItems)
+						completeImages := len(unchangedToastColumns) == 0 &&
+							(len(ev.SkippedColumns) <= idx || len(ev.SkippedColumns[idx]) == 0)
+						keyMoved := keyChanged && completeImages
+						if keyChanged && !keyMoved && !partialKeyMoveReported {
+							partialKeyMoveReported = true
+							c.logger.Warn("primary key update with a partial row image (binlog_row_image isn't FULL for "+
+								"its session) applied as an update, which leaves the row under its old key on the destination",
+								slog.String("table", sourceTableName))
+						}
 						if sourceSchemaAsDestinationColumn {
 							newItems.AddColumn("_peerdb_source_schema", types.QValueString{Val: string(ev.Table.Schema)})
 						}
