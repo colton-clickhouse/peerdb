@@ -147,7 +147,8 @@ func TestTimeArrayInfinityOldVersionAndOtherDestinations(t *testing.T) {
 
 			qv, err = parseLive(t, c, expr, format, protos.DBType_CLICKHOUSE, shared.InternalVersion_Latest)
 			require.NoError(t, err)
-			require.Equal(t, types.QValueArrayDate{Val: []time.Time{day, epoch, epoch, {}}, Nulls: []bool{false, false, false, true}},
+			// NULL elements too: ClickHouse doesn't store them (the mask is kept, and ignored there)
+			require.Equal(t, types.QValueArrayDate{Val: []time.Time{day, epoch, epoch, epoch}, Nulls: []bool{false, false, false, true}},
 				normalizeTimes(qv))
 		})
 	}
