@@ -419,3 +419,17 @@ func TestParseUUIDArray(t *testing.T) {
 	_, err = parseUUIDArray(42)
 	require.Error(t, err)
 }
+
+func TestTimeText(t *testing.T) {
+	for micros, want := range map[int64]string{
+		0:           "00:00:00",
+		45296000000: "12:34:56",
+		1500000:     "00:00:01.5",
+		86399999999: "23:59:59.999999",
+		86400000000: "24:00:00",
+		3723000001:  "01:02:03.000001",
+		45296120000: "12:34:56.12",
+	} {
+		require.Equal(t, want, timeText(micros), "%d µs", micros)
+	}
+}

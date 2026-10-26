@@ -619,7 +619,7 @@ func (qe *QRepQueryExecutor) mapRowToQRecord(
 		)
 		if err != nil {
 			qe.logger.Error("[pg_query_executor] failed to parse field", slog.Any("error", err))
-			return nil, fmt.Errorf("failed to parse field: %w", err)
+			return nil, fmt.Errorf("failed to parse field: %w", withArrayColumn(err, fd.Name))
 		}
 		record[i] = tmp
 	}

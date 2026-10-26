@@ -20,6 +20,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/model"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared/datatypes"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
@@ -244,6 +245,9 @@ func changefeedRecordItems(
 		}
 		qv, err := qvalueFromChangefeedJSON(field, raw, schema.pg)
 		if err != nil {
+			if arrayErr, ok := errors.AsType[*exceptions.ArrayElementTypeError](err); ok {
+				arrayErr.WithColumn(col)
+			}
 			return items, fmt.Errorf("column %s as %s: %w"+
 				" (the source column type may have changed; resync the mirror to pick up the new type)",
 				col, field.Type, err)
@@ -595,7 +599,11 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, pg pgValu
 		return types.QValueArrayFloat64{Val: a}, nil
 	case types.QValueKindArrayNumeric:
 		a, err := changefeedArray(raw, func(el json.RawMessage) (decimal.Decimal, error) {
-			num, _ := parseChangefeedNumeric(el)
+			num, ok := parseChangefeedNumeric(el)
+			if !ok && !isJSONNull(el) && changefeedNumericSpecial(el, 0) == types.SpecialNone {
+				// not a number, NaN or infinity: writing 0 would corrupt it silently
+				return decimal.Decimal{}, &exceptions.ArrayElementTypeError{Got: "JSON " + string(el), Want: "decimal.Decimal"}
+			}
 			return num, nil
 		})
 		if err != nil {
@@ -630,8 +638,15 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, pg pgValu
 			parseElem = parseChangefeedTimestampTZ
 		}
 		a, err := changefeedArray(raw, func(el json.RawMessage) (time.Time, error) {
-			if isJSONNull(el) || (pg.specialValues && changefeedTimeSpecial(el) != types.SpecialNone) {
+			if isJSONNull(el) {
 				return time.Time{}, nil
+			}
+			if changefeedTimeSpecial(el) != types.SpecialNone {
+				if pg.specialValues {
+					return time.Time{}, nil // marked below
+				} else if pg.arrayInfinity {
+					return pg.defaultTime, nil // as the snapshot path
+				}
 			}
 			return parseWithString(el, parseElem)
 		})
@@ -777,9 +792,12 @@ func changefeedArray[T any](raw json.RawMessage, conv func(json.RawMessage) (T, 
 		return nil, fmt.Errorf("expected JSON array, got %s: %w", raw, err)
 	}
 	out := make([]T, 0, len(elems))
-	for _, el := range elems {
+	for i, el := range elems {
 		v, err := conv(el)
 		if err != nil {
+			if arrayErr, ok := errors.AsType[*exceptions.ArrayElementTypeError](err); ok {
+				arrayErr.Index = i
+			}
 			return nil, err
 		}
 		out = append(out, v)

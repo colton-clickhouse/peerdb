@@ -2170,3 +2170,16 @@ func TestStallingErrorClasses(t *testing.T) {
 	}
 	require.Len(t, StallingErrorClassNames(), len(stallingErrorClasses))
 }
+
+func TestArrayElementTypeErrorShouldNotifyUser(t *testing.T) {
+	t.Parallel()
+
+	// a column whose type changed since the mirror was created: only the user can fix it (recreate the mirror or
+	// exclude the column), so it must count toward STALLED
+	err := fmt.Errorf("failed to convert row: %w",
+		exceptions.NewArrayElementTypeError(1, int64(5), int32(0)).WithColumn("ids"))
+	errorClass, errInfo := GetErrorClass(t.Context(), err)
+	assert.Equal(t, ErrorNotifyArrayElementTypeMismatch, errorClass)
+	assert.Equal(t, NotifyUser, errorClass.ErrorAction())
+	assert.Equal(t, ErrorInfo{Source: ErrorSourceOther, Code: "int32"}, errInfo)
+}

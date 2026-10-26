@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	pkg_pg "github.com/PeerDB-io/peerdb/flow/pkg/postgres"
 	"github.com/PeerDB-io/peerdb/flow/shared"
 	"github.com/PeerDB-io/peerdb/flow/shared/datatypes"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
@@ -387,12 +389,98 @@ func convertToArray[T any](kind types.QValueKind, value any) ([]T, error) {
 	case []T:
 		return v, nil
 	case []any:
-		return shared.ArrayCastElements[T](v), nil
+		return shared.ArrayCastElements[T](v)
 	}
 	return nil, fmt.Errorf("failed to parse array %s from %T: %v", kind, value, value)
 }
 
+// timeArrayElements prepares decoded date/timestamp/timestamptz array elements for the element cast: pgx decodes
+// +-infinity elements as pgtype.InfinityModifier, which the cast doesn't accept. From
+// InternalVersion_ArrayConversionIntegrity they are marked infinity for Postgres destinations (which store it)
+// and become DefaultTime for others, as non-nullable scalars do; older mirrors keep the zero time they got before.
+func timeArrayElements(value any, dstType protos.DBType, version uint32) (any, []types.SpecialValue) {
+	elems, ok := value.([]any)
+	if !ok {
+		return value, nil
+	}
+	var out []any
+	var specials []types.SpecialValue
+	for i, el := range elems {
+		inf, ok := el.(pgtype.InfinityModifier)
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = slices.Clone(elems)
+		}
+		switch {
+		case version < shared.InternalVersion_ArrayConversionIntegrity:
+			out[i] = time.Time{}
+		case dstType == protos.DBType_POSTGRES:
+			out[i] = time.Time{}
+			if specials == nil {
+				specials = make([]types.SpecialValue, len(elems))
+			}
+			specials[i] = types.SpecialInfinity
+			if inf == pgtype.NegativeInfinity {
+				specials[i] = types.SpecialNegInfinity
+			}
+		default:
+			out[i] = qvalue.DefaultTime(dstType)
+		}
+	}
+	if out == nil {
+		return value, nil
+	}
+	return out, specials
+}
+
 func (c *PostgresConnector) parseFieldFromPostgresOID(
+	oid uint32,
+	typmod int32,
+	nullable bool,
+	dstType protos.DBType,
+	value any,
+	customTypeMapping map[uint32]pkg_pg.CustomDataType,
+	version uint32,
+) (types.QValue, error) {
+	qv, err := c.parseValueFromPostgresOID(oid, typmod, nullable, dstType, value, customTypeMapping, version)
+	if err != nil || version < shared.InternalVersion_ArrayConversionIntegrity {
+		return qv, err
+	}
+	// NULL array elements became the element type's zero value; mark them so destinations that store NULL
+	// elements (Postgres) write NULL
+	if elems, ok := value.([]any); ok && qv != nil && qv.Kind().IsArray() {
+		if nulls := nilElements(elems); nulls != nil {
+			qv = types.WithArrayNulls(qv, nulls)
+		}
+	}
+	return qv, nil
+}
+
+// withArrayColumn names the column in an array element type error, so the user knows which column to fix.
+func withArrayColumn(err error, column string) error {
+	if arrayErr, ok := errors.AsType[*exceptions.ArrayElementTypeError](err); ok {
+		arrayErr.WithColumn(column)
+	}
+	return err
+}
+
+// nilElements returns which elements are nil (NULL), or nil if none are.
+func nilElements(elems []any) []bool {
+	var nulls []bool
+	for i, el := range elems {
+		if el == nil {
+			if nulls == nil {
+				nulls = make([]bool, len(elems))
+			}
+			nulls[i] = true
+		}
+	}
+	return nulls
+}
+
+func (c *PostgresConnector) parseValueFromPostgresOID(
 	oid uint32,
 	typmod int32,
 	nullable bool,
@@ -690,17 +778,18 @@ func (c *PostgresConnector) parseFieldFromPostgresOID(
 		}
 		return types.QValueArrayInt64{Val: a}, nil
 	case types.QValueKindArrayDate, types.QValueKindArrayTimestamp, types.QValueKindArrayTimestampTZ:
-		a, err := convertToArray[time.Time](qvalueKind, value)
+		elems, specials := timeArrayElements(value, dstType, version)
+		a, err := convertToArray[time.Time](qvalueKind, elems)
 		if err != nil {
 			return nil, err
 		}
 		switch qvalueKind {
 		case types.QValueKindArrayDate:
-			return types.QValueArrayDate{Val: a}, nil
+			return types.QValueArrayDate{Val: a, Specials: specials}, nil
 		case types.QValueKindArrayTimestamp:
-			return types.QValueArrayTimestamp{Val: a}, nil
+			return types.QValueArrayTimestamp{Val: a, Specials: specials}, nil
 		case types.QValueKindArrayTimestampTZ:
-			return types.QValueArrayTimestampTZ{Val: a}, nil
+			return types.QValueArrayTimestampTZ{Val: a, Specials: specials}, nil
 		}
 	case types.QValueKindArrayBoolean:
 		a, err := convertToArray[bool](qvalueKind, value)
