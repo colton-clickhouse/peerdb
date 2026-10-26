@@ -72,3 +72,15 @@ func (s PeerFlowE2ETestSuitePG) Test_Array_Infinity_And_Null_Elements_PG() {
 	src, dst := s.arrayIntegrityMirror("array_integrity", shared.InternalVersion_Latest)
 	require.NoError(s.t, s.comparePGTables(src, dst, "id,d::text,ts::text,tstz::text,i::text"))
 }
+
+// Mirrors created before InternalVersion_ArrayConversionIntegrity keep writing the zero values.
+func (s PeerFlowE2ETestSuitePG) Test_Array_Infinity_And_Null_Elements_PG_Old_Version() {
+	_, dst := s.arrayIntegrityMirror("array_integrity_old", shared.InternalVersion_ArrayConversionIntegrity-1)
+	for _, id := range []int{1, 2} {
+		var d, i string
+		require.NoError(s.t, s.Conn().QueryRow(s.t.Context(),
+			fmt.Sprintf("SELECT d::text, i::text FROM %s WHERE id = %d", dst, id)).Scan(&d, &i))
+		require.Equal(s.t, "{2024-01-02,0001-01-01,0001-01-01,0001-01-01}", d, "id %d", id)
+		require.Equal(s.t, "{1,0,3}", i, "id %d", id)
+	}
+}
