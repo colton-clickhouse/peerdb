@@ -431,6 +431,9 @@ func (c *CockroachDBConnector) mapRowToQRecord(
 
 			qv, err := qvalueFromCrdbValue(field, dstType, fd.DataTypeOID, typeMap, value, pg)
 			if err != nil {
+				if arrayErr, ok := errors.AsType[*exceptions.ArrayElementTypeError](err); ok {
+					arrayErr.WithColumn(fd.Name)
+				}
 				return nil, fmt.Errorf("failed to convert value for %s: %w", fd.Name, err)
 			}
 			if arrayNullElements {

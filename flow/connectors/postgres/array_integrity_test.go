@@ -131,3 +131,24 @@ func TestArrayHappyPathsUnchanged(t *testing.T) {
 		})
 	}
 }
+
+// Older mirrors keep what they wrote before (the zero time for infinity and NULL elements, nothing marked), and
+// destinations that can't store infinity or NULL elements get DefaultTime, as non-nullable scalars do.
+func TestTimeArrayInfinityOldVersionAndOtherDestinations(t *testing.T) {
+	c := pgForArrayTests(t)
+	const expr = "ARRAY['2024-01-02', 'infinity', '-infinity', NULL]::date[]"
+	day := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	epoch := time.Unix(0, 0).UTC()
+	for name, format := range formats {
+		t.Run(name, func(t *testing.T) {
+			qv, err := parseLive(t, c, expr, format, protos.DBType_POSTGRES, shared.InternalVersion_ArrayConversionIntegrity-1)
+			require.NoError(t, err)
+			require.Equal(t, types.QValueArrayDate{Val: []time.Time{day, {}, {}, {}}}, normalizeTimes(qv))
+
+			qv, err = parseLive(t, c, expr, format, protos.DBType_CLICKHOUSE, shared.InternalVersion_Latest)
+			require.NoError(t, err)
+			require.Equal(t, types.QValueArrayDate{Val: []time.Time{day, epoch, epoch, {}}, Nulls: []bool{false, false, false, true}},
+				normalizeTimes(qv))
+		})
+	}
+}
