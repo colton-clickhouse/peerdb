@@ -23,6 +23,7 @@ import (
 
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
 	"github.com/PeerDB-io/peerdb/flow/model"
+	"github.com/PeerDB-io/peerdb/flow/model/qvalue"
 	"github.com/PeerDB-io/peerdb/flow/otel_metrics"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
@@ -1153,7 +1154,8 @@ func TestChangefeedMetricsRecording(t *testing.T) {
 func TestChangefeedArrayNullElements(t *testing.T) {
 	require.Equal(t, []bool{false, true, false}, jsonNullElements(json.RawMessage(`[1, null, 3]`)))
 	require.Nil(t, jsonNullElements(json.RawMessage(`"x"`)))
-	require.Equal(t, []bool{false, true}, nilElements([]any{int64(1), nil}))
+	require.Equal(t, []bool{false, true}, qvalue.NilElements([]any{int64(1), nil}))
+	require.Nil(t, qvalue.NilElements([]any{int64(1)}))
 
 	tableSchema := &protos.TableSchema{
 		TableIdentifier:   "public.t",

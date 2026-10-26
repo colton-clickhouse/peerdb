@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"slices"
-	"time"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/require"
@@ -40,6 +40,12 @@ func crdbForArrayTests(t *testing.T) *CockroachDBConnector {
 // snapshotAndChangefeed converts tc's value on both paths for a Postgres destination at the latest version.
 func snapshotAndChangefeed(t *testing.T, c *CockroachDBConnector, tc liveArrayCase) (types.QValue, error, types.QValue, error) {
 	t.Helper()
+	return snapshotAndChangefeedFor(t, c, tc, protos.DBType_POSTGRES)
+}
+
+func snapshotAndChangefeedFor(t *testing.T, c *CockroachDBConnector, tc liveArrayCase, dst protos.DBType,
+) (types.QValue, error, types.QValue, error) {
+	t.Helper()
 	rows, err := c.conn.Query(t.Context(), "SELECT "+tc.expr+", to_json("+tc.expr+")::STRING")
 	require.NoError(t, err, tc.expr)
 	defer rows.Close()
@@ -47,13 +53,13 @@ func snapshotAndChangefeed(t *testing.T, c *CockroachDBConnector, tc liveArrayCa
 	fds := rows.FieldDescriptions()
 	raw := rows.RawValues()
 	field := types.QField{Name: tc.name, Type: crdbArrayUdtToQValueKind(tc.udt), Nullable: true}
-	pg := newPgValues(shared.InternalVersion_Latest, protos.DBType_POSTGRES)
+	pg := newPgValues(shared.InternalVersion_Latest, dst)
 	typeMap := c.conn.TypeMap()
 	dt, ok := typeMap.TypeForOID(fds[0].DataTypeOID)
 	require.True(t, ok, "pgx knows OID %d", fds[0].DataTypeOID)
 	decoded, err := dt.Codec.DecodeValue(typeMap, fds[0].DataTypeOID, fds[0].Format, slices.Clone(raw[0]))
 	require.NoError(t, err, tc.expr)
-	snap, snapErr := qvalueFromCrdbValue(field, protos.DBType_POSTGRES, fds[0].DataTypeOID, typeMap, decoded, pg)
+	snap, snapErr := qvalueFromCrdbValue(field, dst, fds[0].DataTypeOID, typeMap, decoded, pg)
 	cdc, cdcErr := qvalueFromChangefeedJSON(field, json.RawMessage(raw[1]), pg)
 	return utcTimes(snap), snapErr, utcTimes(cdc), cdcErr
 }
@@ -69,6 +75,10 @@ func TestArraySnapshotMatchesChangefeed(t *testing.T) {
 		{"varbit", "ARRAY[B'101', B'1', NULL]::VARBIT[]", "_varbit"},
 		{"bit", "ARRAY[B'101', B'010']::BIT(3)[]", "_bit"},
 		{"date_infinity", "ARRAY['2024-01-02', 'infinity', '-infinity', NULL]::DATE[]", "_date"},
+		{"timestamp_infinity", "ARRAY['2024-01-02 03:04:05', 'infinity', '-infinity', NULL]::TIMESTAMP[]", "_timestamp"},
+		{"timestamptz_infinity", "ARRAY['2024-01-02 03:04:05+00', 'infinity', '-infinity', NULL]::TIMESTAMPTZ[]",
+			"_timestamptz"},
+		{"char", `ARRAY['a', 'b', NULL]::"char"[]`, "_char"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			snap, snapErr, cdc, cdcErr := snapshotAndChangefeed(t, c, tc)
@@ -159,4 +169,57 @@ func utcTimes(qv types.QValue) types.QValue {
 		return v
 	}
 	return qv
+}
+
+// Destinations without infinity or NULL elements (ClickHouse) get DefaultTime for both, the same on both paths.
+func TestTimeArraySnapshotMatchesChangefeedClickHouse(t *testing.T) {
+	c := crdbForArrayTests(t)
+	for _, tc := range []liveArrayCase{
+		{"date", "ARRAY['2024-01-02', 'infinity', '-infinity', NULL]::DATE[]", "_date"},
+		{"timestamp", "ARRAY['2024-01-02 03:04:05', 'infinity', '-infinity', NULL]::TIMESTAMP[]", "_timestamp"},
+		{"timestamptz", "ARRAY['2024-01-02 03:04:05+00', 'infinity', '-infinity', NULL]::TIMESTAMPTZ[]", "_timestamptz"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snap, snapErr, cdc, cdcErr := snapshotAndChangefeedFor(t, c, tc, protos.DBType_CLICKHOUSE)
+			require.NoError(t, snapErr, "snapshot")
+			require.NoError(t, cdcErr, "changefeed")
+			require.Equal(t, cdc, snap)
+			epoch := time.Unix(0, 0).UTC()
+			for i, v := range arrayTimes(snap) {
+				if i > 0 {
+					require.Equal(t, epoch, v, "element %d", i)
+				}
+			}
+		})
+	}
+}
+
+// A known gap the element cast can't see: a stale kind whose elements decode as the same Go type (DATE[] data under
+// a stored TIMESTAMPTZ[] kind, both time.Time) converts without an error.
+func TestArrayStaleKindSameGoTypeNotDetected(t *testing.T) {
+	c := crdbForArrayTests(t)
+	rows, err := c.conn.Query(t.Context(), "SELECT ARRAY['2024-01-02']::DATE[]")
+	require.NoError(t, err)
+	defer rows.Close()
+	require.True(t, rows.Next())
+	fd := rows.FieldDescriptions()[0]
+	typeMap := c.conn.TypeMap()
+	dt, _ := typeMap.TypeForOID(fd.DataTypeOID)
+	decoded, err := dt.Codec.DecodeValue(typeMap, fd.DataTypeOID, fd.Format, slices.Clone(rows.RawValues()[0]))
+	require.NoError(t, err)
+	_, err = qvalueFromCrdbValue(types.QField{Name: "c", Type: types.QValueKindArrayTimestampTZ, Nullable: true},
+		protos.DBType_POSTGRES, fd.DataTypeOID, typeMap, decoded, newPgValues(shared.InternalVersion_Latest, protos.DBType_POSTGRES))
+	require.NoError(t, err, "not detected: both kinds decode as time.Time")
+}
+
+func arrayTimes(qv types.QValue) []time.Time {
+	switch v := qv.(type) {
+	case types.QValueArrayDate:
+		return v.Val
+	case types.QValueArrayTimestamp:
+		return v.Val
+	case types.QValueArrayTimestampTZ:
+		return v.Val
+	}
+	return nil
 }

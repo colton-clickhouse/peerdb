@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
-	"slices"
 	"strings"
 	"time"
 
@@ -394,47 +393,6 @@ func convertToArray[T any](kind types.QValueKind, value any) ([]T, error) {
 	return nil, fmt.Errorf("failed to parse array %s from %T: %v", kind, value, value)
 }
 
-// timeArrayElements prepares decoded date/timestamp/timestamptz array elements for the element cast: pgx decodes
-// +-infinity elements as pgtype.InfinityModifier, which the cast doesn't accept. From
-// InternalVersion_ArrayConversionIntegrity they are marked infinity for Postgres destinations (which store it)
-// and become DefaultTime for others, as non-nullable scalars do; older mirrors keep the zero time they got before.
-func timeArrayElements(value any, dstType protos.DBType, version uint32) (any, []types.SpecialValue) {
-	elems, ok := value.([]any)
-	if !ok {
-		return value, nil
-	}
-	var out []any
-	var specials []types.SpecialValue
-	for i, el := range elems {
-		inf, ok := el.(pgtype.InfinityModifier)
-		if !ok {
-			continue
-		}
-		if out == nil {
-			out = slices.Clone(elems)
-		}
-		switch {
-		case version < shared.InternalVersion_ArrayConversionIntegrity:
-			out[i] = time.Time{}
-		case dstType == protos.DBType_POSTGRES:
-			out[i] = time.Time{}
-			if specials == nil {
-				specials = make([]types.SpecialValue, len(elems))
-			}
-			specials[i] = types.SpecialInfinity
-			if inf == pgtype.NegativeInfinity {
-				specials[i] = types.SpecialNegInfinity
-			}
-		default:
-			out[i] = qvalue.DefaultTime(dstType)
-		}
-	}
-	if out == nil {
-		return value, nil
-	}
-	return out, specials
-}
-
 func (c *PostgresConnector) parseFieldFromPostgresOID(
 	oid uint32,
 	typmod int32,
@@ -451,33 +409,20 @@ func (c *PostgresConnector) parseFieldFromPostgresOID(
 	// NULL array elements became the element type's zero value; mark them so destinations that store NULL
 	// elements (Postgres) write NULL
 	if elems, ok := value.([]any); ok && qv != nil && qv.Kind().IsArray() {
-		if nulls := nilElements(elems); nulls != nil {
+		if nulls := qvalue.NilElements(elems); nulls != nil {
 			qv = types.WithArrayNulls(qv, nulls)
 		}
 	}
 	return qv, nil
 }
 
-// withArrayColumn names the column in an array element type error, so the user knows which column to fix.
+// withArrayColumn names the column in an array element type error, so the user knows which column to fix. A
+// Postgres column's kind comes from the value's own type OID, so its schema can't be stale: a mismatch is a bug.
 func withArrayColumn(err error, column string) error {
 	if arrayErr, ok := errors.AsType[*exceptions.ArrayElementTypeError](err); ok {
-		arrayErr.WithColumn(column)
+		arrayErr.WithColumn(column).WithHint(exceptions.HintUnexpected)
 	}
 	return err
-}
-
-// nilElements returns which elements are nil (NULL), or nil if none are.
-func nilElements(elems []any) []bool {
-	var nulls []bool
-	for i, el := range elems {
-		if el == nil {
-			if nulls == nil {
-				nulls = make([]bool, len(elems))
-			}
-			nulls[i] = true
-		}
-	}
-	return nulls
 }
 
 func (c *PostgresConnector) parseValueFromPostgresOID(
@@ -778,8 +723,16 @@ func (c *PostgresConnector) parseValueFromPostgresOID(
 		}
 		return types.QValueArrayInt64{Val: a}, nil
 	case types.QValueKindArrayDate, types.QValueKindArrayTimestamp, types.QValueKindArrayTimestampTZ:
-		elems, specials := timeArrayElements(value, dstType, version)
-		a, err := convertToArray[time.Time](qvalueKind, elems)
+		var specials []types.SpecialValue
+		if elems, ok := value.([]any); ok {
+			// +-infinity and NULL elements: infinity for Postgres destinations, DefaultTime for others, the zero
+			// time on older mirrors (qvalue.PrepareTimeArray)
+			gated := version >= shared.InternalVersion_ArrayConversionIntegrity
+			value, specials = qvalue.PrepareTimeArray(elems, qvalue.TimeArrayOptions{
+				Specials: gated && dstType == protos.DBType_POSTGRES, DefaultTime: gated, Destination: dstType,
+			})
+		}
+		a, err := convertToArray[time.Time](qvalueKind, value)
 		if err != nil {
 			return nil, err
 		}
@@ -831,7 +784,12 @@ func (c *PostgresConnector) parseValueFromPostgresOID(
 		if v, ok := value.([]any); ok {
 			numArr := make([]decimal.Decimal, 0, len(v))
 			allValid := true
-			for _, anyVal := range v {
+			precision, scale := common.ParseNumericTypmod(typmod)
+			// NaN and +-Infinity elements, which decimal.Decimal can't hold: marked for Postgres destinations
+			// (InternalVersion_ArrayConversionIntegrity), 0 otherwise as before
+			markSpecials := version >= shared.InternalVersion_ArrayConversionIntegrity && dstType == protos.DBType_POSTGRES
+			var specials []types.SpecialValue
+			for i, anyVal := range v {
 				if anyVal == nil {
 					numArr = append(numArr, decimal.Decimal{})
 					continue
@@ -847,16 +805,22 @@ func (c *PostgresConnector) parseValueFromPostgresOID(
 				num, ok := validNumericToDecimal(numVal)
 				if !ok {
 					numArr = append(numArr, decimal.Decimal{})
+					if sv := qvalue.NumericSpecial(numVal, precision); markSpecials && sv != types.SpecialNone {
+						if specials == nil {
+							specials = make([]types.SpecialValue, len(v))
+						}
+						specials[i] = sv
+					}
 				} else {
 					numArr = append(numArr, num)
 				}
 			}
 			if allValid {
-				precision, scale := common.ParseNumericTypmod(typmod)
 				return types.QValueArrayNumeric{
 					Val:       numArr,
 					Precision: precision,
 					Scale:     scale,
+					Specials:  specials,
 				}, nil
 			}
 		}
