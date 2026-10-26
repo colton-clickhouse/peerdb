@@ -463,6 +463,7 @@ func (c *PostgresConnector) normalizeBatch(
 			if errors.As(err, &preprocessingErr) {
 				i := slices.IndexFunc(entries, func(e batchEntry) bool { return e.statement == preprocessingErr.SQL() })
 				if i < 0 {
+					c.logger.Error("error executing the normalize metadata update", slog.Any("error", err))
 					return 0, fmt.Errorf("failed to update metadata for NormalizeTables: %w", err)
 				}
 				entry = entries[i]

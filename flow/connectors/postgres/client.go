@@ -49,8 +49,9 @@ const (
 	updateMetadataForNormalizeRecordsSQL = "UPDATE %s.%s SET normalize_batch_id=$1 WHERE mirror_job_name=$2"
 	setSessionReplicaRoleSQL             = "SET LOCAL session_replication_role = 'replica'"
 
+	// in name order, so a batch's tables are normalized, and a failing one is named, deterministically
 	getDistinctDestinationTableNamesSQL = `SELECT DISTINCT _peerdb_destination_table_name FROM %s.%s WHERE
-	_peerdb_batch_id=$1`
+	_peerdb_batch_id=$1 ORDER BY 1`
 	getTableNameToUnchangedToastColsSQL = `SELECT _peerdb_destination_table_name,
 	ARRAY_AGG(DISTINCT _peerdb_unchanged_toast_columns) FROM %s.%s WHERE
 	_peerdb_batch_id=$1 AND _peerdb_record_type!=2 GROUP BY _peerdb_destination_table_name`
