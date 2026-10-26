@@ -19,14 +19,15 @@ import (
 const arrayIntegrityValues = `ARRAY['2024-01-02','infinity','-infinity',NULL]::date[],
 	ARRAY['2024-01-02 03:04:05','infinity','-infinity',NULL]::timestamp[],
 	ARRAY['2024-01-02 03:04:05+00','infinity','-infinity',NULL]::timestamptz[],
-	ARRAY[1,NULL,3]::int8[]`
+	ARRAY[1,NULL,3]::int8[],
+	ARRAY[1.5,NULL,'NaN','Infinity','-Infinity']::numeric[]`
 
 func (s PeerFlowE2ETestSuitePG) arrayIntegrityMirror(name string, version uint32) (string, string) {
 	t := s.t
 	srcTableName := s.attachSchemaSuffix(name)
 	dstTableName := s.attachSchemaSuffix(name + "_dst")
 	_, err := s.Conn().Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY, v INT,
-		d date[], ts timestamp[], tstz timestamptz[], i int8[])`, srcTableName))
+		d date[], ts timestamp[], tstz timestamptz[], i int8[], n numeric[])`, srcTableName))
 	require.NoError(t, err)
 	_, err = s.Conn().Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 0, %s)`, srcTableName, arrayIntegrityValues))
 	require.NoError(t, err)
@@ -70,17 +71,23 @@ func (s PeerFlowE2ETestSuitePG) arrayIntegrityMirror(name string, version uint32
 // paths, instead of 0001-01-01 / 0.
 func (s PeerFlowE2ETestSuitePG) Test_Array_Infinity_And_Null_Elements_PG() {
 	src, dst := s.arrayIntegrityMirror("array_integrity", shared.InternalVersion_Latest)
-	require.NoError(s.t, s.comparePGTables(src, dst, "id,d::text,ts::text,tstz::text,i::text"))
+	require.NoError(s.t, s.comparePGTables(src, dst, "id,d::text,ts::text,tstz::text,i::text,n::text"))
 }
 
 // Mirrors created before InternalVersion_ArrayConversionIntegrity keep writing the zero values.
 func (s PeerFlowE2ETestSuitePG) Test_Array_Infinity_And_Null_Elements_PG_Old_Version() {
 	_, dst := s.arrayIntegrityMirror("array_integrity_old", shared.InternalVersion_ArrayConversionIntegrity-1)
 	for _, id := range []int{1, 2} {
-		var d, i string
-		require.NoError(s.t, s.Conn().QueryRow(s.t.Context(),
-			fmt.Sprintf("SELECT d::text, i::text FROM %s WHERE id = %d", dst, id)).Scan(&d, &i))
+		var d, ts, tstz, i, n string
+		require.NoError(s.t, s.Conn().QueryRow(s.t.Context(), fmt.Sprintf(
+			"SELECT d::text, ts::text, (SELECT array_agg(e AT TIME ZONE 'UTC' ORDER BY o) FROM unnest(tstz) WITH ORDINALITY u(e, o))::text,"+
+				" i::text, n::text FROM %s WHERE id = %d", dst, id),
+		).Scan(&d, &ts, &tstz, &i, &n))
 		require.Equal(s.t, "{2024-01-02,0001-01-01,0001-01-01,0001-01-01}", d, "id %d", id)
+		require.Equal(s.t, `{"2024-01-02 03:04:05","0001-01-01 00:00:00","0001-01-01 00:00:00","0001-01-01 00:00:00"}`, ts,
+			"id %d", id)
 		require.Equal(s.t, "{1,0,3}", i, "id %d", id)
+		require.Equal(s.t, "{1.5,0,0,0,0}", n, "id %d: NaN and infinity elements stay 0 on older mirrors", id)
+		require.Equal(s.t, ts, tstz, "id %d: timestamptz like timestamp (in UTC)", id)
 	}
 }

@@ -19,7 +19,7 @@ func (s ClickHouseSuite) Test_Array_Infinity_Elements_CH() {
 	require.NoError(s.t, s.source.Exec(s.t.Context(), fmt.Sprintf(
 		`CREATE TABLE %s (id INT PRIMARY KEY, d date[])`, srcSchemaTable)))
 	require.NoError(s.t, s.source.Exec(s.t.Context(), fmt.Sprintf(
-		`INSERT INTO %s VALUES (1, ARRAY['2024-01-02','infinity','-infinity']::date[])`, srcSchemaTable)))
+		`INSERT INTO %s VALUES (1, ARRAY['2024-01-02','infinity','-infinity',NULL]::date[])`, srcSchemaTable)))
 
 	connectionGen := FlowConnectionGenerationConfig{
 		FlowJobName:      s.attachSuffix(srcTable),
@@ -32,7 +32,7 @@ func (s ClickHouseSuite) Test_Array_Infinity_Elements_CH() {
 	env := ExecutePeerflow(s.t, tc, flowConnConfig)
 	SetupCDCFlowStatusQuery(s.t, env, flowConnConfig)
 	EnvNoError(s.t, env, s.source.Exec(s.t.Context(), fmt.Sprintf(
-		`INSERT INTO %s VALUES (2, ARRAY['2024-01-02','infinity','-infinity']::date[])`, srcSchemaTable)))
+		`INSERT INTO %s VALUES (2, ARRAY['2024-01-02','infinity','-infinity',NULL]::date[])`, srcSchemaTable)))
 
 	var got []string
 	EnvWaitFor(s.t, env, 3*time.Minute, "snapshot and cdc rows", func() bool {
@@ -49,6 +49,7 @@ func (s ClickHouseSuite) Test_Array_Infinity_Elements_CH() {
 	env.Cancel(s.t.Context())
 	RequireEnvCanceled(s.t, env)
 	for i, d := range got {
-		require.Equal(s.t, "['2024-01-02','1970-01-01','1970-01-01']", strings.ReplaceAll(d, " ", ""), "row %d", i+1)
+		require.Equal(s.t, "['2024-01-02','1970-01-01','1970-01-01','1970-01-01']", strings.ReplaceAll(d, " ", ""),
+			"row %d: infinity and NULL elements are ClickHouse's DefaultTime", i+1)
 	}
 }
