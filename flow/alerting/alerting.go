@@ -11,7 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
@@ -432,8 +434,9 @@ func (a *Alerter) recordFlowErrorInternal(
 	gauge.Record(ctx, 1, errorAttributeSet)
 }
 
-// markStalledIfPersistent sets a running mirror to STALLED once a user-actionable error (like the one just
-// recorded) has kept it from making progress for longer than PEERDB_STALLED_THRESHOLD_MINUTES. The scheduled
+// markStalledIfPersistent sets a running mirror to STALLED once errors that don't clear by themselves (like the
+// one just recorded, see stallingErrorClasses) have kept it from making progress for longer than
+// PEERDB_STALLED_THRESHOLD_MINUTES. The scheduled
 // tasks set it back to RUNNING once it makes progress again.
 func (a *Alerter) markStalledIfPersistent(ctx context.Context, flowName string, errClass ErrorClass) {
 	logger := internal.LoggerFromCtx(ctx)
@@ -445,13 +448,16 @@ func (a *Alerter) markStalledIfPersistent(ctx context.Context, flowName string, 
 	if threshold == 0 {
 		return
 	}
-	stalled, err := internal.MarkFlowStalledIfPersistent(ctx, a.CatalogPool, flowName, threshold)
+	if !errClass.Stalls() {
+		return
+	}
+	stalled, err := internal.MarkFlowStalledIfPersistent(ctx, a.CatalogPool, flowName, threshold, StallingErrorClassNames())
 	if err != nil {
 		logger.Warn("failed to check whether the mirror is stalled", slog.Any("error", err))
 		return
 	}
 	if stalled {
-		message := fmt.Sprintf("Mirror is STALLED: user-actionable errors have kept it from making progress for more "+
+		message := fmt.Sprintf("Mirror is STALLED: errors that need a fix have kept it from making progress for more "+
 			"than %d minutes (error class %s). It returns to RUNNING once it makes progress again or stops failing.",
 			threshold, errClass.String())
 		logger.Warn(message, slog.String("flowName", flowName))
@@ -511,5 +517,10 @@ func insertFlowLog(
 	)
 	_, err := catalogPool.Exec(ctx, `INSERT INTO peerdb_stats.flow_errors(flow_name,error_message,error_type,error_class,error_action)
 		VALUES($1,$2,$3,$4,$5)`, flowName, message, errorType.String(), class, action)
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == pgerrcode.UndefinedColumn {
+		// a catalog not migrated yet (workers rolled out before the migration): keep the log, without its class
+		_, err = catalogPool.Exec(ctx, `INSERT INTO peerdb_stats.flow_errors(flow_name,error_message,error_type)
+			VALUES($1,$2,$3)`, flowName, message, errorType.String())
+	}
 	return err
 }

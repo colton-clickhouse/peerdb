@@ -2154,3 +2154,19 @@ func TestPostgresNormalizeErrorsNeedingTheUser(t *testing.T) {
 	errorClass, _ = GetErrorClass(t.Context(), enumErr)
 	assert.Equal(t, ErrorNotifyInvalidEnumValue, errorClass)
 }
+
+// Only errors that need a fix count toward STALLED: a long outage mustn't make a healthy mirror STALLED.
+func TestStallingErrorClasses(t *testing.T) {
+	require.True(t, ErrorNotifyDestinationModified.Stalls())
+	require.True(t, ErrorNotifyTablesWithoutPrimaryKey.Stalls())
+	for _, selfHealing := range []ErrorClass{
+		ErrorNotifyConnectivity, ErrorNotifyOOM, ErrorNotifyOOMSource, ErrorNotifyAuroraFailover,
+		ErrorNotifyTooManyPartsError, ErrorNotifyPostgresSlotMemalloc, ErrorNotifyTerminate, ErrorOther,
+	} {
+		require.False(t, selfHealing.Stalls(), selfHealing.Class)
+	}
+	for _, c := range stallingErrorClasses {
+		require.Equal(t, NotifyUser, c.ErrorAction(), c.Class)
+	}
+	require.Len(t, StallingErrorClassNames(), len(stallingErrorClasses))
+}

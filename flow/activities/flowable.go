@@ -1457,6 +1457,10 @@ func (a *FlowableActivity) getFlowsForMetrics(ctx context.Context) ([]metricsFlo
 func (a *FlowableActivity) RecordSlotSizes(ctx context.Context) error {
 	logger := log.With(internal.LoggerFromCtx(ctx), slog.String("scheduledTask", "RecordSlotSizes"))
 	logger.Info("Recording Slot Information")
+	// first, so that an early return below can't skip it
+	if err := a.clearStalledFlows(ctx); err != nil {
+		logger.Error("Failed to clear stalled mirrors", slog.Any("error", err))
+	}
 	slotMetricGauges := otel_metrics.SlotMetricGauges{}
 	slotMetricGauges.SlotLagGauge = a.OtelManager.Metrics.SlotLagGauge
 	slotMetricGauges.RestartLSNGauge = a.OtelManager.Metrics.RestartLSNGauge
@@ -1528,10 +1532,6 @@ func (a *FlowableActivity) RecordSlotSizes(ctx context.Context) error {
 		logger.Warn("failed to get interval since last normalize threshold", slog.Any("error", err))
 	}
 
-	if err := a.clearStalledFlows(ctx); err != nil {
-		logger.Error("Failed to clear stalled mirrors", slog.Any("error", err))
-	}
-
 	logger.Info("Recording slot size and emitting log retention where applicable", slog.Int("flows", len(infos)))
 	for _, info := range infos {
 		if err := ctx.Err(); err != nil {
@@ -1585,7 +1585,7 @@ func (a *FlowableActivity) clearStalledFlows(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	cleared, err := internal.ClearStalledFlows(ctx, a.CatalogPool, threshold)
+	cleared, err := internal.ClearStalledFlows(ctx, a.CatalogPool, threshold, alerting.StallingErrorClassNames())
 	if err != nil {
 		return err
 	}

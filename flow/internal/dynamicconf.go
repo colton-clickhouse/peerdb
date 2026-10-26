@@ -405,9 +405,10 @@ var DynamicSettings = [...]*protos.DynamicSetting{
 	},
 	{
 		Name: "PEERDB_STALLED_THRESHOLD_MINUTES",
-		Description: "Duration in minutes a running mirror may fail with the same user-actionable error, without " +
-			"making progress, before its status becomes STALLED, 0 disables the STALLED status",
-		DefaultValue:     "30",
+		Description: "Duration in minutes a running mirror may keep failing with errors that need a fix (a changed " +
+			"destination table, a missing slot or publication, unsupported data), without making progress, before " +
+			"its status becomes STALLED; applies to every mirror. 0 (the default) disables the STALLED status",
+		DefaultValue:     "0",
 		ValueType:        protos.DynconfValueType_UINT,
 		ApplyMode:        protos.DynconfApplyMode_APPLY_MODE_IMMEDIATE,
 		TargetForSetting: protos.DynconfTarget_ALL,
