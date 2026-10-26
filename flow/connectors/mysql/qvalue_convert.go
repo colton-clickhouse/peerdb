@@ -166,7 +166,7 @@ func processGeometryData(data []byte) (types.QValueGeometry, error) {
 	if err != nil {
 		return types.QValueGeometry{}, exceptions.NewMySQLGeometryParseError(err)
 	}
-	return types.QValueGeometry{Val: g.ToWKT(), SRID: int32(binary.LittleEndian.Uint32(data[:4]))}, nil
+	return types.QValueGeometry{Val: g.ToWKT(), SRID: binary.LittleEndian.Uint32(data[:4])}, nil
 }
 
 // https://dev.mysql.com/doc/refman/8.4/en/time.html

@@ -15,7 +15,7 @@ import (
 func TestGeoWktToWkbSRID(t *testing.T) {
 	for _, tc := range []struct {
 		wkt      string
-		srid     int32
+		srid     uint32
 		keepSRID bool
 		want     int
 	}{
@@ -47,4 +47,18 @@ func TestRecordItemsGeometryAsEWKT(t *testing.T) {
 	j, err = items.ToJSONWithOptions(ToJSONOptions{})
 	require.NoError(t, err)
 	require.JSONEq(t, `{"g":"POINT(1 2)","z":"POINT(1 2)"}`, j)
+}
+
+// MySQL SRIDs are unsigned 32-bit; PostGIS stores at most 999999 and would change a larger one, so it's refused
+func TestGeoSRIDAbovePostGISMaximum(t *testing.T) {
+	_, err := geoWktToWkb("POINT(1 2)", 1<<31, true)
+	require.ErrorContains(t, err, "SRID 2147483648")
+	_, err = geoWktToWkb("POINT(1 2)", MaxPostGISSRID+1, true)
+	require.Error(t, err)
+	_, err = geoWktToWkb("POINT(1 2)", 1<<31, false)
+	require.NoError(t, err, "older mirrors write no SRID")
+	items := NewRecordItems(1)
+	items.AddColumn("g", types.QValueGeometry{Val: "POINT(1 2)", SRID: 1 << 31})
+	_, err = items.ToJSONWithOptions(ToJSONOptions{GeometryAsEWKT: true})
+	require.ErrorContains(t, err, "column g")
 }

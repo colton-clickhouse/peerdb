@@ -182,7 +182,7 @@ type NormalizeQueryCDCRequest struct {
 type ToJSONOptions struct {
 	UnnestColumns        map[string]struct{}
 	HStoreAsJSON         bool
-	ClearValuesOverBytes int // 0 means preserve values
+	ClearValuesOverBytes int  // 0 means preserve values
 	GeometryAsEWKT       bool // geometry with an SRID beside its WKT (MySQL) as SRID=N;WKT
 }
 

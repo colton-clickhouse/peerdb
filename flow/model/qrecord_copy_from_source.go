@@ -57,18 +57,20 @@ func (src *QRecordCopyFromSource) Next() bool {
 
 // geoWktToWkb converts WKT or EWKT (SRID=N;WKT) to WKB. With keepSRID it writes EWKB with the EWKT's SRID,
 // or srid for plain WKT (MySQL keeps the SRID beside the WKT).
-func geoWktToWkb(wkt string, srid int32, keepSRID bool) ([]byte, error) {
+func geoWktToWkb(wkt string, srid uint32, keepSRID bool) ([]byte, error) {
 	if strings.HasPrefix(wkt, "SRID=") {
 		sridText, wktWithoutSRID, found := strings.Cut(strings.TrimPrefix(wkt, "SRID="), ";")
 		if found {
 			wkt = wktWithoutSRID
-			if n, err := strconv.ParseInt(sridText, 10, 32); err == nil {
-				srid = int32(n)
+			if n, err := strconv.ParseUint(sridText, 10, 32); err == nil {
+				srid = uint32(n)
 			}
 		}
 	}
 	if !keepSRID {
 		srid = 0
+	} else if err := CheckPostGISSRID(srid); err != nil {
+		return nil, err
 	}
 
 	return geo.GeoToWKB(wkt, int(srid))
@@ -213,4 +215,15 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 
 func (src *QRecordCopyFromSource) Err() error {
 	return src.stream.Err()
+}
+
+// MaxPostGISSRID is the largest SRID PostGIS stores; it remaps larger ones (and a geometry SRID above it can't be
+// used), so they're refused rather than replicated as another SRID
+const MaxPostGISSRID = 999999
+
+func CheckPostGISSRID(srid uint32) error {
+	if srid > MaxPostGISSRID {
+		return fmt.Errorf("SRID %d is above the largest SRID PostGIS stores (%d), which would change it", srid, MaxPostGISSRID)
+	}
+	return nil
 }
