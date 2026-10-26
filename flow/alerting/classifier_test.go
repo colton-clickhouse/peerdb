@@ -2086,7 +2086,7 @@ func TestKeylessTablesErrorShouldNotifyUser(t *testing.T) {
 
 	// normalize refuses a keyless table that got into a CDC mirror to Postgres: only the user can fix it
 	err := exceptions.NewNormalizationError(fmt.Errorf("failed to normalize records: %w",
-		fmt.Errorf("can't normalize batch 3: %w", exceptions.NewKeylessTablesError([]string{"public.t1", "public.t2"}))))
+		fmt.Errorf("can't normalize batch 3: %w", exceptions.NewKeylessTablesError([]string{"public.t1", "public.t2"}, true))))
 	errorClass, errInfo := GetErrorClass(t.Context(), err)
 	assert.Equal(t, ErrorNotifyTablesWithoutPrimaryKey, errorClass)
 	assert.Equal(t, NotifyUser, errorClass.ErrorAction())

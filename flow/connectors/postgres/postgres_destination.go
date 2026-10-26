@@ -413,7 +413,7 @@ func (c *PostgresConnector) normalizeBatch(
 
 	// mirror validation refuses keyless tables; one that got in anyway (validation skipped, or a mirror
 	// from before) fails here, named, instead of a malformed MERGE failing the batch under another table
-	if err := keylessTablesError(destinationTableNames, normalizeStmtGen.tableSchemaMapping); err != nil {
+	if err := keylessTablesError(destinationTableNames, normalizeStmtGen.tableSchemaMapping, true); err != nil {
 		return 0, fmt.Errorf("can't normalize batch %d: %w", batchID, err)
 	}
 
