@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -209,15 +210,15 @@ func (h *FlowRequestHandler) CreateCDCFlow(
 
 	// Use idempotent validation that skips mirror existence check
 	connectionConfigsCore := pconv.FlowConnectionConfigsToCore(req.ConnectionConfigs)
+	// before validation, which then reads the source schema as the mirror will
+	if err := h.pinTinyInt1Setting(ctx, connectionConfigsCore.SourceName, &connectionConfigsCore.Env); err != nil {
+		return nil, NewInternalApiError(err)
+	}
 	if connectionConfigsCore.SkipValidation == nil || !*connectionConfigsCore.SkipValidation {
 		if _, err := h.validateCDCMirrorImpl(ctx, connectionConfigsCore, true); err != nil {
 			slog.ErrorContext(ctx, "validate mirror error", slog.Any("error", err))
 			return nil, NewInternalApiError(fmt.Errorf("invalid mirror: %w", err))
 		}
-	}
-
-	if err := h.pinTinyInt1Setting(ctx, connectionConfigsCore); err != nil {
-		return nil, NewInternalApiError(err)
 	}
 
 	if resp, err := h.createCDCFlow(ctx, connectionConfigsCore, workflowID); err != nil {
@@ -231,12 +232,12 @@ func (h *FlowRequestHandler) CreateCDCFlow(
 // pinTinyInt1Setting stores PEERDB_MYSQL_TINYINT1_AS_INT in a MySQL mirror's env when the mirror doesn't set it.
 // Table setup, the snapshot and later ADD COLUMNs each read it, so a change of the global setting mid-mirror
 // would decode one table's TINYINT(1) columns two ways.
-func (h *FlowRequestHandler) pinTinyInt1Setting(ctx context.Context, cfg *protos.FlowConnectionConfigsCore) error {
+func (h *FlowRequestHandler) pinTinyInt1Setting(ctx context.Context, sourceName string, env *map[string]string) error {
 	const key = "PEERDB_MYSQL_TINYINT1_AS_INT"
-	if _, ok := cfg.Env[key]; ok {
+	if _, ok := (*env)[key]; ok {
 		return nil
 	}
-	if srcType, err := connectors.LoadPeerType(ctx, h.pool, cfg.SourceName); err != nil {
+	if srcType, err := connectors.LoadPeerType(ctx, h.pool, sourceName); err != nil {
 		return fmt.Errorf("failed to load source peer type: %w", err)
 	} else if srcType != protos.DBType_MYSQL {
 		return nil
@@ -245,10 +246,10 @@ func (h *FlowRequestHandler) pinTinyInt1Setting(ctx context.Context, cfg *protos
 	if err != nil {
 		return err
 	}
-	if cfg.Env == nil {
-		cfg.Env = make(map[string]string, 1)
+	if *env == nil {
+		*env = make(map[string]string, 1)
 	}
-	cfg.Env[key] = strconv.FormatBool(asInt)
+	(*env)[key] = strconv.FormatBool(asInt)
 	return nil
 }
 
@@ -487,6 +488,12 @@ func (h *FlowRequestHandler) FlowStateChange(
 	if cdcUpdate := req.FlowConfigUpdate.GetCdcFlowConfigUpdate(); cdcUpdate != nil {
 		if err := internal.ValidateEnv(cdcUpdate.UpdatedEnv); err != nil {
 			return nil, NewInvalidArgumentApiError(fmt.Errorf("invalid settings override: %w", err))
+		}
+		// decided at creation: tables already set up decode TINYINT(1) one way
+		if _, ok := cdcUpdate.UpdatedEnv["PEERDB_MYSQL_TINYINT1_AS_INT"]; ok ||
+			slices.Contains(cdcUpdate.RemovedEnv, "PEERDB_MYSQL_TINYINT1_AS_INT") {
+			return nil, NewInvalidArgumentApiError(
+				errors.New("PEERDB_MYSQL_TINYINT1_AS_INT can't be changed on an existing mirror; recreate the mirror"))
 		}
 	}
 

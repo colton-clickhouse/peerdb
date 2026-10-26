@@ -229,7 +229,7 @@ func (c *MySqlConnector) getTableSchemaForTable(
 	if err != nil {
 		return nil, err
 	}
-	tinyInt1AsInt, err := internal.PeerDBMySQLTinyInt1AsInt(ctx, env)
+	tinyInt1Pinned, tinyInt1AsInt, err := tinyInt1Pinned(env)
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +297,9 @@ func (c *MySqlConnector) getTableSchemaForTable(
 		if err != nil {
 			return nil, err
 		}
-		qkind = tinyInt1Kind(qkind, dataType, columnSettings[columnName], tinyInt1AsInt)
+		if tinyInt1Pinned {
+			qkind = tinyInt1Kind(qkind, dataType, columnSettings[columnName], tinyInt1AsInt)
+		}
 
 		column := &protos.FieldDescription{
 			Name:         columnName,
@@ -1360,7 +1362,7 @@ func (c *MySqlConnector) processAlterTableQuery(ctx context.Context, catalogPool
 		sourceSchemaName = stmtSchema
 	}
 	sourceTableName := sourceSchemaName + "." + stmt.Table.Name.String()
-	tinyInt1AsInt, err := internal.PeerDBMySQLTinyInt1AsInt(ctx, req.Env)
+	_, tinyInt1AsInt, err := tinyInt1Pinned(req.Env)
 	if err != nil {
 		return err
 	}

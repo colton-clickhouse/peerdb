@@ -37,3 +37,17 @@ func TestTinyInt1Kind(t *testing.T) {
 		})
 	}
 }
+
+// The mirror's own pinned setting decides; a mirror without one (from before the setting) keeps booleans
+func TestTinyInt1Pinned(t *testing.T) {
+	pinned, asInt, err := tinyInt1Pinned(nil)
+	require.NoError(t, err)
+	require.False(t, pinned)
+	require.False(t, asInt)
+	pinned, asInt, err = tinyInt1Pinned(map[string]string{"PEERDB_MYSQL_TINYINT1_AS_INT": "true"})
+	require.NoError(t, err)
+	require.True(t, pinned)
+	require.True(t, asInt)
+	_, _, err = tinyInt1Pinned(map[string]string{"PEERDB_MYSQL_TINYINT1_AS_INT": "maybe"})
+	require.Error(t, err)
+}

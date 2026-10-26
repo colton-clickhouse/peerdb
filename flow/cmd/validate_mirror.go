@@ -44,6 +44,12 @@ func (h *FlowRequestHandler) ValidateCDCMirror(
 		} else {
 			req.ConnectionConfigs.Version = internalVersion
 		}
+		// validated as it will be created: with the setting creation pins (a resync keeps the mirror's env)
+		if !req.ConnectionConfigs.Resync {
+			if err := h.pinTinyInt1Setting(ctx, req.ConnectionConfigs.SourceName, &req.ConnectionConfigs.Env); err != nil {
+				return nil, NewInternalApiError(err)
+			}
+		}
 	}
 	flowConnectionConfigsCore := proto_conversions.FlowConnectionConfigsToCore(req.ConnectionConfigs)
 	return h.validateCDCMirrorImpl(ctx, flowConnectionConfigsCore, false)

@@ -2,6 +2,7 @@ package connmysql
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
@@ -129,6 +130,22 @@ func tinyInt1Kind(qkind types.QValueKind, columnType string, setting *protos.Col
 		return types.QValueKindUInt8
 	}
 	return types.QValueKindInt8
+}
+
+// tinyInt1Pinned reads a mirror's PEERDB_MYSQL_TINYINT1_AS_INT from its own env only: mirror creation pins the
+// setting there, so a change of the global setting can't make later tables, partitions or ADD COLUMNs decode
+// TINYINT(1) another way. Without it (a mirror from before the setting existed) TINYINT(1) stays boolean, column
+// settings included, as such mirrors always decoded it.
+func tinyInt1Pinned(env map[string]string) (pinned bool, asInt bool, err error) {
+	v, ok := env["PEERDB_MYSQL_TINYINT1_AS_INT"]
+	if !ok {
+		return false, false, nil
+	}
+	asInt, err = strconv.ParseBool(v)
+	if err != nil {
+		return false, false, fmt.Errorf("invalid PEERDB_MYSQL_TINYINT1_AS_INT %q: %w", v, err)
+	}
+	return true, asInt, nil
 }
 
 // isIntegerTypeName reports whether a lower-cased destination_type names an integer type on Postgres or ClickHouse
