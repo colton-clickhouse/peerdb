@@ -295,10 +295,10 @@ func formatTime(t time.Time, layout string, opts ToJSONOptions) string {
 	return fmt.Sprintf("%04d", 1-t.Year()) + t.Format(strings.TrimPrefix(layout, "2006")) + " BC"
 }
 
-// timeArray is a timestamp array for JSON. time.Time can't marshal years before 0, so with PgBCDates an array holding
-// a year before 1 AD is written as text, like the scalars; others keep time.Time's encoding.
+// timeArray is a timestamp array for JSON. time.Time can't marshal years before 0 or after 9999, so with PgBCDates an
+// array holding one is written as text, like the scalars; others keep time.Time's encoding.
 func timeArray(v []time.Time, layout string, opts ToJSONOptions) any {
-	if !opts.PgBCDates || !slices.ContainsFunc(v, func(t time.Time) bool { return t.Year() <= 0 }) {
+	if !opts.PgBCDates || !slices.ContainsFunc(v, func(t time.Time) bool { return t.Year() <= 0 || t.Year() > 9999 }) {
 		return v
 	}
 	out := make([]string, len(v))
