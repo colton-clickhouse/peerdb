@@ -38,6 +38,13 @@ func parsePeerDBInterval(s string) (pgtype.Interval, error) {
 // pgIntervalText is iv as Postgres prints it (IntervalStyle postgres, as interval::text does): "1 year 2 mons
 // -3 days +04:05:06.5". Postgres reads it back exactly.
 func pgIntervalText(iv pgtype.Interval) string {
+	// Postgres 17's infinite intervals are every field at its maximum or minimum; negating the minimum overflows
+	switch {
+	case iv.Months == math.MaxInt32 && iv.Days == math.MaxInt32 && iv.Microseconds == math.MaxInt64:
+		return "infinity"
+	case iv.Months == math.MinInt32 && iv.Days == math.MinInt32 && iv.Microseconds == math.MinInt64:
+		return "-infinity"
+	}
 	var b strings.Builder
 	negBefore := false
 	field := func(n int64, unit string) {
