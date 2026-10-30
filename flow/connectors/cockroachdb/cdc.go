@@ -37,6 +37,8 @@ const resolvedLagWarnThreshold = time.Hour
 // batch ends without a covering resolved timestamp as before.
 const (
 	changefeedCatchUpMaxDuration = time.Hour
+	// changefeedHoldLogInterval is how often a held batch is logged again
+	changefeedHoldLogInterval    = 10 * time.Minute
 	changefeedCatchUpStallWindow = 5 * time.Minute
 )
 
@@ -135,8 +137,8 @@ type changefeedPullState struct {
 	cursor           crdbHLC
 	startCursor      crdbHLC // the cursor the pull started from
 	pullStart        time.Time
-	holdForResolved  bool // InternalVersion_CockroachHoldBatchForResolved
-	holdLogged       bool
+	holdForResolved  bool      // InternalVersion_CockroachHoldBatchForResolved
+	holdLoggedAt     time.Time // when the hold was last logged, every changefeedHoldLogInterval
 	resolvedInterval time.Duration
 	recordCount      uint32
 	batchDeadline    time.Time
@@ -543,10 +545,17 @@ func (c *CockroachDBConnector) runChangefeedSession(
 		now := time.Now()
 		if reason := state.batchCutReason(now); reason != "" {
 			if state.holdingForResolved(now) {
-				if !state.holdLogged {
-					state.holdLogged = true
-					c.logger.Info("[cockroachdb] keeping the batch open until a resolved timestamp advances the cursor: "+reason,
+				if now.Sub(state.holdLoggedAt) >= changefeedHoldLogInterval {
+					// the batch is one destination transaction: until it ends, nothing it holds is visible there
+					logHold := c.logger.Info
+					if !state.holdLoggedAt.IsZero() {
+						logHold = c.logger.Warn
+					}
+					state.holdLoggedAt = now
+					logHold("[cockroachdb] keeping the batch open until a resolved timestamp advances the cursor: "+reason,
 						slog.String("cursor", state.cursor.String()),
+						slog.Duration("held", now.Sub(state.pullStart).Round(time.Second)),
+						slog.Duration("maxHold", changefeedCatchUpMaxDuration),
 						slog.Uint64("records", uint64(state.recordCount)),
 						slog.Int("bufferedRecords", len(state.buffer)))
 				}
