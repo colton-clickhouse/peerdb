@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -30,8 +31,23 @@ func TestPgIntervalText(t *testing.T) {
 		{pgtype.Interval{Microseconds: 6_500_000}, "00:00:06.5"},
 		{pgtype.Interval{Days: 106751991, Microseconds: 4*hour + 54_775_807}, "106751991 days 04:00:54.775807"},
 		{pgtype.Interval{Days: -1, Microseconds: -hour}, "-1 days -01:00:00"},
+		// Postgres 17's infinite intervals
+		{pgtype.Interval{Months: math.MaxInt32, Days: math.MaxInt32, Microseconds: math.MaxInt64}, "infinity"},
+		{pgtype.Interval{Months: math.MinInt32, Days: math.MinInt32, Microseconds: math.MinInt64}, "-infinity"},
 	} {
 		require.Equal(t, tc.want, pgIntervalText(tc.iv))
+	}
+}
+
+// A Postgres source's infinite intervals survive PeerDB's interval JSON exactly, so they are written as infinity.
+func TestInfiniteIntervalRoundTrip(t *testing.T) {
+	for json, want := range map[string]string{
+		`{"hours":2562047788,"minutes":0,"seconds":54.775807,"days":2147483647,"months":7,"years":178956970,"valid":true}`:      "infinity",
+		`{"hours":-2562047788,"minutes":0,"seconds":-54.775808,"days":-2147483648,"months":-8,"years":-178956970,"valid":true}`: "-infinity",
+	} {
+		iv, err := parsePeerDBInterval(json)
+		require.NoError(t, err)
+		require.Equal(t, want, pgIntervalText(iv))
 	}
 }
 
