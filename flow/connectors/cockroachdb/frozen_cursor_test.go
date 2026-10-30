@@ -1,10 +1,14 @@
 package conncockroachdb
 
 import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/log"
 )
 
 func TestFrozenCursorTracker(t *testing.T) {
@@ -58,4 +62,47 @@ func TestFrozenCursorForOutlivesTheConnector(t *testing.T) {
 	a := frozenCursorFor("TestFrozenCursorForOutlivesTheConnector")
 	require.Same(t, a, frozenCursorFor("TestFrozenCursorForOutlivesTheConnector"))
 	require.NotSame(t, a, frozenCursorFor("TestFrozenCursorForOutlivesTheConnector_other"))
+}
+
+// A batch from a frozen cursor runs strict: it never emits past the checkpoint, and it ends as soon as a resolved
+// timestamp advances the cursor, so the mirror recovers by itself once the cause is gone.
+func TestStrictBatchWaitsForResolved(t *testing.T) {
+	ctx := t.Context()
+	om, _ := newMetricsTestOtelManager(t)
+	c := &CockroachDBConnector{logger: log.NewStructuredLogger(slog.Default())}
+	state := newProcessRowTestState()
+	base := time.Now().UnixNano()
+	frozenAt := crdbHLC{WallNanos: base}
+	state.cursor, state.strictFrom, state.strictUntil = frozenAt, frozenAt, time.Now().Add(time.Hour)
+	state.batchDeadline = time.Now().Add(-time.Hour) // long past: a normal batch would force-emit now
+
+	row := &changefeedEnvelope{
+		After:   map[string]json.RawMessage{"id": json.RawMessage(`1`)},
+		Updated: fmt.Sprintf("%d.0000000000", base+10),
+	}
+	require.NoError(t, c.processChangefeedRow(ctx, om, state, "defaultdb.public.users", []byte("[1]"), row, 10))
+	require.LessOrEqual(t, state.watchdogWindow(), max(30*time.Second, 5*state.resolvedInterval),
+		"past deadlines don't shrink a strict batch's watchdog")
+
+	// a resolved timestamp at the frozen cursor neither emits nor ends the batch
+	done, err := c.handleResolved(ctx, om, state, frozenAt.String())
+	require.NoError(t, err)
+	require.False(t, done)
+	require.Zero(t, state.recordCount)
+	require.False(t, state.forcedEmit)
+
+	// one past the row emits it under the checkpoint and ends the batch
+	done, err = c.handleResolved(ctx, om, state, fmt.Sprintf("%d.0000000000", base+20))
+	require.NoError(t, err)
+	require.True(t, done)
+	require.Equal(t, uint32(1), state.recordCount)
+	require.False(t, state.forcedEmit, "nothing was emitted past the checkpoint")
+
+	// filling the buffer can't force-emit either: the batch fails instead, having emitted nothing
+	strict := newProcessRowTestState()
+	strict.cursor, strict.strictFrom, strict.strictUntil = frozenAt, frozenAt, time.Now().Add(time.Hour)
+	strict.bufferedBytes = changefeedBufferSoftLimitBytes
+	err = c.processChangefeedRow(ctx, om, strict, "defaultdb.public.users", []byte("[1]"), row, 10)
+	require.ErrorIs(t, err, errStrictWaitOver)
+	require.Zero(t, strict.recordCount)
 }
