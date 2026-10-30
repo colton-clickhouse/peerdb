@@ -1177,3 +1177,32 @@ func TestChangefeedArrayNullElements(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, types.QValueArrayInt64{Val: []int64{1, 0, 3}}, items.GetColumnValue("ia"))
 }
+
+// A row-level TTL table's changefeed rows carry crdb_internal_expiration, which the schema leaves out. From
+// InternalVersion_CockroachOmitInternalColumns it isn't an unknown column, so no row re-reads the schema: that read
+// needs the connector's connection (none here), which is dead after its node fails, and every session would retry it.
+func TestChangefeedInternalColumnNeedsNoSchemaRead(t *testing.T) {
+	ctx := t.Context()
+	om, _ := newMetricsTestOtelManager(t)
+	c := &CockroachDBConnector{logger: log.NewStructuredLogger(slog.Default())} // no connection
+	state := newProcessRowTestState()
+	schema := state.schemas["public.users"]
+	row := map[string]json.RawMessage{"id": json.RawMessage(`1`), "crdb_internal_expiration": json.RawMessage(
+		`"2026-11-01T00:00:00Z"`)}
+
+	require.Equal(t, []string{"crdb_internal_expiration"}, schema.unknownColumns(row), "older mirrors re-read it")
+
+	schema.omitInternal = true
+	require.Empty(t, schema.unknownColumns(row))
+	require.Equal(t, []string{"added"}, schema.unknownColumns(map[string]json.RawMessage{
+		"id": json.RawMessage(`1`), "added": json.RawMessage(`2`)}), "other new columns are still detected")
+
+	envelope := &changefeedEnvelope{After: row, Updated: fmt.Sprintf("%d.0000000000", time.Now().UnixNano())}
+	require.NoError(t, c.processChangefeedRow(ctx, om, state, "defaultdb.public.users", []byte("[1]"), envelope, 10))
+	require.Len(t, state.buffer, 1)
+	for _, buffered := range state.buffer {
+		items := buffered.record.GetItems()
+		require.Nil(t, items.GetColumnValue("crdb_internal_expiration"), "internal columns aren't written")
+		require.NotNil(t, items.GetColumnValue("id"))
+	}
+}

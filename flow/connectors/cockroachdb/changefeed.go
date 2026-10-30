@@ -149,6 +149,10 @@ type changefeedTableSchema struct {
 	nullableEnabled bool
 	// arrayNullElements marks NULL array elements (InternalVersion_ArrayNullElements)
 	arrayNullElements bool
+	// omitInternal leaves CockroachDB's internal columns out of the unknown ones
+	// (InternalVersion_CockroachOmitInternalColumns): the changefeed emits them in every row, and the schema re-read
+	// they would trigger needs the connector's connection, which may be gone after a node failure
+	omitInternal bool
 	// pg are the conversions for a Postgres destination
 	pg pgValues
 	// geoSRIDs are the SRIDs of constrained geometry / geography columns: changefeed GeoJSON has none
@@ -206,6 +210,9 @@ func (s *changefeedTableSchema) unknownColumns(rows ...map[string]json.RawMessag
 				continue
 			}
 			if _, ok := s.ignored[col]; ok {
+				continue
+			}
+			if s.omitInternal && isInternalColumn(col) {
 				continue
 			}
 			if !slices.Contains(unknown, col) {
