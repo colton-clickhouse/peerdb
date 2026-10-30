@@ -21,6 +21,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared"
 	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
+	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
 const (
@@ -705,6 +706,11 @@ func generateCreateTableSQLForNormalizedTable(
 			pgColumnType = schemaQualifiedPgType.String()
 		} else if tableSchema.System == protos.TypeSystem_Q {
 			pgColumnType = qValueKindToPostgresType(pgColumnType, config.Version)
+			// MySQL TIME is a duration (-838:59:59 to 838:59:59), which time (a time of day) can't hold
+			if column.Type == string(types.QValueKindTime) && config.SourcePeerType == protos.DBType_MYSQL &&
+				config.Version >= shared.InternalVersion_PgMySQLTimeAsInterval {
+				pgColumnType = "INTERVAL"
+			}
 		}
 
 		if column.Type == "numeric" && column.TypeModifier != -1 {

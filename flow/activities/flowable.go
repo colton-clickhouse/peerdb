@@ -315,6 +315,15 @@ func (a *FlowableActivity) CreateNormalizedTable(
 	if err != nil {
 		return nil, err
 	}
+	// destinations can map a type by source (MySQL TIME is a duration)
+	if err := a.CatalogPool.QueryRow(ctx,
+		"SELECT p.type FROM flows f JOIN peers p ON p.id = f.source_peer WHERE f.name = $1", config.FlowName,
+	).Scan(&config.SourcePeerType); errors.Is(err, pgx.ErrNoRows) {
+		// left unset (BIGQUERY, the enum's zero): types are mapped without the source's specifics
+		logger.Warn("source peer type not found for mirror; mapping types without it")
+	} else if err != nil {
+		return nil, a.Alerter.LogFlowError(ctx, config.FlowName, fmt.Errorf("failed to get source peer type: %w", err))
+	}
 
 	numTablesToSetup.Store(int32(len(tableNameSchemaMapping)))
 	tableExistsMapping := make(map[string]bool, len(tableNameSchemaMapping))
