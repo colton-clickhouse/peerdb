@@ -43,6 +43,12 @@ func (s CRDBPGSuite) Test_Constrained_Geo_Snapshot_And_CDC() {
 	EnvWaitFor(t, env, 3*time.Minute, "snapshot row", func() bool {
 		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 1
 	})
+	ewkt := func(id int) string {
+		return s.destText(fmt.Sprintf(`SELECT concat_ws('|', ST_AsEWKT(p), ST_AsEWKT(poly), ST_AsEWKT(gp),
+			ST_AsEWKT(pz), ST_AsEWKT(anyg), ST_AsEWKT(gl)) FROM %s WHERE id = %d`, dstFull, id))
+	}
+	// as the snapshot wrote it, before the CDC update below re-sends the row
+	snapshotRow1 := ewkt(1)
 	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (2, 0, %s)`, srcFull, row2)))
 	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET v = 1 WHERE id = 1`, srcFull)))
 	EnvWaitFor(t, env, 3*time.Minute, "cdc rows", func() bool {
@@ -55,9 +61,9 @@ func (s CRDBPGSuite) Test_Constrained_Geo_Snapshot_And_CDC() {
 		"geometry(Geometry,3857)|geography(LineString,4326)", s.destText(fmt.Sprintf(
 		`SELECT string_agg(format_type(atttypid, atttypmod), '|' ORDER BY attnum) FROM pg_attribute
 		WHERE attrelid = '%s'::regclass AND attname IN ('p', 'poly', 'gp', 'pz', 'anyg', 'gl')`, dstFull)))
+	require.Equal(t, want1, snapshotRow1, "row 1 from the snapshot")
 	for id, want := range map[int]string{1: want1, 2: want2} {
-		require.Equal(t, want, s.destText(fmt.Sprintf(`SELECT concat_ws('|', ST_AsEWKT(p), ST_AsEWKT(poly), ST_AsEWKT(gp),
-			ST_AsEWKT(pz), ST_AsEWKT(anyg), ST_AsEWKT(gl)) FROM %s WHERE id = %d`, dstFull, id)), "id %d", id)
+		require.Equal(t, want, ewkt(id), "id %d", id)
 	}
 }
 
