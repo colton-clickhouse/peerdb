@@ -56,6 +56,15 @@ func TestBuildSelectedColumns(t *testing.T) {
 			expected: `"select", "we""ird"`,
 		},
 		{
+			name: "intervals read as text",
+			cols: []*protos.FieldDescription{
+				{Name: "id", Type: string(types.QValueKindInt64)},
+				{Name: "i", Type: string(types.QValueKindInterval)},
+				{Name: "ia", Type: string(types.QValueKindArrayInterval)},
+			},
+			expected: `"id", "i"::STRING AS "i", "ia"::STRING[] AS "ia"`,
+		},
+		{
 			name: "all columns excluded",
 			cols: []*protos.FieldDescription{
 				{Name: "id", Type: string(types.QValueKindInt64)},
