@@ -516,11 +516,17 @@ func TestAlterTableAddColumnDefault(t *testing.T) {
 		// declined: no default at all, or one we refuse to translate
 		{name: "no default", colDef: "INT", want: nil},
 		{name: "null default", colDef: "INT DEFAULT NULL", want: nil},
-		{name: "current timestamp", colDef: "DATETIME DEFAULT CURRENT_TIMESTAMP", want: nil},
-		{name: "now", colDef: "DATETIME DEFAULT NOW()", want: nil},
-		{name: "current timestamp on update", colDef: "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP", want: nil},
 		{name: "function call", colDef: "CHAR(36) DEFAULT (UUID())", want: nil},
-		{name: "bit literal", colDef: "BIT(8) DEFAULT b'101'", want: nil},
+		{name: "current time of a non-timestamp column", colDef: "VARCHAR(30) DEFAULT (NOW())", want: nil},
+
+		// as defaultExprFromInfoSchema renders them: current time on timestamp columns, bit literals as numbers
+		{name: "current timestamp", colDef: "DATETIME DEFAULT CURRENT_TIMESTAMP", want: new("CURRENT_TIMESTAMP")},
+		{name: "current timestamp fsp", colDef: "DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6)", want: new("CURRENT_TIMESTAMP")},
+		{name: "now", colDef: "DATETIME DEFAULT NOW()", want: new("CURRENT_TIMESTAMP")},
+		{name: "current timestamp on update", colDef: "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
+			want: new("CURRENT_TIMESTAMP")},
+		{name: "bit literal", colDef: "BIT(8) DEFAULT b'101'", want: new("5")},
+		{name: "bit literal tinyint1", colDef: "TINYINT(1) DEFAULT b'1'", want: new("1")},
 		// backslashes and control characters escape differently across dialects
 		{name: "string with backslash", colDef: `VARCHAR(10) DEFAULT 'a\\b'`, want: nil},
 		{name: "string with tab", colDef: `VARCHAR(10) DEFAULT 'a\tb'`, want: nil},

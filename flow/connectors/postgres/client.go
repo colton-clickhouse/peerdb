@@ -741,9 +741,16 @@ func generateCreateTableSQLForNormalizedTable(
 		if tableSchema.NullableEnabled && !column.Nullable {
 			notNull = " NOT NULL"
 		}
+		var columnDefault string
+		if column.DefaultExpr != nil && tableSchema.System == protos.TypeSystem_Q &&
+			config.Version >= shared.InternalVersion_PgColumnDefaults {
+			if expr, ok := pgDefaultExpr(*column.DefaultExpr, types.QValueKind(column.Type), pgColumnType); ok {
+				columnDefault = " DEFAULT " + expr
+			}
+		}
 
 		createTableSQLArray = append(createTableSQLArray,
-			fmt.Sprintf("%s %s%s", common.QuoteIdentifier(column.Name), pgColumnType, notNull))
+			fmt.Sprintf("%s %s%s%s", common.QuoteIdentifier(column.Name), pgColumnType, notNull, columnDefault))
 	}
 
 	if config.SoftDeleteColName != "" {
