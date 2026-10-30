@@ -115,3 +115,18 @@ func TestQValueFromChangefeedJSONSpecialValues(t *testing.T) {
 	_, err := qvalueFromChangefeedJSON(specialField(types.QValueKindDate, 0, true), json.RawMessage(`"infinity"`), false)
 	require.Error(t, err)
 }
+
+// The changefeed renders an infinite timestamp as the bounds of CockroachDB's range, at full precision whatever the
+// column's (captured on v25.4 for TIMESTAMP(3) and TIMESTAMPTZ(0)); both are matched as prefixes.
+func TestChangefeedTimeSpecialWithPrecision(t *testing.T) {
+	for raw, want := range map[string]types.SpecialValue{
+		`"294277-01-01T23:59:59.999999"`:  types.SpecialInfinity,
+		`"294277-01-01T23:59:59.999999Z"`: types.SpecialInfinity,
+		`"-4714-11-23T00:00:00"`:          types.SpecialNegInfinity,
+		`"-4714-11-23T00:00:00Z"`:         types.SpecialNegInfinity,
+		`"infinity"`:                      types.SpecialInfinity,
+		`"2024-01-02T03:04:05.123"`:       types.SpecialNone,
+	} {
+		require.Equal(t, want, changefeedTimeSpecial(json.RawMessage(raw)), raw)
+	}
+}
