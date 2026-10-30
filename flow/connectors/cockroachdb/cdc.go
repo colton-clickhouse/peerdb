@@ -994,6 +994,31 @@ func (c *CockroachDBConnector) loadSourceKeys(ctx context.Context, state *change
 			schema.sourceKey = key
 		}
 	}
+
+	// which tables have CockroachDB's internal columns as hidden ones (row-level TTL's), so the changefeed leaves them
+	// out without a schema read
+	rows, err = c.conn.Query(ctx, `
+		SELECT c.table_schema, c.table_name, c.column_name
+		FROM information_schema.columns c
+		JOIN unnest($1::STRING[], $2::STRING[]) AS t (table_schema, table_name)
+			ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+		WHERE c.is_hidden = 'YES' AND c.column_name = ANY($3::STRING[])
+	`, namespaces, tables, internalColumns)
+	if err != nil {
+		return fmt.Errorf("failed to read source hidden columns: %w", err)
+	}
+	if _, err := pgx.ForEachRow(rows, []any{&namespace, &table, &column}, func() error {
+		if source, ok := sources[[2]string{namespace, table}]; ok {
+			schema := state.schemas[source]
+			if schema.hiddenInternal == nil {
+				schema.hiddenInternal = make(map[string]struct{}, 1)
+			}
+			schema.hiddenInternal[column] = struct{}{}
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to read source hidden columns: %w", err)
+	}
 	return nil
 }
 

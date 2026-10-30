@@ -1193,6 +1193,9 @@ func TestChangefeedInternalColumnNeedsNoSchemaRead(t *testing.T) {
 	require.Equal(t, []string{"crdb_internal_expiration"}, schema.unknownColumns(row), "older mirrors re-read it")
 
 	schema.omitInternal = true
+	require.Equal(t, []string{"crdb_internal_expiration"}, schema.unknownColumns(row),
+		"a visible column of that name (the table has no hidden one) is an ordinary column")
+	schema.hiddenInternal = map[string]struct{}{"crdb_internal_expiration": {}}
 	require.Empty(t, schema.unknownColumns(row))
 	require.Equal(t, []string{"crdb_internal_id_shard_16"}, schema.unknownColumns(map[string]json.RawMessage{
 		"id": json.RawMessage(`1`), "crdb_internal_id_shard_16": json.RawMessage(`3`)}),

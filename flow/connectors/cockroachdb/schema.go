@@ -420,5 +420,7 @@ func constrainedGeoTypmod(dataType string, udtName string, version uint32) (int3
 // is part of the primary key (later shard columns are virtual and already left out). A keyless table's hidden rowid
 // is not one of them either: it keys the destination.
 func isInternalColumn(name string) bool {
-	return name == "crdb_internal_expiration"
+	return slices.Contains(internalColumns, name)
 }
+
+var internalColumns = []string{"crdb_internal_expiration"}

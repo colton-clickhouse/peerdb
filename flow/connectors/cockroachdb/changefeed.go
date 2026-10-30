@@ -153,6 +153,10 @@ type changefeedTableSchema struct {
 	// (InternalVersion_CockroachOmitInternalColumns): the changefeed emits them in every row, and the schema re-read
 	// they would trigger needs the connector's connection, which may be gone after a node failure
 	omitInternal bool
+	// hiddenInternal are the internal columns the table has as hidden ones, read at the start of each pull
+	// (loadSourceKeys): only those are left out of the unknown ones. A visible column a user gave such a name is an
+	// ordinary column, added mid-stream through the schema re-read like any other.
+	hiddenInternal map[string]struct{}
 	// pg are the conversions for a Postgres destination
 	pg pgValues
 	// geoSRIDs are the SRIDs of constrained geometry / geography columns: changefeed GeoJSON has none
@@ -212,7 +216,7 @@ func (s *changefeedTableSchema) unknownColumns(rows ...map[string]json.RawMessag
 			if _, ok := s.ignored[col]; ok {
 				continue
 			}
-			if s.omitInternal && isInternalColumn(col) {
+			if _, ok := s.hiddenInternal[col]; ok && s.omitInternal {
 				continue
 			}
 			if !slices.Contains(unknown, col) {
