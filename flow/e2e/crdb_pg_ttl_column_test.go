@@ -72,3 +72,33 @@ func (s CRDBPGSuite) Test_TTL_Column_Old_Version() {
 	require.Equal(s.t, "id,v,crdb_internal_expiration", columns)
 	require.Equal(s.t, "1=updated,2=cdc", rows)
 }
+
+// Row-level TTL enabled on a table the mirror already replicates: the changefeed's rows gain the hidden column
+// mid-stream, and it stays out of the target as when the mirror started with it.
+func (s CRDBPGSuite) Test_TTL_Column_Added_Mid_Stream() {
+	t := s.t
+	srcTable := "ttl_column_added"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT8 PRIMARY KEY, v STRING)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 'snapshot')`, srcFull)))
+
+	flowConnConfig := s.startMirror(srcTable)
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 3*time.Minute, "snapshot row", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 1
+	})
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`ALTER TABLE %s SET (ttl_expire_after = '1 day')`, srcFull)))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (2, 'cdc')`, srcFull)))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET v = 'updated' WHERE id = 1`, srcFull)))
+	EnvWaitFor(t, env, 3*time.Minute, "cdc rows", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE (id = 1 AND v = 'updated') OR (id = 2 AND v = 'cdc')`,
+			dstFull)) == 2
+	})
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+	require.Equal(t, "id,v", s.destText(fmt.Sprintf(`SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_attribute
+		WHERE attrelid = '%s'::regclass AND attnum > 0 AND NOT attisdropped AND attname NOT ILIKE '\_peerdb\_%%'`, dstFull)))
+}

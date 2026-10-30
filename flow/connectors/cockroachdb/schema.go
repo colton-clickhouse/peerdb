@@ -412,9 +412,11 @@ func constrainedGeoTypmod(dataType string, udtName string, version uint32) (int3
 	return datatypes.MakeGeoTypmod(args)
 }
 
-// isInternalColumn reports whether a hidden column is one CockroachDB adds and maintains itself, such as row-level
-// TTL's crdb_internal_expiration (a hash-sharded key's shard column is virtual and already left out). A keyless
-// table's hidden rowid is not one of them: it keys the destination.
+// isInternalColumn reports whether a hidden column is one CockroachDB adds and maintains itself: row-level TTL's
+// crdb_internal_expiration. It's a list rather than the crdb_internal_ prefix, which would also drop a user's own NOT
+// VISIBLE column of such a name, and the stored hidden shard column of a hash-sharded key created before v21.2, which
+// is part of the primary key (later shard columns are virtual and already left out). A keyless table's hidden rowid
+// is not one of them either: it keys the destination.
 func isInternalColumn(name string) bool {
-	return strings.HasPrefix(name, "crdb_internal_")
+	return name == "crdb_internal_expiration"
 }

@@ -1174,6 +1174,9 @@ func TestChangefeedInternalColumnNeedsNoSchemaRead(t *testing.T) {
 
 	schema.omitInternal = true
 	require.Empty(t, schema.unknownColumns(row))
+	require.Equal(t, []string{"crdb_internal_id_shard_16"}, schema.unknownColumns(map[string]json.RawMessage{
+		"id": json.RawMessage(`1`), "crdb_internal_id_shard_16": json.RawMessage(`3`)}),
+		"only the TTL column is internal, not everything with the prefix")
 	require.Equal(t, []string{"added"}, schema.unknownColumns(map[string]json.RawMessage{
 		"id": json.RawMessage(`1`), "added": json.RawMessage(`2`)}), "other new columns are still detected")
 
