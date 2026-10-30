@@ -366,6 +366,10 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, pg pgValu
 		if qv, ok := changefeedSpecialValue(field, raw); ok {
 			return qv, nil
 		}
+	} else if pg.arrayInfinity {
+		if qv, ok := changefeedInfinityFallback(field, raw, pg.defaultTime); ok {
+			return qv, nil
+		}
 	}
 
 	switch field.Type {
@@ -721,6 +725,30 @@ func changefeedSpecialValue(field types.QField, raw json.RawMessage) (types.QVal
 		}
 	}
 	return nil, false
+}
+
+// changefeedInfinityFallback is the snapshot's value for a +-infinity date or timestamp on a destination that doesn't
+// keep it (pgValues.arrayInfinity): NULL, or defaultTime in a column that isn't nullable.
+func changefeedInfinityFallback(field types.QField, raw json.RawMessage, defaultTime time.Time) (types.QValue, bool) {
+	switch field.Type {
+	case types.QValueKindDate, types.QValueKindTimestamp, types.QValueKindTimestampTZ:
+		if changefeedTimeSpecial(raw) == types.SpecialNone {
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
+	if field.Nullable {
+		return types.QValueNull(field.Type), true
+	}
+	switch field.Type {
+	case types.QValueKindDate:
+		return types.QValueDate{Val: defaultTime}, true
+	case types.QValueKindTimestamp:
+		return types.QValueTimestamp{Val: defaultTime}, true
+	default:
+		return types.QValueTimestampTZ{Val: defaultTime}, true
+	}
 }
 
 // changefeedArraySpecials marks the NaN and infinite elements of a numeric, date or timestamp array; nil if none.
