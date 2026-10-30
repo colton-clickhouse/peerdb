@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"go.temporal.io/sdk/log"
 
@@ -22,9 +24,14 @@ import (
 
 type CockroachDBConnector struct {
 	*metadataStore.PostgresMetadata
-	logger      log.Logger
-	ssh         *utils.SSHTunnel
-	conn        *crdbConn
+	logger log.Logger
+	ssh    *utils.SSHTunnel
+	// conn is the connector's own connection, held for the connector's life (a SyncFlow activity's, for CDC).
+	// connMu guards replacing it in ensureConn.
+	conn   *crdbConn
+	connMu sync.Mutex
+	// dialConfig is what conn was dialed with, to dial it again
+	dialConfig  *pgx.ConnConfig
 	config      *protos.CockroachDBConfig
 	connStr     string
 	crdbVersion string
@@ -90,6 +97,7 @@ func NewCockroachDBConnector(ctx context.Context, env map[string]string, config 
 		config:           config,
 		ssh:              tunnel,
 		conn:             conn,
+		dialConfig:       connConfig,
 		connStr:          connectionString,
 		crdbVersion:      "",
 	}
@@ -98,6 +106,8 @@ func NewCockroachDBConnector(ctx context.Context, env map[string]string, config 
 		connector.logger.Info("SSH keepalive failed, closing connection")
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		connector.connMu.Lock()
+		defer connector.connMu.Unlock()
 		if err := connector.conn.Close(closeCtx); err != nil {
 			connector.logger.Error("failed to close CockroachDB connection on SSH keepalive failure", slog.Any("error", err))
 		}
@@ -137,10 +147,41 @@ func (c *CockroachDBConnector) Close() error {
 }
 
 func (c *CockroachDBConnector) ConnectionActive(ctx context.Context) error {
+	return c.ensureConn(ctx)
+}
+
+// ensureConn checks the connector's own connection and dials it again, once, if it's closed or doesn't answer. A
+// SyncFlow activity keeps one connector, and so one connection, for its whole life: once the node behind it fails,
+// or a load balancer drops it while the mirror is idle, every sync of the activity would fail with "connection to
+// source down" until the activity ends, though any other node can serve it. Changefeed sessions dial their own
+// connections, so this is about the reads around them: the connection check before each sync, the schema read
+// for added columns and the source key read.
+func (c *CockroachDBConnector) ensureConn(ctx context.Context) error {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
 	if c.conn == nil {
-		return fmt.Errorf("connection is nil")
+		return errors.New("connection is nil")
 	}
-	return c.conn.Ping(ctx)
+	pingErr := errors.New("connection closed")
+	if !c.conn.conn.IsClosed() {
+		if pingErr = c.conn.Ping(ctx); pingErr == nil {
+			return nil
+		}
+	}
+	if ctx.Err() != nil {
+		return pingErr
+	}
+	conn, err := NewCockroachDBConnFromConfig(ctx, c.dialConfig, c.ssh)
+	if err != nil {
+		return fmt.Errorf("%w (reconnecting failed: %w)", pingErr, err)
+	}
+	c.logger.Info("[cockroachdb] reconnected the connector's connection", slog.Any("error", pingErr))
+	old := c.conn
+	c.conn = conn
+	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = old.Close(closeCtx)
+	return nil
 }
 
 func (c *CockroachDBConnector) GetVersion(ctx context.Context) (string, error) {
