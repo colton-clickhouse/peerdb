@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/binary"
+	"github.com/jackc/pgx/v5/pgtype"
 	"testing"
 	"time"
 
@@ -25,4 +26,30 @@ func TestTimetzBinaryWrapsIntoTheDay(t *testing.T) {
 	require.Equal(t, 24*time.Hour, micros(timetzBinary(24*time.Hour)), "24:00 is a valid timetz")
 	require.Zero(t, micros(timetzBinary(0)))
 	require.Equal(t, 23*time.Hour+59*time.Minute, micros(timetzBinary(-time.Minute)))
+}
+
+// pgx encodes a timetz by the target column: PG's binary timetz for timetz (an OID pgx doesn't know), the UTC time of
+// day for time, and its text for text and bytea. Before, the 12 bytes went to every column: a time column had no
+// encoding for them, and text or bytea columns took them raw.
+func TestPgTimeTZEncodesByTarget(t *testing.T) {
+	m := pgtype.NewMap()
+	v := pgTimeTZ{-4 * time.Hour} // 01:00+05
+	encode := func(oid uint32) []byte {
+		buf, err := m.Encode(oid, pgtype.BinaryFormatCode, v, nil)
+		require.NoError(t, err, "oid %d", oid)
+		return buf
+	}
+	require.Equal(t, timetzBinary(20*time.Hour), encode(pgtype.TimetzOID))
+	require.Equal(t, encodeWith(t, m, pgtype.TimeOID, pgtype.Time{Microseconds: int64(20 * time.Hour / time.Microsecond),
+		Valid: true}), encode(pgtype.TimeOID))
+	require.Equal(t, []byte("20:00:00.000000"), encode(pgtype.TextOID))
+	require.Equal(t, []byte("20:00:00.000000"), encode(pgtype.VarcharOID))
+	require.Equal(t, []byte("20:00:00.000000"), encode(pgtype.ByteaOID))
+}
+
+func encodeWith(t *testing.T, m *pgtype.Map, oid uint32, value any) []byte {
+	t.Helper()
+	buf, err := m.Encode(oid, pgtype.BinaryFormatCode, value, nil)
+	require.NoError(t, err)
+	return buf
 }
