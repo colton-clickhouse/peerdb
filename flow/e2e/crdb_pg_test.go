@@ -11,6 +11,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -588,4 +589,65 @@ func (s CRDBPGSuite) Test_FK_Cascade_Delete_Replicates() {
 
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
+}
+
+// A NULL array must stay NULL and an empty array empty, on both paths (via CDC a NULL array
+// arrived as '{}'). NULL elements are tested separately.
+func (s CRDBPGSuite) Test_Null_Array_Stays_Null() {
+	if bad := s.nullArrayProblems("null_array", shared.InternalVersion_Latest); len(bad) > 0 {
+		s.t.Errorf("%d array mismatches on the destination:\n  %s", len(bad), strings.Join(bad, "\n  "))
+	}
+}
+
+// Mirrors created before InternalVersion_PgNullArrayStaysNull keep writing '{}' for a NULL array through CDC, so a
+// running mirror doesn't switch mid-stream. The snapshot keeps NULL on every version.
+func (s CRDBPGSuite) Test_Null_Array_Old_Version_Keeps_Empty() {
+	bad := s.nullArrayProblems("null_array_old", shared.InternalVersion_PgNullArrayStaysNull-1)
+	want := []string{"id 3: want NULL NULL, got {} {}", "id 11: want NULL NULL, got {} {}"}
+	require.ElementsMatch(s.t, want, bad)
+}
+
+// nullArrayProblems replicates NULL, empty and non-empty arrays through snapshot and CDC on a mirror of the given
+// version and returns the rows that differ from the source.
+func (s CRDBPGSuite) nullArrayProblems(srcTable string, version uint32) []string {
+	t := s.t
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	require.NoError(t, s.source.Exec(t.Context(),
+		fmt.Sprintf(`CREATE TABLE %s (id INT8 PRIMARY KEY, ia INT8[], sa STRING[])`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES
+		(1, NULL, NULL), (2, '{}', '{}'), (3, '{1,2}', '{a,b}')`, srcFull)))
+
+	flowConnConfig := s.startMirror(srcTable)
+	// mirror creation replaces Version with PEERDB_FORCE_INTERNAL_VERSION (default: latest)
+	flowConnConfig.Env = map[string]string{"PEERDB_FORCE_INTERNAL_VERSION": strconv.FormatUint(uint64(version), 10)}
+	flowConnConfig.Version = version
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 3*time.Minute, "snapshot rows", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 3
+	})
+
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES
+		(11, NULL, NULL), (12, '{}', '{}'), (13, '{1,2}', '{a,b}')`, srcFull)))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET ia = NULL, sa = NULL WHERE id = 3`, srcFull)))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (99, '{9}', '{z}')`, srcFull)))
+	EnvWaitFor(t, env, 3*time.Minute, "cdc rows", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id = 99`, dstFull)) == 1
+	})
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+
+	want := map[int]string{1: "NULL NULL", 2: "{} {}", 3: "NULL NULL", 11: "NULL NULL", 12: "{} {}", 13: "{1,2} {a,b}"}
+	var bad []string
+	for _, id := range []int{1, 2, 3, 11, 12, 13} {
+		got := s.destText(fmt.Sprintf(`SELECT coalesce(ia::text, 'NULL') || ' ' || coalesce(sa::text, 'NULL') FROM %s WHERE id = %d`,
+			dstFull, id))
+		if got != want[id] {
+			bad = append(bad, fmt.Sprintf("id %d: want %s, got %s", id, want[id], got))
+		}
+	}
+	return bad
 }
