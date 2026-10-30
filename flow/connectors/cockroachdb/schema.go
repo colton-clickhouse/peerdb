@@ -43,6 +43,10 @@ func (c *CockroachDBConnector) getTableSchema(
 	if err != nil {
 		return nil, err
 	}
+	// CDC reads the schema mid-stream for added columns, on a connection that may have outlived its node
+	if err := c.ensureConn(ctx); err != nil {
+		return nil, err
+	}
 
 	// the rendered HLC is digits and a dot only, so the clause is injection safe
 	var aostClause string
