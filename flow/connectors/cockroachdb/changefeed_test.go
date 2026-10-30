@@ -25,6 +25,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/model"
 	"github.com/PeerDB-io/peerdb/flow/otel_metrics"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
@@ -625,6 +626,19 @@ func TestChangefeedKeyItems(t *testing.T) {
 
 	_, err = changefeedKeyItems([]byte(`[7]`), schema, nil)
 	require.ErrorContains(t, err, "does not match primary key columns")
+
+	// the source key lost a column the destination is keyed on (ALTER PRIMARY KEY): no silent partial key
+	changed := newChangefeedTableSchema(&protos.TableSchema{
+		PrimaryKeyColumns: []string{"id", "region"},
+		Columns: []*protos.FieldDescription{
+			{Name: "id", Type: string(types.QValueKindInt64)}, {Name: "region", Type: string(types.QValueKindString)},
+		},
+	}, nil)
+	changed.sourceKey = []string{"id"}
+	_, err = changefeedKeyItems([]byte(`[7]`), changed, nil)
+	var irrecoverable *exceptions.CockroachChangefeedIrrecoverableError
+	require.ErrorAs(t, err, &irrecoverable)
+	require.Equal(t, "PRIMARY_KEY_CHANGED", irrecoverable.Code)
 
 	_, err = changefeedKeyItems([]byte(`{"id": 7}`), schema, nil)
 	require.ErrorContains(t, err, "failed to parse changefeed key")
