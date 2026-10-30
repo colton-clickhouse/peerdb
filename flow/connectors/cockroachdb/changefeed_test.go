@@ -25,6 +25,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/model"
 	"github.com/PeerDB-io/peerdb/flow/otel_metrics"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
@@ -626,6 +627,19 @@ func TestChangefeedKeyItems(t *testing.T) {
 	_, err = changefeedKeyItems([]byte(`[7]`), schema, nil)
 	require.ErrorContains(t, err, "does not match primary key columns")
 
+	// the source key lost a column the destination is keyed on (ALTER PRIMARY KEY): no silent partial key
+	changed := newChangefeedTableSchema(&protos.TableSchema{
+		PrimaryKeyColumns: []string{"id", "region"},
+		Columns: []*protos.FieldDescription{
+			{Name: "id", Type: string(types.QValueKindInt64)}, {Name: "region", Type: string(types.QValueKindString)},
+		},
+	}, nil)
+	changed.sourceKey = []string{"id"}
+	_, err = changefeedKeyItems([]byte(`[7]`), changed, nil)
+	var irrecoverable *exceptions.CockroachChangefeedIrrecoverableError
+	require.ErrorAs(t, err, &irrecoverable)
+	require.Equal(t, "PRIMARY_KEY_CHANGED", irrecoverable.Code)
+
 	_, err = changefeedKeyItems([]byte(`{"id": 7}`), schema, nil)
 	require.ErrorContains(t, err, "failed to parse changefeed key")
 
@@ -639,6 +653,25 @@ func TestChangefeedKeyItems(t *testing.T) {
 		Columns: []*protos.FieldDescription{{Name: "id", Type: string(types.QValueKindInt64)}},
 	}, nil)
 	_, err = changefeedKeyItems([]byte(`[7]`), noPKs, nil)
+	require.ErrorContains(t, err, "does not match primary key columns")
+
+	// a hash-sharded key: the changefeed key leads with the virtual shard column, which the destination isn't keyed on
+	sharded := newChangefeedTableSchema(&protos.TableSchema{
+		TableIdentifier:   "public.events",
+		PrimaryKeyColumns: []string{"ts", "id"},
+		Columns: []*protos.FieldDescription{
+			{Name: "ts", Type: string(types.QValueKindString), Nullable: false},
+			{Name: "id", Type: string(types.QValueKindInt64), Nullable: false},
+		},
+	}, nil)
+	sharded.sourceKey = []string{"crdb_internal_id_ts_shard_16", "ts", "id"}
+	items, err = changefeedKeyItems([]byte(`[3, "2026-01-01", 7]`), sharded, nil)
+	require.NoError(t, err)
+	require.Equal(t, types.QValueString{Val: "2026-01-01"}, items.GetColumnValue("ts"))
+	require.Equal(t, types.QValueInt64{Val: 7}, items.GetColumnValue("id"))
+	require.Nil(t, items.GetColumnValue("crdb_internal_id_ts_shard_16"))
+	require.Len(t, items.ColToVal, 2)
+	_, err = changefeedKeyItems([]byte(`["2026-01-01", 7]`), sharded, nil)
 	require.ErrorContains(t, err, "does not match primary key columns")
 }
 

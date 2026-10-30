@@ -20,6 +20,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/model"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared/datatypes"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
@@ -139,9 +140,13 @@ func (e *changefeedEnvelope) operation() changefeedOperation {
 
 // changefeedTableSchema caches per-table column typing for envelope decoding.
 type changefeedTableSchema struct {
-	fields          map[string]types.QField
-	ignored         map[string]struct{}
-	primaryKeys     []string
+	fields      map[string]types.QField
+	ignored     map[string]struct{}
+	primaryKeys []string
+	// sourceKey is the source's full primary key in key order, the layout of the changefeed key column. It differs
+	// from primaryKeys when the key has virtual columns the destination is not keyed on (a hash-sharded key's shard
+	// column); empty means the same as primaryKeys.
+	sourceKey       []string
 	nullableEnabled bool
 }
 
@@ -233,14 +238,29 @@ func changefeedKeyItems(
 	if err := json.Unmarshal(key, &elems); err != nil {
 		return model.RecordItems{}, fmt.Errorf("failed to parse changefeed key %s: %w", key, err)
 	}
-	if len(schema.primaryKeys) == 0 || len(elems) != len(schema.primaryKeys) {
+	keyColumns := schema.sourceKey
+	if len(keyColumns) == 0 {
+		keyColumns = schema.primaryKeys
+	}
+	if len(schema.primaryKeys) == 0 || len(elems) != len(keyColumns) {
 		return model.RecordItems{}, fmt.Errorf("changefeed key %s does not match primary key columns %v",
-			key, schema.primaryKeys)
+			key, keyColumns)
+	}
+	for _, col := range schema.primaryKeys {
+		if !slices.Contains(keyColumns, col) {
+			// e.g. ALTER PRIMARY KEY (tenant, id) -> (id): a delete without a row image would match nothing
+			return model.RecordItems{}, exceptions.NewCockroachChangefeedIrrecoverableError("PRIMARY_KEY_CHANGED",
+				fmt.Errorf("the source key %v no longer includes %s, a key column of the destination table: the"+
+					" table's primary key changed since the mirror read its schema; resync the mirror", keyColumns, col))
+		}
 	}
 	items := model.NewRecordItems(len(elems))
-	for i, col := range schema.primaryKeys {
+	for i, col := range keyColumns {
 		if _, excluded := exclude[col]; excluded {
 			continue
+		}
+		if !slices.Contains(schema.primaryKeys, col) {
+			continue // a virtual key column, derived from the others
 		}
 		field, ok := schema.fields[col]
 		if !ok {
