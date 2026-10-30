@@ -87,6 +87,10 @@ const (
 	// Postgres destinations: CDC writes dates and timestamps before 1 AD as Postgres's "0044-03-15 BC" instead of Go's
 	// astronomical "-0043-03-15", which normalize rejects. Older mirrors stall normalize on them.
 	InternalVersion_PgBCDates
+	// CockroachDB sources: constrained geometry / geography columns (GEOMETRY(POINT,4326)) replicate as geometry /
+	// geography with their PostGIS typmod; Postgres destinations create them constrained and COPY keeps SRIDs. Older
+	// mirrors replicate them as text holding hex EWKB, and CDC writes to them fail.
+	InternalVersion_PgConstrainedGeo
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1

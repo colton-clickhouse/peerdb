@@ -160,6 +160,9 @@ type pgValues struct {
 	specialValues bool
 	// time2400 keeps TIME '24:00:00' instead of clamping it to 23:59:59.999999 (InternalVersion_PgTime2400)
 	time2400 bool
+	// invalidGeo keeps geometries PostGIS calls invalid (e.g. a self-intersecting polygon) instead of writing NULL
+	// (InternalVersion_PgConstrainedGeo): Postgres stores them, and the changefeed sends them as they are
+	invalidGeo bool
 }
 
 func newPgValues(version uint32, dstType protos.DBType) pgValues {
@@ -167,6 +170,7 @@ func newPgValues(version uint32, dstType protos.DBType) pgValues {
 	return pgValues{
 		specialValues: pg && version >= shared.InternalVersion_PgSpecialValues,
 		time2400:      pg && version >= shared.InternalVersion_PgTime2400,
+		invalidGeo:    pg && version >= shared.InternalVersion_PgConstrainedGeo,
 	}
 }
 
@@ -331,7 +335,11 @@ func qvalueFromCrdbValue(
 		}
 	case types.QValueKindGeography, types.QValueKindGeometry:
 		wkbString, ok := value.(string)
-		wkt, err := datatypes.GeoValidate(wkbString)
+		toWKT := datatypes.GeoValidate
+		if pg.invalidGeo {
+			toWKT = datatypes.GeoToWKT
+		}
+		wkt, err := toWKT(wkbString)
 		if err != nil || !ok {
 			if field.Nullable {
 				return types.QValueNull(field.Type), nil
