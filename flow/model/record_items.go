@@ -229,7 +229,11 @@ func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 		}
 		if opts.ArrayNullElements {
 			if nulls := types.ArrayNulls(qv); nulls != nil {
-				jsonStruct[col] = withNullElements(jsonStruct[col], nulls)
+				withNulls, err := withNullElements(jsonStruct[col], nulls)
+				if err != nil {
+					return nil, fmt.Errorf("column %s: %w", col, err)
+				}
+				jsonStruct[col] = withNulls
 			}
 		}
 	}
@@ -237,11 +241,15 @@ func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 	return jsonStruct, nil
 }
 
-// withNullElements turns an encoded array into a []any with nil where nulls says so, so it marshals JSON nulls.
-func withNullElements(encoded any, nulls []bool) any {
+// withNullElements turns an encoded array into a []any with nil where nulls says so, so it marshals JSON nulls. A mask
+// without one entry per element is an error, as in the COPY (types.CheckArrayNulls), not a mask to drop.
+func withNullElements(encoded any, nulls []bool) (any, error) {
 	rv := reflect.ValueOf(encoded)
-	if rv.Kind() != reflect.Slice || rv.Len() != len(nulls) {
-		return encoded
+	if rv.Kind() != reflect.Slice {
+		return encoded, nil
+	}
+	if rv.Len() != len(nulls) {
+		return nil, fmt.Errorf("NULL-element mask of %d entries for %d elements", len(nulls), rv.Len())
 	}
 	out := make([]any, rv.Len())
 	for i := range out {
@@ -249,7 +257,7 @@ func withNullElements(encoded any, nulls []bool) any {
 			out[i] = rv.Index(i).Interface()
 		}
 	}
-	return out
+	return out, nil
 }
 
 func (r RecordItems) ToJSONWithOptions(options ToJSONOptions) (string, error) {

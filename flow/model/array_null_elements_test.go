@@ -46,3 +46,12 @@ func TestToJSONArrayNullElements(t *testing.T) {
 	require.JSONEq(t, `[1,0,3]`, string(off["ia"]))
 	require.JSONEq(t, `["a","","c"]`, string(off["sa"]))
 }
+
+// A NULL-element mask without one entry per element fails the CDC JSON too, as it fails the COPY, instead of being
+// dropped (which would write the placeholders as values).
+func TestToJSONArrayNullMaskMismatch(t *testing.T) {
+	items := NewRecordItems(1)
+	items.AddColumn("a", types.QValueArrayInt64{Val: []int64{1, 0}, Nulls: []bool{true}})
+	_, err := items.ToJSONWithOptions(ToJSONOptions{ArrayNullElements: true})
+	require.ErrorContains(t, err, "NULL-element mask of 1 entries for 2 elements")
+}
