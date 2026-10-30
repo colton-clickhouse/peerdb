@@ -135,6 +135,14 @@ func pgSpecialNumeric(sv types.SpecialValue) pgtype.Numeric {
 type QRecordCopyFromSource struct {
 	stream        *QRecordStream
 	currentRecord []types.QValue
+	// noNumericInfinity writes numeric +-Infinity as NULL (WithoutNumericInfinity), for Postgres before 14
+	noNumericInfinity bool
+}
+
+// WithoutNumericInfinity makes src write numeric +-Infinity as NULL, for destinations before Postgres 14.
+func (src *QRecordCopyFromSource) WithoutNumericInfinity() *QRecordCopyFromSource {
+	src.noNumericInfinity = true
+	return src
 }
 
 func NewQRecordCopyFromSource(
@@ -170,6 +178,9 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 
 	values := make([]any, len(src.currentRecord))
 	for i, qValue := range src.currentRecord {
+		if src.noNumericInfinity {
+			qValue = WithoutNumericInfinity(qValue)
+		}
 		if qValue == nil || qValue.Value() == nil {
 			values[i] = nil
 			continue

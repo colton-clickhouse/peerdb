@@ -89,6 +89,9 @@ func (r RecordItems) Len() int {
 func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 	jsonStruct := make(map[string]any, len(r.ColToVal))
 	for col, qv := range r.ColToVal {
+		if opts.NoNumericInfinity {
+			qv = WithoutNumericInfinity(qv)
+		}
 		if qv == nil {
 			jsonStruct[col] = nil
 			continue
