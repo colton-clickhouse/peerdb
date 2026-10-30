@@ -233,7 +233,11 @@ func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 		}
 		// only set for destinations that store them (types.SpecialValue)
 		if specials := types.ArraySpecials(qv); specials != nil {
-			jsonStruct[col] = withSpecialElements(jsonStruct[col], specials)
+			withSpecials, err := withSpecialElements(jsonStruct[col], specials)
+			if err != nil {
+				return nil, fmt.Errorf("column %s: %w", col, err)
+			}
+			jsonStruct[col] = withSpecials
 		}
 		if opts.ArrayNullElements {
 			if nulls := types.ArrayNulls(qv); nulls != nil {
@@ -266,11 +270,15 @@ func nonFiniteFloat(f float64, opts ToJSONOptions) any {
 	}
 }
 
-// withSpecialElements turns an encoded array into a []any with the special values' text where specials says so.
-func withSpecialElements(encoded any, specials []types.SpecialValue) any {
+// withSpecialElements turns an encoded array into a []any with the special values' text where specials says so. A
+// specials list without one entry per element is an error, as in the COPY.
+func withSpecialElements(encoded any, specials []types.SpecialValue) (any, error) {
 	rv := reflect.ValueOf(encoded)
-	if rv.Kind() != reflect.Slice || rv.Len() != len(specials) {
-		return encoded
+	if rv.Kind() != reflect.Slice {
+		return encoded, nil
+	}
+	if rv.Len() != len(specials) {
+		return nil, fmt.Errorf("special-element list of %d entries for %d elements", len(specials), rv.Len())
 	}
 	out := make([]any, rv.Len())
 	for i := range out {
@@ -280,7 +288,7 @@ func withSpecialElements(encoded any, specials []types.SpecialValue) any {
 			out[i] = rv.Index(i).Interface()
 		}
 	}
-	return out
+	return out, nil
 }
 
 // withNullElements turns an encoded array into a []any with nil where nulls says so, so it marshals JSON nulls. A mask

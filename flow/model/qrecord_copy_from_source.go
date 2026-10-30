@@ -197,6 +197,9 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		if err := types.CheckArrayNulls(qValue); err != nil {
 			return nil, err
 		}
+		if err := types.CheckArraySpecials(qValue); err != nil {
+			return nil, err
+		}
 
 		switch v := qValue.(type) {
 		case types.QValueFloat32:
