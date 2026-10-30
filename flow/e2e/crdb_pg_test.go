@@ -161,6 +161,8 @@ func (s CRDBPGSuite) Test_Canary_Snapshot_And_CDC() {
 	env := ExecutePeerflow(t, tc, flowConnConfig)
 	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
 	EnvWaitForEqualTablesWithNames(env, s, "initial load", srcTable, srcTable, "id,name,note,amount")
+	require.EqualValues(t, 1, s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id = 2 AND note IS NULL`, dstFull)),
+		"the snapshot keeps NULL")
 
 	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (3, 'three', 'cdc', 3.25)`, srcFull)))
 	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET note = 'updated' WHERE id = 1`, srcFull)))
@@ -172,6 +174,9 @@ func (s CRDBPGSuite) Test_Canary_Snapshot_And_CDC() {
 
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
+	// every column, and NULL told apart from '' (the table-equality helper above treats them as equal)
+	require.Equal(t, "1|one|updated|1.50,3|three|cdc|3.25", s.destText(fmt.Sprintf(
+		`SELECT string_agg(concat_ws('|', id, name, coalesce(note, '<NULL>'), amount), ',' ORDER BY id) FROM %s`, dstFull)))
 }
 
 // A primary-key UPDATE must remove the row under its old key. CockroachDB's changefeed emits a delete
@@ -246,8 +251,9 @@ func (s CRDBPGSuite) Test_NoPK_Table_Snapshot_And_CDC() {
 }
 
 // Value fidelity for types the connector maps lossily or decodes differently in snapshot (pgx binary)
-// and CDC (changefeed JSON). Row 1 arrives by snapshot and row 2 (identical values) by CDC; every
-// check runs against both rows and all mismatches are reported together. TIMETZ, NUL in STRING and
+// and CDC (changefeed JSON). Row 1 arrives by snapshot and row 2 (identical values) by CDC; row 4 by snapshot
+// and then a CDC update of one column, which must leave the others as they were; row 3 by CDC with every column
+// NULL. Every check runs against rows 1, 2 and 4 and all mismatches are reported together. TIMETZ, NUL in STRING and
 // OID above 2^31-1 block the snapshot (Test_Types_That_Block_Snapshot, Test_OID_Above_Int32_Max) and BC
 // dates block CDC normalization (Test_BC_Dates_Via_CDC), so they are not in this table.
 func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
@@ -274,18 +280,21 @@ func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 		ARRAY[1, NULL, 3], ARRAY['x', NULL, ''],
 		'SRID=3857;POINT(1 2)', ''::BYTES, '',
 		'sad', B'1010', '192.168.1.0/24', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11')`
-	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES `+values, srcFull, 1)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES `+values+`, `+values, srcFull, 1, 4)))
 
 	flowConnConfig := s.startMirror(srcTable)
 	tc := NewTemporalClient(t)
 	env := ExecutePeerflow(t, tc, flowConnConfig)
 	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
-	EnvWaitFor(t, env, 3*time.Minute, "snapshot row", func() bool {
-		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id = 1`, dstFull)) == 1
+	EnvWaitFor(t, env, 3*time.Minute, "snapshot rows", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id IN (1, 4)`, dstFull)) == 2
 	})
 	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES `+values, srcFull, 2)))
-	EnvWaitFor(t, env, 3*time.Minute, "cdc row", func() bool {
-		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id = 2`, dstFull)) == 1
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s (id) VALUES (3)`, srcFull)))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET c_str_empty = 'x' WHERE id = 4`, srcFull)))
+	EnvWaitFor(t, env, 3*time.Minute, "cdc rows", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id IN (2, 3) OR (id = 4 AND c_str_empty = 'x')`,
+			dstFull)) == 3
 	})
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
@@ -295,9 +304,9 @@ func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 		{"c_dec_nan", `c_dec_nan::text = 'NaN'`, `c_dec_nan::text`},
 		{"c_dec_inf", `c_dec_inf::text = 'Infinity'`, `c_dec_inf::text`},
 		{"c_dec_big", `c_dec_big::text = '12345678901234567890.123456789012345678'`, `c_dec_big::text`},
-		{"c_interval", `c_interval::text::interval = '1 year 2 mons 3 days 04:05:06.789'::interval`, `c_interval::text`},
+		{"c_interval", `c_interval::text::interval::text = '1 year 2 mons 3 days 04:05:06.789'`, `c_interval::text`},
 		{"c_time24", `c_time24::text = '24:00:00'`, `c_time24::text`},
-		{"c_jsonb", `c_jsonb::jsonb = '{"a": [1, null], "b": 1}'::jsonb`, `c_jsonb::text`},
+		{"c_jsonb", `c_jsonb::jsonb::text = '{"a": [1, null], "b": 1}'`, `c_jsonb::text`},
 		{"c_jsonb_null", `c_jsonb_null IS NOT NULL AND c_jsonb_null::jsonb = 'null'::jsonb`, `coalesce(c_jsonb_null::text, 'SQL NULL')`},
 		{"c_int_arr", `c_int_arr::text = '{1,NULL,3}'`, `c_int_arr::text`},
 		{"c_text_arr", `c_text_arr::text = '{x,NULL,""}'`, `c_text_arr::text`},
@@ -324,7 +333,14 @@ func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 
 	var bad []string
 	for _, c := range checks {
-		for id, via := range map[int]string{1: "snapshot", 2: "cdc"} {
+		ok, err := s.destBool(fmt.Sprintf(`SELECT %s IS NULL FROM %s WHERE id = 3`, c.col, dstFull))
+		if err != nil || !ok {
+			bad = append(bad, fmt.Sprintf("%-14s %-8s dest type %-28s not NULL (%v)", c.col, "cdc null", types[c.col], err))
+		}
+		for id, via := range map[int]string{1: "snapshot", 2: "cdc", 4: "update"} {
+			if id == 4 && c.col == "c_str_empty" { // the column the update changed
+				continue
+			}
 			ok, err := s.destBool(fmt.Sprintf(`SELECT %s FROM %s WHERE id = %d`, c.ok, dstFull, id))
 			if !ok {
 				got := s.destText(fmt.Sprintf(`SELECT %s FROM %s WHERE id = %d`, c.show, dstFull, id))
@@ -383,7 +399,8 @@ func (s CRDBPGSuite) Test_Types_That_Block_Snapshot() {
 		ok, _ := s.destBool(fmt.Sprintf(`SELECT count(*) = 1 FROM %s`, s.DestinationTable(tbl)))
 		return ok
 	}
-	deadline := time.Now().Add(2 * time.Minute)
+	// a slow snapshot would report types as blocking: give every table well past what a working one needs
+	deadline := time.Now().Add(5 * time.Minute)
 	var blocked []string
 	for time.Now().Before(deadline) {
 		blocked = blocked[:0]
@@ -585,6 +602,10 @@ func (s CRDBPGSuite) Test_FK_Cascade_Delete_Replicates() {
 		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, s.DestinationTable(child))) == 1 &&
 			s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, s.DestinationTable(parent))) == 1
 	})
+	// the rows that remain are the ones the source kept
+	require.Equal(t, "20:2", s.destText(fmt.Sprintf(`SELECT string_agg(id || ':' || parent_id, ',') FROM %s`,
+		s.DestinationTable(child))))
+	require.Equal(t, "2", s.destText(fmt.Sprintf(`SELECT string_agg(id::text, ',') FROM %s`, s.DestinationTable(parent))))
 
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
