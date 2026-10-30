@@ -961,6 +961,9 @@ func (c *CockroachDBConnector) loadSourceKeys(ctx context.Context, state *change
 		tables = append(tables, parsed.Table)
 		sources[[2]string{parsed.Namespace, parsed.Table}] = source
 	}
+	if err := c.ensureConn(ctx); err != nil {
+		return err
+	}
 	rows, err := c.conn.Query(ctx, `
 		SELECT k.table_schema, k.table_name, k.column_name
 		FROM information_schema.key_column_usage k

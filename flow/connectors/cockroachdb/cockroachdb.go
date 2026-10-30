@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"go.temporal.io/sdk/log"
 
@@ -22,9 +25,14 @@ import (
 
 type CockroachDBConnector struct {
 	*metadataStore.PostgresMetadata
-	logger      log.Logger
-	ssh         *utils.SSHTunnel
-	conn        *crdbConn
+	logger log.Logger
+	ssh    *utils.SSHTunnel
+	// conn is the connector's own connection, held for the connector's life (a SyncFlow activity's, for CDC).
+	// Only one goroutine uses it at a time; connMu only orders ensureConn's swap with the SSH keepalive's close.
+	conn   *crdbConn
+	connMu sync.Mutex
+	// dialConfig is what conn was dialed with, to dial it again
+	dialConfig  *pgx.ConnConfig
 	config      *protos.CockroachDBConfig
 	connStr     string
 	crdbVersion string
@@ -92,6 +100,7 @@ func NewCockroachDBConnector(ctx context.Context, env map[string]string, config 
 		config:           config,
 		ssh:              tunnel,
 		conn:             conn,
+		dialConfig:       connConfig,
 		connStr:          connectionString,
 		crdbVersion:      "",
 	}
@@ -100,7 +109,10 @@ func NewCockroachDBConnector(ctx context.Context, env map[string]string, config 
 		connector.logger.Info("SSH keepalive failed, closing connection")
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := connector.conn.Close(closeCtx); err != nil {
+		connector.connMu.Lock()
+		conn := connector.conn
+		connector.connMu.Unlock()
+		if err := conn.Close(closeCtx); err != nil {
 			connector.logger.Error("failed to close CockroachDB connection on SSH keepalive failure", slog.Any("error", err))
 		}
 	})
@@ -111,6 +123,10 @@ func NewCockroachDBConnector(ctx context.Context, env map[string]string, config 
 // classifyConnectError wraps authentication and privilege failures in
 // exceptions.AuthError like the postgres connector does, so drop flow skips
 // source cleanup instead of hammering a peer whose credentials were rotated.
+//
+// A re-dial during a node failure can get 28000 too, when the node it reaches can't check the credentials yet: that
+// is an AuthError as well, which the classifier files under NOTIFY_CONNECTIVITY, not a class that marks the mirror
+// STALLED, so a transient one doesn't stall it.
 func classifyConnectError(err error) error {
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
 		switch pgErr.Code {
@@ -139,10 +155,57 @@ func (c *CockroachDBConnector) Close() error {
 }
 
 func (c *CockroachDBConnector) ConnectionActive(ctx context.Context) error {
-	if c.conn == nil {
-		return fmt.Errorf("connection is nil")
+	return c.ensureConn(ctx)
+}
+
+// Bounds for ensureConn: a connection whose peer vanished without a reset (a hard node kill, a blackholed route)
+// doesn't fail a ping by itself until TCP gives up, many minutes later.
+const (
+	connPingTimeout = 15 * time.Second
+	connDialTimeout = 30 * time.Second
+)
+
+// ensureConn checks the connector's own connection and dials it again, once, if it's closed or doesn't answer within
+// connPingTimeout. A SyncFlow activity keeps one connector, and so one connection, for its whole life: once the node
+// behind it fails, or a load balancer drops it while the mirror is idle, every sync of the activity would fail with
+// "connection to source down" until the activity ends, though any other node can serve it. Changefeed sessions dial
+// their own connections, so this is about the reads around them: the connection check before each sync, the schema
+// read for added columns and the source key read. Call it with no result set open on the connection: a busy
+// connection counts as healthy, and isn't replaced.
+func (c *CockroachDBConnector) ensureConn(ctx context.Context) error {
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+	if conn == nil {
+		return errors.New("connection is nil")
 	}
-	return c.conn.Ping(ctx)
+	pingErr := errors.New("connection closed")
+	if !conn.conn.IsClosed() {
+		pingCtx, cancel := context.WithTimeout(ctx, connPingTimeout)
+		pingErr = conn.Ping(pingCtx)
+		cancel()
+		if pingErr == nil || strings.Contains(pingErr.Error(), "conn busy") {
+			return nil
+		}
+	}
+	if ctx.Err() != nil {
+		return errors.Join(ctx.Err(), pingErr)
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, connDialTimeout)
+	defer cancel()
+	newConn, err := NewCockroachDBConnFromConfig(dialCtx, c.dialConfig, c.ssh)
+	if err != nil {
+		// the dial's error leads: it says why the connection can't be restored (e.g. rotated credentials)
+		return fmt.Errorf("reconnecting failed: %w (the connection had failed: %v)", classifyConnectError(err), pingErr)
+	}
+	c.logger.Info("[cockroachdb] reconnected the connector's connection", slog.Any("error", pingErr))
+	c.connMu.Lock()
+	c.conn = newConn
+	c.connMu.Unlock()
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelClose()
+	_ = conn.Close(closeCtx)
+	return nil
 }
 
 func (c *CockroachDBConnector) GetVersion(ctx context.Context) (string, error) {
