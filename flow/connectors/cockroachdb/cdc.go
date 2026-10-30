@@ -631,8 +631,9 @@ func (c *CockroachDBConnector) handleResolved(
 
 	now := time.Now()
 	switch {
-	case state.recordCount > 0 && state.holdingForResolved(now):
-		// a resolved timestamp at the start cursor doesn't end the batch
+	case (state.recordCount > 0 || len(state.buffer) > 0) && state.holdingForResolved(now):
+		// a resolved timestamp at the start cursor doesn't end the batch, also while all its records are still
+		// buffered: ending it would leave an empty batch at the same cursor, and the next one would do the same
 		return false, nil
 	case !state.graceDeadline.IsZero():
 		return true, nil
