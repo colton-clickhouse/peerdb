@@ -51,4 +51,13 @@ func TestReferencesColumn(t *testing.T) {
 	require.True(t, referencesColumn(`lower("say ""hi""")`, `say "hi"`))
 	require.False(t, referencesColumn("abc % 10", "a"))
 	require.False(t, referencesColumn("ts_2 + 1", "ts"))
+	// names of the functions, schemas and types a shard expression uses aren't the columns of those names
+	shard := "mod(fnv32(md5(crdb_internal.datums_to_bytes(id, ts))), 16:::INT8)::INT8"
+	for _, name := range []string{"md5", "mod", "fnv32", "crdb_internal", "datums_to_bytes", "int8", "INT8", "MD5"} {
+		require.False(t, referencesColumn(shard, name), name)
+	}
+	require.True(t, referencesColumn(shard, "id"))
+	require.True(t, referencesColumn(shard, "ts"))
+	require.True(t, referencesColumn(`md5("md5")`, "md5"), "the quoted column, not the function")
+	require.True(t, referencesColumn("md5 + 1", "md5"))
 }
