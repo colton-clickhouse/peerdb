@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -499,4 +500,50 @@ func TestBuildAdaptiveStringPartitions_MixedCase_UUID(t *testing.T) {
 	partitions := runAdaptiveStringPartitions(t, keys, binaryLess, numPartitions)
 	require.Len(t, partitions, numPartitions)
 	verifyFullCoverage(t, partitions, keys, binaryLess)
+}
+
+func TestTemporalPartitionBounds(t *testing.T) {
+	for _, tc := range []struct{ in, floor string }{
+		{"2024-05-10", "2024-05-10 00:00:00"},
+		{"2024-05-10 00:00:00.5", "2024-05-10 00:00:00.5"},
+		{"2025-03-00", "2025-02-28 00:00:00"},
+		{"2024-03-00 10:00:00", "2024-02-29 00:00:00"},
+		{"2025-00-15 01:02:03", "2024-12-31 00:00:00"},
+		{"2025-00-00", "2024-12-31 00:00:00"},
+		{"2025-01-00", "2024-12-31 00:00:00"},
+		{"2025-02-30", "2025-02-28 00:00:00"},
+		{"2024-02-31 10:00:00", "2024-02-29 00:00:00"},
+	} {
+		got, err := floorMysqlDateTime(tc.in)
+		require.NoError(t, err, tc.in)
+		require.Equal(t, tc.floor, got.Format("2006-01-02 15:04:05.999999"), "floor of %q", tc.in)
+	}
+	for _, tc := range []struct{ in, ceil string }{
+		{"2025-03-00", "2025-03-01 00:00:00"},
+		{"2025-00-15 01:02:03", "2025-01-15 01:02:03"},
+		{"2024-06-01 00:00:00", "2024-06-01 00:00:00"},
+		{"2025-02-30", "2025-03-01 00:00:00"},
+		{"2025-04-31 12:00:00", "2025-05-01 00:00:00"},
+	} {
+		got, err := ceilMysqlDateTime(tc.in)
+		require.NoError(t, err, tc.in)
+		require.Equal(t, tc.ceil, got.Format("2006-01-02 15:04:05.999999"), "ceil of %q", tc.in)
+	}
+	require.True(t, isZeroYear("0000-05-10"))
+	require.True(t, isZeroYear("0000-00-00 00:00:00"))
+	require.False(t, isZeroYear("0001-01-01"))
+}
+
+// A partition boundary one microsecond before March 1st: the zero day '2025-03-00 12:00:00' sorts after
+// '2025-02-28 23:59:59.999999' and before '2025-03-01 00:00:00', so BETWEEN start AND end misses it, while
+// v < end + 1µs keeps it in the first partition.
+func TestTimestampRangeQueryCoversZeroDays(t *testing.T) {
+	end := time.Date(2025, 2, 28, 23, 59, 59, 999999000, time.UTC)
+	query, rangeEnd := timestampRangeQuery("*", "`db`.`t`", "`c`", end)
+	require.Equal(t, "SELECT * FROM `db`.`t` WHERE `c` >= {{.start}} AND `c` < {{.end}}", query)
+	require.Equal(t, "'2025-03-01 00:00:00'", rangeEnd)
+	// MySQL compares DATETIME values part by part, so the string order of these literals is MySQL's order
+	zeroDay := "2025-03-00 12:00:00"
+	require.Greater(t, zeroDay, end.Format("2006-01-02 15:04:05.999999"))
+	require.Less(t, zeroDay, strings.Trim(rangeEnd, "'"))
 }

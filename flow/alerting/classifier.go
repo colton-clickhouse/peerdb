@@ -177,6 +177,9 @@ var (
 	ErrorNotifyMySQLCompressedColumnUnsupported = ErrorClass{
 		Class: "NOTIFY_MYSQL_COMPRESSED_COLUMN_UNSUPPORTED", action: NotifyUser,
 	}
+	ErrorNotifyMySQLZeroDateKey = ErrorClass{
+		Class: "NOTIFY_MYSQL_ZERO_DATE_KEY", action: NotifyUser,
+	}
 	ErrorNotifyMySQLSecureTransportRequired = ErrorClass{
 		Class: "NOTIFY_MYSQL_SECURE_TRANSPORT_REQUIRED", action: NotifyUser,
 	}
@@ -1372,6 +1375,16 @@ func GetErrorClass(ctx context.Context, err error) (ErrorClass, ErrorInfo) {
 			Code:   "UNSUPPORTED_PARTIAL_JSON",
 			AdditionalAttributes: map[AdditionalErrorAttributeKey]string{
 				ErrorAttributeKeyTable: fmt.Sprintf("%s.%s", partialJsonUnsupportedError.Schema, partialJsonUnsupportedError.Table),
+			},
+		}
+	}
+
+	if zeroDateKeyError, ok := errors.AsType[*exceptions.MySQLZeroDateKeyError](err); ok {
+		return ErrorNotifyMySQLZeroDateKey, ErrorInfo{
+			Source: ErrorSourceMySQL,
+			Code:   "ZERO_DATE_KEY",
+			AdditionalAttributes: map[AdditionalErrorAttributeKey]string{
+				ErrorAttributeKeyTable: zeroDateKeyError.TableName,
 			},
 		}
 	}

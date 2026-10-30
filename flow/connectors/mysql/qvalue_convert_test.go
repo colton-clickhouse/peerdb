@@ -9,7 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/log"
 
+	"github.com/PeerDB-io/peerdb/flow/generated/protos"
 	"github.com/PeerDB-io/peerdb/flow/shared"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
@@ -239,4 +241,80 @@ func TestQValueFromMysql_NullAndNotNullBinary(t *testing.T) {
 	old := types.QValueBytes{Val: nil} // what older mirrors emit for an empty value
 	require.Nil(t, notNullBinary(old, false).(types.QValueBytes).Val, "nullable columns keep the old behaviour")
 	require.NotNil(t, notNullBinary(old, true).(types.QValueBytes).Val, "NOT NULL columns get the empty value")
+}
+
+func TestIsZeroDate(t *testing.T) {
+	gate, before := shared.InternalVersion_MySQLZeroDatePartsAsZero, shared.InternalVersion_MySQLZeroDatePartsAsZero-1
+	for _, tc := range []struct {
+		s                string
+		wantOld, wantNew bool
+	}{
+		{"0000-00-00", true, true},
+		{"0000-00-00 00:00:00", true, true},
+		{"0000-00-00 12:34:56.000001", true, true},
+		{"2024-00-15", false, true},          // zero month
+		{"2024-02-00 12:00:00", false, true}, // zero day
+		{"2024-00-00 01:02:03.000004", false, true},
+		{"0000-05-10", false, true}, // zero year: no Postgres equivalent
+		{"0000-02-03 04:05:06", false, true},
+		{"2024-05-15", false, false},
+		{"2000-10-01 00:00:00", false, false}, // zeros elsewhere in a real date
+		{"1000-01-01", false, false},
+		{"", false, false},
+	} {
+		require.Equal(t, tc.wantOld, isZeroDate(tc.s, before), "old: %q", tc.s)
+		require.Equal(t, tc.wantNew, isZeroDate(tc.s, gate), "new: %q", tc.s)
+	}
+}
+
+func TestQValueFromMysql_PartialZeroDates(t *testing.T) {
+	epoch := time.Unix(0, 0).UTC()
+	gate := shared.InternalVersion_MySQLZeroDatePartsAsZero
+	ev := &replication.TableMapEvent{ColumnType: []byte{mysql.MYSQL_TYPE_DATETIME2}, ColumnMeta: []uint16{0}}
+	var coercionReported bool
+	snapshot := func(s string, version uint32) time.Time {
+		t.Helper()
+		qv, err := QValueFromMysqlFieldValue(types.QValueKindDate, 0, mysql.NewFieldValue(mysql.FieldValueTypeString, 0, []byte(s)), version)
+		require.NoError(t, err, s)
+		return qv.Value().(time.Time).UTC()
+	}
+	cdc := func(s string, version uint32) time.Time {
+		t.Helper()
+		qv, err := QValueFromMysqlRowEvent(ev, 0, nil, nil, types.QValueKindTimestamp, s, nil,
+			log.NewStructuredLogger(nil), &coercionReported, version)
+		require.NoError(t, err, s)
+		return qv.Value().(time.Time).UTC()
+	}
+
+	require.Equal(t, epoch, snapshot("2024-00-15", gate))
+	require.Equal(t, epoch, cdc("2024-02-00 12:00:00", gate))
+	// older mirrors keep rolling a zero month or day forward
+	require.Equal(t, time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC), snapshot("2024-00-15", gate-1))
+	require.Equal(t, time.Date(2024, 2, 1, 12, 0, 0, 0, time.UTC), cdc("2024-02-00 12:00:00", gate-1))
+}
+
+// Zero-part dates in key columns are refused from InternalVersion_MySQLZeroDatePartsAsZero on, in the MySQL
+// reader, so for every destination (ClickHouse would dedup the merged keys silently).
+func TestCheckZeroDateKey(t *testing.T) {
+	gate := shared.InternalVersion_MySQLZeroDatePartsAsZero
+	key := &protos.FieldDescription{Name: "k", Type: string(types.QValueKindDate)}
+	ts := &protos.FieldDescription{Name: "k", Type: string(types.QValueKindTimestamp)}
+	other := &protos.FieldDescription{Name: "d", Type: string(types.QValueKindDate)}
+	keys := []string{"k"}
+	var zeroKey *exceptions.MySQLZeroDateKeyError
+	for _, tc := range []struct {
+		val any
+		fd  *protos.FieldDescription
+	}{
+		{"0000-00-00", key}, {"2025-03-00", key}, {"0000-05-10", key}, {"2025-00-00 10:00:00", ts},
+		{time.Date(0, 5, 10, 0, 0, 0, 0, time.UTC), ts},
+	} {
+		err := checkZeroDateKey(tc.val, tc.fd, keys, "db.t", gate)
+		require.ErrorAs(t, err, &zeroKey, "%v", tc.val)
+		require.Equal(t, "k", zeroKey.ColumnName)
+	}
+	require.NoError(t, checkZeroDateKey("2025-03-00", other, keys, "db.t", gate), "not a key column")
+	require.NoError(t, checkZeroDateKey("2025-03-01", key, keys, "db.t", gate), "a real date")
+	require.NoError(t, checkZeroDateKey(time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC), ts, keys, "db.t", gate))
+	require.NoError(t, checkZeroDateKey("2025-03-00", key, keys, "db.t", gate-1), "older mirrors unchanged")
 }

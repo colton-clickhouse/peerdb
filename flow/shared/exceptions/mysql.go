@@ -207,3 +207,21 @@ func (e *MySQLUnsupportedPartialRowEventError) Error() string {
 		"unsupported MariaDB PARTIAL_ROW_DATA_EVENT (type %d): fragmented oversized row events cannot be processed; a resync is required",
 		e.EventType)
 }
+
+// MySQLZeroDateKeyError: a key column holds a zero date, or a date with a zero part, which arrives as the epoch
+// like every other one, so distinct source keys would merge on the destination.
+type MySQLZeroDateKeyError struct {
+	TableName  string
+	ColumnName string
+	Value      string
+}
+
+func NewMySQLZeroDateKeyError(table string, column string, value string) *MySQLZeroDateKeyError {
+	return &MySQLZeroDateKeyError{TableName: table, ColumnName: column, Value: value}
+}
+
+func (e *MySQLZeroDateKeyError) Error() string {
+	return fmt.Sprintf("primary key column %s of %s holds the date %q, which replicates as 1970-01-01 like every "+
+		"zero or partial zero date, so different keys would merge; change the value on the source or remove the "+
+		"table from the mirror", e.ColumnName, e.TableName, e.Value)
+}
