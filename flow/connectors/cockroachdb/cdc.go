@@ -128,8 +128,13 @@ type changefeedPullState struct {
 	batchDeadline    time.Time
 	graceDeadline    time.Time
 	lastLagWarnAt    time.Time
-	deltaBytes       atomic.Int64
-	totalBytes       atomic.Int64
+	forcedEmit       bool // records were emitted past the checkpoint (no covering resolved timestamp)
+	// strictUntil is set when the cursor is frozen (frozenCursorTracker): the batch doesn't force-emit, it waits until
+	// then for a resolved timestamp to advance the cursor, and fails with CURSOR_NOT_ADVANCING if none does
+	strictUntil time.Time
+	strictFrom  crdbHLC // the frozen cursor
+	deltaBytes  atomic.Int64
+	totalBytes  atomic.Int64
 }
 
 // bufferedChangefeedRecord is one converted record waiting for a resolved
@@ -219,6 +224,10 @@ func (state *changefeedPullState) lookupSource(emitted string) (string, bool) {
 // resolvedInterval, so silence beyond these windows means a stalled stream.
 func (state *changefeedPullState) watchdogWindow() time.Duration {
 	stallWindow := max(30*time.Second, 5*state.resolvedInterval)
+	if !state.strictUntil.IsZero() {
+		// the deadlines below don't cut a strict batch, so they don't bound its silence either
+		return max(min(stallWindow, time.Until(state.strictUntil)), time.Second)
+	}
 	if !state.graceDeadline.IsZero() {
 		return max(time.Until(state.graceDeadline), time.Second)
 	}
@@ -247,7 +256,18 @@ func (c *CockroachDBConnector) PullRecords(
 	if err != nil {
 		return err
 	}
-
+	frozenCursor := frozenCursorFor(req.FlowJobName)
+	syncSettings := frozenCursorSettings{idleTimeout: req.IdleTimeout, maxBatchSize: req.MaxBatchSize}
+	frozen, frozenSince, frozenBatches := frozenCursor.frozen(cursor, syncSettings, time.Now())
+	notAdvancing := func(waited time.Duration) error {
+		return exceptions.NewCockroachChangefeedIrrecoverableError("CURSOR_NOT_ADVANCING",
+			fmt.Errorf("mirror %s: the changefeed cursor %s has not advanced for %d batches since %s: each batch"+
+				" ended without a covering resolved timestamp and replayed the same changes, so later changes never"+
+				" arrive, and no resolved timestamp advanced it within %s either; pause the mirror and resume it"+
+				" with a longer sync interval (idle timeout, e.g. 300 s) and a larger batch size for one batch to"+
+				" catch up, or resync the mirror", req.FlowJobName, cursor, frozenBatches,
+				frozenSince.UTC().Format(time.RFC3339), waited.Round(time.Second)))
+	}
 	state := &changefeedPullState{
 		req:              req,
 		tables:           make([]*common.QualifiedTable, 0, len(req.TableNameMapping)),
@@ -256,6 +276,16 @@ func (c *CockroachDBConnector) PullRecords(
 		buffer:           make(map[string]*bufferedChangefeedRecord),
 		cursor:           cursor,
 		resolvedInterval: changefeedResolvedInterval,
+	}
+	if frozen {
+		// don't replay the same changes again, which would look like progress: wait for a resolved timestamp, so the
+		// mirror recovers by itself once whatever held them back is gone
+		state.strictUntil = time.Now().Add(frozenCursorStrictWait)
+		state.strictFrom = cursor
+		c.logger.Warn("[cockroachdb] changefeed cursor not advancing: waiting for a covering resolved timestamp"+
+			" without emitting past it",
+			slog.String("cursor", cursor.String()), slog.Int("batches", frozenBatches),
+			slog.Time("since", frozenSince), slog.Duration("wait", frozenCursorStrictWait))
 	}
 	for source, target := range req.TableNameMapping {
 		parsed, err := common.ParseTableIdentifier(source)
@@ -330,7 +360,11 @@ func (c *CockroachDBConnector) PullRecords(
 		cursorBefore := state.cursor
 		recordsBefore := state.recordCount
 		done, err := c.runChangefeedSession(ctx, otelManager, state)
+		if errors.Is(err, errStrictWaitOver) {
+			return notAdvancing(frozenCursorStrictWait)
+		}
 		if done {
+			frozenCursor.observe(state.forcedEmit, cursor, state.cursor, syncSettings, time.Now())
 			return nil
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -344,13 +378,17 @@ func (c *CockroachDBConnector) PullRecords(
 			attempt = 0
 		}
 		if err == nil {
+			if !state.strictUntil.IsZero() && !time.Now().Before(state.strictUntil) {
+				return notAdvancing(frozenCursorStrictWait)
+			}
 			// watchdog fired without records: reconnect and keep waiting
 			continue
 		}
 		if isCursorTooOldError(err) {
 			return exceptions.NewCockroachChangefeedIrrecoverableError("CURSOR_PAST_GC",
 				fmt.Errorf("changefeed cursor %s is older than the replica GC threshold and cannot resume;"+
-					" increase the CockroachDB gc.ttlseconds zone setting on the source tables or resync the mirror: %w",
+					" increase the CockroachDB gc.ttlseconds zone setting on the source tables or resync the mirror"+
+					" (a system range such as /Table/{0-4} means the system database's zone, 4 h by default): %w",
 					state.cursor, err))
 		}
 		if isTableTruncatedError(err) {
@@ -362,6 +400,13 @@ func (c *CockroachDBConnector) PullRecords(
 		if isTableDroppedError(err) {
 			return exceptions.NewCockroachChangefeedIrrecoverableError("TABLE_DROPPED",
 				fmt.Errorf("a table watched by mirror %s was dropped; remove it from the mirror or resync: %w",
+					req.FlowJobName, err))
+		}
+		if isColumnFamiliesError(err) {
+			return exceptions.NewCockroachChangefeedIrrecoverableError("COLUMN_FAMILIES",
+				fmt.Errorf("a table watched by mirror %s has more than one column family, which PeerDB's changefeed"+
+					" can't read; recreate the table with a single column family (columns can't move between families)"+
+					" or remove it from the mirror: %w",
 					req.FlowJobName, err))
 		}
 		if isTargetNotAtCursorError(err) {
@@ -475,6 +520,14 @@ func (c *CockroachDBConnector) runChangefeedSession(
 		}
 
 		now := time.Now()
+		if !state.strictUntil.IsZero() {
+			// a strict batch only ends on a resolved timestamp that advances the cursor (handleResolved)
+			if !now.Before(state.strictUntil) {
+				return false, errStrictWaitOver
+			}
+			watchdog.Reset(state.watchdogWindow())
+			continue
+		}
 		if !state.graceDeadline.IsZero() && !now.Before(state.graceDeadline) {
 			// the grace window closed without a covering resolved timestamp:
 			// hand over the buffer (emitting past the checkpoint, so it may
@@ -560,6 +613,20 @@ func (c *CockroachDBConnector) handleResolved(
 
 	now := time.Now()
 	switch {
+	case !state.strictUntil.IsZero():
+		// the first resolved timestamp past the frozen cursor ends the batch: the cursor moves, and the tracker resets
+		if !state.cursor.After(state.strictFrom) {
+			return false, nil
+		}
+		if state.recordCount == 0 {
+			if err := c.SetLastOffset(ctx, state.req.FlowJobName,
+				model.CdcCheckpoint{ID: ts.WallNanos, Text: ts.String()}); err != nil {
+				return false, err
+			}
+		}
+		c.logger.Info("[cockroachdb] changefeed cursor advanced again", slog.String("from", state.strictFrom.String()),
+			slog.String("to", ts.String()))
+		return true, nil
 	case !state.graceDeadline.IsZero():
 		return true, nil
 	case state.recordCount > 0:
@@ -688,6 +755,10 @@ func (c *CockroachDBConnector) processChangefeedRow(
 		state.batchDeadline = time.Now().Add(state.req.IdleTimeout)
 	}
 	if state.bufferedBytes >= changefeedBufferSoftLimitBytes {
+		if !state.strictUntil.IsZero() {
+			// emitting past the checkpoint is what kept the cursor frozen; nothing was emitted, so failing loses nothing
+			return errStrictWaitOver
+		}
 		if err := c.emitBuffered(ctx, state, nil, "buffer size limit reached"); err != nil {
 			return err
 		}
@@ -731,6 +802,7 @@ func (c *CockroachDBConnector) emitBuffered(
 		return nil
 	}
 	if upTo == nil {
+		state.forcedEmit = true
 		c.logger.Warn("[cockroachdb] force-emitting buffered records past the checkpoint: "+forceReason,
 			slog.Int("records", len(eligible)),
 			slog.Int64("bufferedBytes", state.bufferedBytes),
