@@ -188,6 +188,7 @@ type ToJSONOptions struct {
 	StripNulBytes        bool // drop U+0000 from strings (PG destinations can't store it)
 	ArrayNullElements    bool // write marked NULL array elements (types.ArrayNulls) as JSON null
 	NonFiniteFloats      bool // write NaN and +-Inf floats as their Postgres input text instead of JSON null
+	NoNumericInfinity    bool // write numeric +-Infinity as null (WithoutNumericInfinity), for Postgres before 14
 }
 
 func NewToJSONOptions(unnestCols []string, hstoreAsJSON bool) ToJSONOptions {
