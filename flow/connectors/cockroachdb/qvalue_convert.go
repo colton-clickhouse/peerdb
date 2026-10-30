@@ -306,7 +306,15 @@ func qvalueFromCrdbValue(
 			return types.QValueTimeTZ{Val: d}, nil
 		}
 	case types.QValueKindInterval:
-		if v, ok := value.(pgtype.Interval); ok {
+		switch v := value.(type) {
+		case string:
+			// the snapshot reads intervals as text (buildSelectedColumns), parsed like the changefeed's
+			str, err := parsePgIntervalToJSON(v)
+			if err != nil {
+				return nil, err
+			}
+			return types.QValueInterval{Val: str}, nil
+		case pgtype.Interval:
 			str, err := intervalToString(v)
 			if err != nil {
 				return nil, err
@@ -437,11 +445,16 @@ func qvalueFromCrdbValue(
 					strs = append(strs, "")
 					continue
 				}
-				interval, ok := anyVal.(pgtype.Interval)
-				if !ok {
+				var str string
+				var err error
+				switch interval := anyVal.(type) {
+				case string:
+					str, err = parsePgIntervalToJSON(interval)
+				case pgtype.Interval:
+					str, err = intervalToString(interval)
+				default:
 					return nil, fmt.Errorf("failed to cast ArrayInterval element: got %T", anyVal)
 				}
-				str, err := intervalToString(interval)
 				if err != nil {
 					return nil, err
 				}
