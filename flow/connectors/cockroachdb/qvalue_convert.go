@@ -158,12 +158,16 @@ func crdbOIDToQValueKind(oid uint32) types.QValueKind {
 type pgValues struct {
 	// specialValues marks NaN and infinity values
 	specialValues bool
+	// invalidGeo keeps geometries PostGIS calls invalid (e.g. a self-intersecting polygon) instead of writing NULL
+	// (InternalVersion_PgConstrainedGeo): Postgres stores them, and the changefeed sends them as they are
+	invalidGeo bool
 }
 
 func newPgValues(version uint32, dstType protos.DBType) pgValues {
 	pg := dstType == protos.DBType_POSTGRES
 	return pgValues{
 		specialValues: pg,
+		invalidGeo:    pg && version >= shared.InternalVersion_PgConstrainedGeo,
 	}
 }
 
@@ -326,7 +330,11 @@ func qvalueFromCrdbValue(
 		}
 	case types.QValueKindGeography, types.QValueKindGeometry:
 		wkbString, ok := value.(string)
-		wkt, err := datatypes.GeoValidate(wkbString)
+		toWKT := datatypes.GeoValidate
+		if pg.invalidGeo {
+			toWKT = datatypes.GeoToWKT
+		}
+		wkt, err := toWKT(wkbString)
 		if err != nil || !ok {
 			if field.Nullable {
 				return types.QValueNull(field.Type), nil

@@ -10,6 +10,23 @@ import (
 )
 
 // returns the WKT representation of the geometry object if it is valid
+// GeoToWKT is GeoValidate without the validity check, for destinations that store invalid shapes (PostGIS does).
+func GeoToWKT(hexWkb string) (string, error) {
+	wkb, err := hex.DecodeString(hexWkb)
+	if err != nil {
+		return "", fmt.Errorf("ignoring invalid WKB: %s %w", wkb, err)
+	}
+	geometryObject, err := geom.NewGeomFromWKB(wkb)
+	if err != nil {
+		return "", err
+	}
+	wkt := geometryObject.ToWKT()
+	if srid := geometryObject.SRID(); srid != 0 {
+		wkt = fmt.Sprintf("SRID=%d;%s", srid, wkt)
+	}
+	return wkt, nil
+}
+
 func GeoValidate(hexWkb string) (string, error) {
 	// Decode the WKB hex string into binary
 	wkb, hexErr := hex.DecodeString(hexWkb)
