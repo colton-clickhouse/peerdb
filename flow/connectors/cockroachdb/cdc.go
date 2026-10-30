@@ -376,7 +376,7 @@ func (c *CockroachDBConnector) PullRecords(
 		otelManager.Metrics.AllFetchedBytesCounter.Add(ctx, read)
 	}()
 
-	var attempt uint32
+	var attempt, silentReconnects uint32
 	for {
 		cursorBefore := state.cursor
 		recordsBefore := state.recordCount
@@ -393,14 +393,22 @@ func (c *CockroachDBConnector) PullRecords(
 			// cover deterministically failing replays, which must not be able
 			// to keep the loop alive forever
 			attempt = 0
+			silentReconnects = 0
 		}
 		if err == nil {
 			// watchdog fired without records: reconnect and keep waiting
+			silentReconnects++
+			delay := silentReconnectDelay(silentReconnects)
 			if len(state.buffer) > 0 {
 				// the reconnect replays the buffered changes from the cursor
 				c.logger.Warn("[cockroachdb] changefeed silent past the stall window with changes buffered; reconnecting",
 					slog.String("cursor", state.cursor.String()), slog.Int("bufferedRecords", len(state.buffer)),
-					slog.Duration("stallWindow", state.watchdogWindow()))
+					slog.Duration("stallWindow", state.watchdogWindow()), slog.Duration("backoff", delay))
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
 			}
 			continue
 		}
@@ -454,6 +462,17 @@ func (c *CockroachDBConnector) PullRecords(
 		case <-time.After(delay):
 		}
 	}
+}
+
+// silentReconnectDelay is the wait before the n-th consecutive watchdog reconnect without progress. Past a batch's
+// deadlines the watchdog window shrinks to a second, so without it a stream that stays silent would reconnect (and
+// replay the buffer) about once a second for as long as it lasts. The first reconnect is immediate; the count resets
+// on progress.
+func silentReconnectDelay(n uint32) time.Duration {
+	if n <= 1 {
+		return 0
+	}
+	return changefeedBackoff(changefeedRetryBaseDelay, n-1)
 }
 
 // runChangefeedSession executes one sinkless changefeed query on a dedicated

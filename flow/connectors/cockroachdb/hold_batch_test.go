@@ -103,3 +103,12 @@ func TestHoldBatchWithOnlyBufferedRecordsStaysOpen(t *testing.T) {
 	require.True(t, done)
 	require.Equal(t, uint32(1), state.recordCount, "the resolved timestamp past the row emitted it")
 }
+
+// Consecutive watchdog reconnects without progress back off: the first is immediate, then 0.5 s doubling to 30 s.
+func TestSilentReconnectDelay(t *testing.T) {
+	require.Zero(t, silentReconnectDelay(1))
+	require.Equal(t, changefeedRetryBaseDelay, silentReconnectDelay(2))
+	require.Equal(t, 2*changefeedRetryBaseDelay, silentReconnectDelay(3))
+	require.Equal(t, maxChangefeedRetryDelay, silentReconnectDelay(20))
+	require.Equal(t, maxChangefeedRetryDelay, silentReconnectDelay(1<<31))
+}
