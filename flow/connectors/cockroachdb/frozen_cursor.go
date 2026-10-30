@@ -48,10 +48,14 @@ func frozenCursorFor(flowJobName string) *frozenCursorTracker {
 	return tracker.(*frozenCursorTracker)
 }
 
-// observe records one finished batch: whether it force-emitted records past the checkpoint, its start and end
-// cursors, and its settings. Any batch that advanced the cursor, ended on a resolved timestamp, or ran with other
-// settings resets the tracker.
-func (f *frozenCursorTracker) observe(forced bool, start, end crdbHLC, settings frozenCursorSettings, now time.Time) {
+// observe records one finished batch: whether it force-emitted records past the checkpoint, whether it did so after
+// holding for a resolved timestamp as long as a batch may (changefeedCatchUpMaxDuration), its start and end cursors,
+// and its settings. Any batch that advanced the cursor, ended on a resolved timestamp, or ran with other settings
+// resets the tracker. A capped hold counts as frozen at once: it already waited far longer than the replay window
+// the batch count stands for, and counting 20 of them would take 20 hours.
+func (f *frozenCursorTracker) observe(
+	forced bool, capped bool, start, end crdbHLC, settings frozenCursorSettings, now time.Time,
+) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !forced || end != start {
@@ -62,6 +66,12 @@ func (f *frozenCursorTracker) observe(forced bool, start, end crdbHLC, settings 
 		f.cursor, f.settings, f.since, f.batches = start, settings, now, 0
 	}
 	f.batches++
+	if capped {
+		f.batches = max(f.batches, frozenCursorMinBatches)
+		if since := now.Add(-frozenCursorMinDuration); f.since.After(since) {
+			f.since = since
+		}
+	}
 }
 
 // frozen reports whether a batch starting at cursor with these settings would replay a cursor that has been stuck
