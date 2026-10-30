@@ -53,5 +53,11 @@ func TestNewPgValues(t *testing.T) {
 		newPgValues(shared.InternalVersion_PgTime2400, protos.DBType_POSTGRES))
 	require.Equal(t, pgValues{specialValues: true},
 		newPgValues(shared.InternalVersion_PgSpecialValues, protos.DBType_POSTGRES))
-	require.Equal(t, pgValues{}, newPgValues(shared.InternalVersion_Latest, protos.DBType_CLICKHOUSE))
+	// ClickHouse coerces missing times to the Unix epoch, which is its DefaultTime
+	require.Equal(t, pgValues{arrayInfinity: true, defaultTime: time.Unix(0, 0).UTC()},
+		newPgValues(shared.InternalVersion_Latest, protos.DBType_CLICKHOUSE))
+	require.Equal(t, pgValues{defaultTime: time.Unix(0, 0).UTC()},
+		newPgValues(shared.InternalVersion_ArrayConversionIntegrity-1, protos.DBType_CLICKHOUSE))
+	require.Equal(t, pgValues{specialValues: true, time2400: true, invalidGeo: true, arrayInfinity: true},
+		newPgValues(shared.InternalVersion_ArrayConversionIntegrity, protos.DBType_POSTGRES))
 }

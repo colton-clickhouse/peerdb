@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgerrcode"
@@ -241,6 +242,11 @@ func changefeedRecordItems(
 		}
 		qv, err := qvalueFromChangefeedJSON(field, raw, schema.pg)
 		if err != nil {
+			if arrayErr, ok := errors.AsType[*exceptions.ArrayElementTypeError](err); ok {
+				// it says what to do; the generic advice below doesn't apply to it
+				arrayErr.WithColumn(col)
+				return items, fmt.Errorf("column %s as %s: %w", col, field.Type, err)
+			}
 			return items, fmt.Errorf("column %s as %s: %w"+
 				" (the source column type may have changed; resync the mirror to pick up the new type)",
 				col, field.Type, err)
@@ -596,7 +602,15 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, pg pgValu
 		return types.QValueArrayFloat64{Val: a}, nil
 	case types.QValueKindArrayNumeric:
 		a, err := changefeedArray(raw, func(el json.RawMessage) (decimal.Decimal, error) {
-			num, _ := parseChangefeedNumeric(el)
+			num, ok := parseChangefeedNumeric(el)
+			if !ok && !isJSONNull(el) && changefeedNumericSpecial(el, 0) == types.SpecialNone {
+				// not a number, NaN or infinity: writing 0 would corrupt it silently
+				return decimal.Decimal{}, &exceptions.ArrayElementTypeError{
+					Got: "JSON " + truncateForError(string(el)), Want: "decimal.Decimal",
+					Hint: "the changefeed sent a DECIMAL[] element that isn't a number: exclude the column to continue," +
+						" and report it",
+				}
+			}
 			return num, nil
 		})
 		if err != nil {
@@ -631,8 +645,18 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, pg pgValu
 			parseElem = parseChangefeedTimestampTZ
 		}
 		a, err := changefeedArray(raw, func(el json.RawMessage) (time.Time, error) {
-			if isJSONNull(el) || (pg.specialValues && changefeedTimeSpecial(el) != types.SpecialNone) {
+			if isJSONNull(el) {
+				if pg.arrayInfinity && !pg.specialValues {
+					return pg.defaultTime, nil // as the snapshot path (qvalue.PrepareTimeArray)
+				}
 				return time.Time{}, nil
+			}
+			if changefeedTimeSpecial(el) != types.SpecialNone {
+				if pg.specialValues {
+					return time.Time{}, nil // marked below
+				} else if pg.arrayInfinity {
+					return pg.defaultTime, nil // as the snapshot path
+				}
 			}
 			return parseWithString(el, parseElem)
 		})
@@ -730,6 +754,20 @@ func changefeedArraySpecials(raw json.RawMessage, field types.QField) []types.Sp
 	return types.CompactSpecials(specials)
 }
 
+// truncateForError shortens a value quoted in an error message (and flow_errors) to at most 64 bytes, cutting at a
+// rune boundary: the catalog rejects invalid UTF-8, which would lose the error.
+func truncateForError(s string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	if len(s) <= 64 {
+		return s
+	}
+	cut := 61
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
+}
+
 // changefeedNumericSpecial recognises the JSON strings "NaN", "Infinity" and "-Infinity"; like numericSpecial,
 // infinities only count without a precision (Postgres can't store them in numeric(p, s)).
 func changefeedNumericSpecial(raw json.RawMessage, precision int16) types.SpecialValue {
@@ -778,9 +816,12 @@ func changefeedArray[T any](raw json.RawMessage, conv func(json.RawMessage) (T, 
 		return nil, fmt.Errorf("expected JSON array, got %s: %w", raw, err)
 	}
 	out := make([]T, 0, len(elems))
-	for _, el := range elems {
+	for i, el := range elems {
 		v, err := conv(el)
 		if err != nil {
+			if arrayErr, ok := errors.AsType[*exceptions.ArrayElementTypeError](err); ok {
+				arrayErr.Index = i
+			}
 			return nil, err
 		}
 		out = append(out, v)

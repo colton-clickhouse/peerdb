@@ -18,6 +18,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/connectors/utils"
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
 	"github.com/PeerDB-io/peerdb/flow/model"
+	"github.com/PeerDB-io/peerdb/flow/model/qvalue"
 	"github.com/PeerDB-io/peerdb/flow/otel_metrics"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared"
@@ -431,12 +432,15 @@ func (c *CockroachDBConnector) mapRowToQRecord(
 
 			qv, err := qvalueFromCrdbValue(field, dstType, fd.DataTypeOID, typeMap, value, pg)
 			if err != nil {
+				if arrayErr, ok := errors.AsType[*exceptions.ArrayElementTypeError](err); ok {
+					arrayErr.WithColumn(fd.Name)
+				}
 				return nil, fmt.Errorf("failed to convert value for %s: %w", fd.Name, err)
 			}
 			if arrayNullElements {
 				// pgx decodes arrays to []any, NULL elements as nil
 				if elems, ok := value.([]any); ok {
-					qv = types.WithArrayNulls(qv, nilElements(elems))
+					qv = types.WithArrayNulls(qv, qvalue.NilElements(elems))
 				}
 			}
 			record[i] = qv
@@ -572,15 +576,6 @@ func qRecordSchemaFromFieldDescriptions(
 		})
 	}
 	return types.NewQRecordSchema(fields)
-}
-
-// nilElements marks the nil (NULL) elements of a decoded array.
-func nilElements(elems []any) []bool {
-	nulls := make([]bool, len(elems))
-	for i, el := range elems {
-		nulls[i] = el == nil
-	}
-	return nulls
 }
 
 // constrainedGeoSRIDs maps the table's constrained geometry / geography columns (geometry(Point,4326)) to their SRID.

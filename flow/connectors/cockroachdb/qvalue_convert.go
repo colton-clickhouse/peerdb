@@ -4,8 +4,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/netip"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -163,6 +166,11 @@ type pgValues struct {
 	// invalidGeo keeps geometries PostGIS calls invalid (e.g. a self-intersecting polygon) instead of writing NULL
 	// (InternalVersion_PgConstrainedGeo): Postgres stores them, and the changefeed sends them as they are
 	invalidGeo bool
+	// arrayInfinity: +-infinity date/timestamp array elements become defaultTime on destinations without
+	// specialValues, on both paths, instead of the zero time (snapshot) or a parse error (changefeed)
+	// (InternalVersion_ArrayConversionIntegrity)
+	arrayInfinity bool
+	defaultTime   time.Time
 }
 
 func newPgValues(version uint32, dstType protos.DBType) pgValues {
@@ -171,6 +179,8 @@ func newPgValues(version uint32, dstType protos.DBType) pgValues {
 		specialValues: pg && version >= shared.InternalVersion_PgSpecialValues,
 		time2400:      pg && version >= shared.InternalVersion_PgTime2400,
 		invalidGeo:    pg && version >= shared.InternalVersion_PgConstrainedGeo,
+		arrayInfinity: version >= shared.InternalVersion_ArrayConversionIntegrity,
+		defaultTime:   qvalue.DefaultTime(dstType),
 	}
 }
 
@@ -364,7 +374,7 @@ func qvalueFromCrdbValue(
 		}
 		return types.QValueArrayInt32{Val: a}, nil
 	case types.QValueKindArrayInt64:
-		a, err := convertToArray[int64](field.Type, value)
+		a, err := convertToArray[int64](field.Type, widenOIDElements(oid, value))
 		if err != nil {
 			return nil, err
 		}
@@ -388,20 +398,17 @@ func qvalueFromCrdbValue(
 		}
 		return types.QValueArrayBoolean{Val: a}, nil
 	case types.QValueKindArrayDate, types.QValueKindArrayTimestamp, types.QValueKindArrayTimestampTZ:
+		var specials []types.SpecialValue
+		if elems, ok := value.([]any); ok {
+			// +-infinity and NULL elements: specials for Postgres destinations, DefaultTime for others, the zero
+			// time on older mirrors (qvalue.PrepareTimeArray)
+			value, specials = qvalue.PrepareTimeArray(elems, qvalue.TimeArrayOptions{
+				Specials: pg.specialValues, DefaultTime: pg.arrayInfinity, Destination: dstType,
+			})
+		}
 		a, err := convertToArray[time.Time](field.Type, value)
 		if err != nil {
 			return nil, err
-		}
-		var specials []types.SpecialValue
-		if elems, ok := value.([]any); ok && pg.specialValues {
-			// pgx decodes infinity elements as pgtype.InfinityModifier, which convertToArray left as zero times
-			specials = make([]types.SpecialValue, len(elems))
-			for i, el := range elems {
-				if inf, ok := el.(pgtype.InfinityModifier); ok {
-					specials[i] = infinitySpecial(inf)
-				}
-			}
-			specials = types.CompactSpecials(specials)
 		}
 		switch field.Type {
 		case types.QValueKindArrayDate:
@@ -496,7 +503,7 @@ func qvalueFromCrdbValue(
 					strs = append(strs, `\x`+hex.EncodeToString(b))
 					continue
 				}
-				strs = append(strs, convertToString(typeMap, 0, anyVal))
+				strs = append(strs, convertToString(typeMap, arrayElementOID(typeMap, oid), anyVal))
 			}
 			return types.QValueArrayString{Val: strs}, nil
 		}
@@ -513,12 +520,67 @@ func convertToString(typeMap *pgtype.Map, oid uint32, value any) string {
 	if s, ok := value.(string); ok {
 		return s
 	}
+	if tm, ok := value.(pgtype.Time); ok && tm.Valid {
+		// pgx's text form always has 6 fractional digits; the server's (and the changefeed's) trims them
+		return timeText(tm.Microseconds)
+	}
 	if oid != 0 {
 		if buf, err := typeMap.Encode(oid, pgtype.TextFormatCode, value, nil); err == nil {
 			return string(buf)
 		}
 	}
+	if _, logged := fmtFallbackOIDs.LoadOrStore(fmt.Sprintf("%d %T", oid, value), true); !logged {
+		slog.Warn("[cockroachdb] no Postgres text form for a value, writing Go's formatting",
+			slog.Uint64("oid", uint64(oid)), slog.String("goType", fmt.Sprintf("%T", value)))
+	}
 	return fmt.Sprint(value)
+}
+
+// timeText renders a time of day in microseconds as Postgres and CockroachDB do: HH:MM:SS, then the fraction
+// without trailing zeros, if any (24:00:00 included).
+func timeText(micros int64) string {
+	s := fmt.Sprintf("%02d:%02d:%02d", micros/3_600_000_000, micros/60_000_000%60, micros/1_000_000%60)
+	if frac := micros % 1_000_000; frac != 0 {
+		s += "." + strings.TrimRight(fmt.Sprintf("%06d", frac), "0")
+	}
+	return s
+}
+
+// fmtFallbackOIDs are the OID and Go type pairs convertToString has logged its fmt.Sprint fallback for (once per
+// process each; the OID alone would hide every value without one, OID 0).
+var fmtFallbackOIDs sync.Map
+
+// arrayElementOID is the element type's OID of an array type, so elements render as Postgres text (TIME[] as
+// 12:34:56, VARBIT[] as 101), or 0 if the type map doesn't know the array type.
+func arrayElementOID(typeMap *pgtype.Map, arrayOID uint32) uint32 {
+	if dt, ok := typeMap.TypeForOID(arrayOID); ok {
+		if codec, ok := dt.Codec.(*pgtype.ArrayCodec); ok && codec.ElementType != nil {
+			return codec.ElementType.OID
+		}
+	}
+	return 0
+}
+
+// widenOIDElements turns OID[] elements, which pgx decodes as uint32, into the int64 the column's kind holds. Only
+// for an OID[] value: any other array decoded as uint32 under an int64 kind still fails the element cast.
+func widenOIDElements(oid uint32, value any) any {
+	elems, ok := value.([]any)
+	if !ok || oid != pgtype.OIDArrayOID {
+		return value
+	}
+	var widened []any
+	for i, el := range elems {
+		if u, ok := el.(uint32); ok {
+			if widened == nil {
+				widened = slices.Clone(elems)
+			}
+			widened[i] = int64(u)
+		}
+	}
+	if widened == nil {
+		return value
+	}
+	return widened
 }
 
 func convertToArray[T any](kind types.QValueKind, value any) ([]T, error) {
@@ -526,7 +588,7 @@ func convertToArray[T any](kind types.QValueKind, value any) ([]T, error) {
 	case []T:
 		return v, nil
 	case []any:
-		return shared.ArrayCastElements[T](v), nil
+		return shared.ArrayCastElements[T](v)
 	}
 	return nil, fmt.Errorf("failed to parse array %s from %T: %v", kind, value, value)
 }
@@ -542,19 +604,7 @@ func numericToDecimal(numVal pgtype.Numeric) (decimal.Decimal, bool) {
 // numericSpecial is the special value of a NaN or infinite numeric, or SpecialNone. Postgres can't store +-Infinity
 // in a numeric(p, s) column (CockroachDB can), so with a precision infinities keep the old fallback (NULL or 0).
 func numericSpecial(numVal pgtype.Numeric, precision int16) types.SpecialValue {
-	switch {
-	case !numVal.Valid:
-		return types.SpecialNone
-	case numVal.NaN:
-		return types.SpecialNaN
-	case precision != 0:
-		return types.SpecialNone
-	case numVal.InfinityModifier == pgtype.Infinity:
-		return types.SpecialInfinity
-	case numVal.InfinityModifier == pgtype.NegativeInfinity:
-		return types.SpecialNegInfinity
-	}
-	return types.SpecialNone
+	return qvalue.NumericSpecial(numVal, precision)
 }
 
 func infinitySpecial(inf pgtype.InfinityModifier) types.SpecialValue {

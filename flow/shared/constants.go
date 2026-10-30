@@ -95,6 +95,11 @@ const (
 	// is left out of the table schema, so it is neither created on the destination nor replicated. Older mirrors
 	// replicate it as a regular column. Other hidden columns, such as a keyless table's rowid, stay.
 	InternalVersion_CockroachOmitInternalColumns
+	// Postgres and CockroachDB sources: array elements keep what they are instead of the element type's zero value.
+	// NULL elements of Postgres-source arrays are marked NULL, and +-infinity date/timestamp elements are infinity
+	// for Postgres destinations (DefaultTime for others), on both paths; CockroachDB changefeed date/timestamp
+	// arrays accept infinity like the snapshot. Older mirrors keep 0001-01-01 for both.
+	InternalVersion_ArrayConversionIntegrity
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1

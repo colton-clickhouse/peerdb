@@ -21,6 +21,7 @@ import (
 	pkg_pg "github.com/PeerDB-io/peerdb/flow/pkg/postgres"
 	"github.com/PeerDB-io/peerdb/flow/shared"
 	"github.com/PeerDB-io/peerdb/flow/shared/datatypes"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
@@ -387,12 +388,44 @@ func convertToArray[T any](kind types.QValueKind, value any) ([]T, error) {
 	case []T:
 		return v, nil
 	case []any:
-		return shared.ArrayCastElements[T](v), nil
+		return shared.ArrayCastElements[T](v)
 	}
 	return nil, fmt.Errorf("failed to parse array %s from %T: %v", kind, value, value)
 }
 
 func (c *PostgresConnector) parseFieldFromPostgresOID(
+	oid uint32,
+	typmod int32,
+	nullable bool,
+	dstType protos.DBType,
+	value any,
+	customTypeMapping map[uint32]pkg_pg.CustomDataType,
+	version uint32,
+) (types.QValue, error) {
+	qv, err := c.parseValueFromPostgresOID(oid, typmod, nullable, dstType, value, customTypeMapping, version)
+	if err != nil || version < shared.InternalVersion_ArrayConversionIntegrity {
+		return qv, err
+	}
+	// NULL array elements became the element type's zero value; mark them so destinations that store NULL
+	// elements (Postgres) write NULL
+	if elems, ok := value.([]any); ok && qv != nil && qv.Kind().IsArray() {
+		if nulls := qvalue.NilElements(elems); nulls != nil {
+			qv = types.WithArrayNulls(qv, nulls)
+		}
+	}
+	return qv, nil
+}
+
+// withArrayColumn names the column in an array element type error, so the user knows which column to fix. A
+// Postgres column's kind comes from the value's own type OID, so its schema can't be stale: a mismatch is a bug.
+func withArrayColumn(err error, column string) error {
+	if arrayErr, ok := errors.AsType[*exceptions.ArrayElementTypeError](err); ok {
+		arrayErr.WithColumn(column).WithHint(exceptions.HintUnexpected)
+	}
+	return err
+}
+
+func (c *PostgresConnector) parseValueFromPostgresOID(
 	oid uint32,
 	typmod int32,
 	nullable bool,
@@ -683,17 +716,26 @@ func (c *PostgresConnector) parseFieldFromPostgresOID(
 		}
 		return types.QValueArrayInt64{Val: a}, nil
 	case types.QValueKindArrayDate, types.QValueKindArrayTimestamp, types.QValueKindArrayTimestampTZ:
+		var specials []types.SpecialValue
+		if elems, ok := value.([]any); ok {
+			// +-infinity and NULL elements: infinity for Postgres destinations, DefaultTime for others, the zero
+			// time on older mirrors (qvalue.PrepareTimeArray)
+			gated := version >= shared.InternalVersion_ArrayConversionIntegrity
+			value, specials = qvalue.PrepareTimeArray(elems, qvalue.TimeArrayOptions{
+				Specials: gated && dstType == protos.DBType_POSTGRES, DefaultTime: gated, Destination: dstType,
+			})
+		}
 		a, err := convertToArray[time.Time](qvalueKind, value)
 		if err != nil {
 			return nil, err
 		}
 		switch qvalueKind {
 		case types.QValueKindArrayDate:
-			return types.QValueArrayDate{Val: a}, nil
+			return types.QValueArrayDate{Val: a, Specials: specials}, nil
 		case types.QValueKindArrayTimestamp:
-			return types.QValueArrayTimestamp{Val: a}, nil
+			return types.QValueArrayTimestamp{Val: a, Specials: specials}, nil
 		case types.QValueKindArrayTimestampTZ:
-			return types.QValueArrayTimestampTZ{Val: a}, nil
+			return types.QValueArrayTimestampTZ{Val: a, Specials: specials}, nil
 		}
 	case types.QValueKindArrayBoolean:
 		a, err := convertToArray[bool](qvalueKind, value)
@@ -735,7 +777,12 @@ func (c *PostgresConnector) parseFieldFromPostgresOID(
 		if v, ok := value.([]any); ok {
 			numArr := make([]decimal.Decimal, 0, len(v))
 			allValid := true
-			for _, anyVal := range v {
+			precision, scale := common.ParseNumericTypmod(typmod)
+			// NaN and +-Infinity elements, which decimal.Decimal can't hold: marked for Postgres destinations
+			// (InternalVersion_ArrayConversionIntegrity), 0 otherwise as before
+			markSpecials := version >= shared.InternalVersion_ArrayConversionIntegrity && dstType == protos.DBType_POSTGRES
+			var specials []types.SpecialValue
+			for i, anyVal := range v {
 				if anyVal == nil {
 					numArr = append(numArr, decimal.Decimal{})
 					continue
@@ -751,16 +798,22 @@ func (c *PostgresConnector) parseFieldFromPostgresOID(
 				num, ok := validNumericToDecimal(numVal)
 				if !ok {
 					numArr = append(numArr, decimal.Decimal{})
+					if sv := qvalue.NumericSpecial(numVal, precision); markSpecials && sv != types.SpecialNone {
+						if specials == nil {
+							specials = make([]types.SpecialValue, len(v))
+						}
+						specials[i] = sv
+					}
 				} else {
 					numArr = append(numArr, num)
 				}
 			}
 			if allValid {
-				precision, scale := common.ParseNumericTypmod(typmod)
 				return types.QValueArrayNumeric{
 					Val:       numArr,
 					Precision: precision,
 					Scale:     scale,
+					Specials:  specials,
 				}, nil
 			}
 		}
