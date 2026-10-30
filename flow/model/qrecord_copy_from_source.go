@@ -1,6 +1,7 @@
 package model
 
 import (
+	"database/sql/driver"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -15,20 +16,56 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
-// timetzBinary is PG's binary timetz (int64 microseconds, int32 zone in seconds west of UTC) for a UTC
-// time of day. pgx has no timetz codec: a pgtype.Time went out as an 8-byte time, which the server rejects
-// for a timetz column (08P01 insufficient data left in message). Unknown OIDs take []byte as-is. Converting a time
-// with a zone to UTC can leave the day (01:00+05 is -4h, 23:30-05 is 28:30), and the server only takes 0 to 24:00,
-// so it's wrapped into the day: the same instant of day in UTC.
-func timetzBinary(d time.Duration) []byte {
+// timetzMicros is a UTC time of day in microseconds. Converting a time with a zone to UTC can leave the day
+// (01:00+05 is -4h, 23:30-05 is 28:30), and the server only takes 0 to 24:00, so it's wrapped into the day: the same
+// instant of day in UTC.
+func timetzMicros(d time.Duration) int64 {
 	const day = int64(24 * time.Hour / time.Microsecond)
 	us := int64(d / time.Microsecond)
 	if us < 0 || us > day {
 		us = (us%day + day) % day
 	}
+	return us
+}
+
+// timetzBinary is PG's binary timetz (int64 microseconds, int32 zone in seconds west of UTC) for a UTC time of day.
+func timetzBinary(d time.Duration) []byte {
 	b := make([]byte, 12)
-	binary.BigEndian.PutUint64(b, uint64(us))
+	binary.BigEndian.PutUint64(b, uint64(timetzMicros(d)))
 	return b
+}
+
+// pgTimeTZ is a timetz for COPY. pgx picks the encoding by the target column. pgx has no timetz codec: a
+// pgtype.Time went out as an 8-byte time, which the server rejects for a timetz column (08P01 insufficient data left
+// in message), so a timetz column, whose OID pgx doesn't know, gets PG's binary timetz through Value. A pre-created
+// time column gets the UTC time of day, and a text or bytea column its text, as CDC writes them.
+type pgTimeTZ struct {
+	d time.Duration
+}
+
+func (v pgTimeTZ) Value() (driver.Value, error) {
+	return timetzBinary(v.d), nil
+}
+
+func (v pgTimeTZ) TimeValue() (pgtype.Time, error) {
+	return pgtype.Time{Microseconds: timetzMicros(v.d), Valid: true}, nil
+}
+
+// TextValue is the timetz as Postgres prints it, in UTC ("04:30:00+00"), as normalize's cast through timetz writes
+// it into a text column
+func (v pgTimeTZ) TextValue() (pgtype.Text, error) {
+	us := timetzMicros(v.d)
+	s := fmt.Sprintf("%02d:%02d:%02d", us/3_600_000_000, us/60_000_000%60, us/1_000_000%60)
+	if frac := us % 1_000_000; frac != 0 {
+		s += strings.TrimRight(fmt.Sprintf(".%06d", frac), "0")
+	}
+	return pgtype.Text{String: s + "+00", Valid: true}, nil
+}
+
+// BytesValue is the unpadded text of the UTC time of day ("4:30:00.000000"), as the raw value normalize writes into a
+// bytea column
+func (v pgTimeTZ) BytesValue() ([]byte, error) {
+	return []byte(types.FormatExtendedTimeDuration(time.Duration(timetzMicros(v.d)) * time.Microsecond)), nil
 }
 
 func constructArray[T any](v []T) *pgtype.Array[T] {
@@ -167,7 +204,7 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		case types.QValueTime:
 			values[i] = pgDuration{pgtype.Time{Microseconds: int64(v.Val / time.Microsecond), Valid: true}}
 		case types.QValueTimeTZ:
-			values[i] = timetzBinary(v.Val)
+			values[i] = pgTimeTZ{v.Val}
 		case types.QValueInterval:
 			values[i] = v.Val
 		case types.QValueTimestamp:
