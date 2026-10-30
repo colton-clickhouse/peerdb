@@ -2080,3 +2080,16 @@ func TestClickHouseGenericAbortShouldBeInternalClickHouse(t *testing.T) {
 		Code:   "236",
 	}, errInfo, "Unexpected error info")
 }
+
+func TestKeylessTablesErrorShouldNotifyUser(t *testing.T) {
+	t.Parallel()
+
+	// normalize refuses a keyless table that got into a CDC mirror to Postgres: only the user can fix it
+	err := exceptions.NewNormalizationError(fmt.Errorf("failed to normalize records: %w",
+		fmt.Errorf("can't normalize batch 3: %w", exceptions.NewKeylessTablesError([]string{"public.t1", "public.t2"}, true))))
+	errorClass, errInfo := GetErrorClass(t.Context(), err)
+	assert.Equal(t, ErrorNotifyTablesWithoutPrimaryKey, errorClass)
+	assert.Equal(t, NotifyUser, errorClass.ErrorAction())
+	assert.Equal(t, ErrorInfo{Source: ErrorSourcePostgres, Code: "TABLES_WITHOUT_PRIMARY_KEY"}, errInfo)
+	assert.Contains(t, err.Error(), "public.t1, public.t2")
+}

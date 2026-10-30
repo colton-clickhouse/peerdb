@@ -16,6 +16,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	pkg_pg "github.com/PeerDB-io/peerdb/flow/pkg/postgres"
 	"github.com/PeerDB-io/peerdb/flow/shared"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 )
 
 func (c *PostgresConnector) ValidateCheck(ctx context.Context) error {
@@ -278,6 +279,30 @@ func (c *PostgresConnector) ValidateMirrorDestination(
 	cfg *protos.FlowConnectionConfigsCore,
 	tableNameSchemaMapping map[string]*protos.TableSchema,
 ) error {
+	// before the resync shortcut: recreating the tables doesn't make a keyless one replicable. (A resync is
+	// validated without the source schema, so only a mirror's creation is checked, until resync validation
+	// reads it.)
+	if !cfg.InitialSnapshotOnly {
+		sourceTables := make([]string, 0, len(cfg.TableMappings))
+		for _, tableMapping := range cfg.TableMappings {
+			sourceTables = append(sourceTables, tableMapping.SourceTableIdentifier)
+			if schema, ok := tableNameSchemaMapping[tableMapping.SourceTableIdentifier]; ok {
+				var excludedKeys []string
+				for _, col := range schema.PrimaryKeyColumns {
+					if slices.Contains(tableMapping.Exclude, col) {
+						excludedKeys = append(excludedKeys, col)
+					}
+				}
+				if len(excludedKeys) > 0 {
+					return exceptions.NewExcludedKeyColumnsError(tableMapping.SourceTableIdentifier, excludedKeys)
+				}
+			}
+		}
+		if err := keylessTablesError(sourceTables, tableNameSchemaMapping, false); err != nil {
+			return fmt.Errorf("%w, or use an initial snapshot only mirror", err)
+		}
+	}
+
 	if cfg.Resync {
 		return nil // no need to validate schema for resync, as we will create or replace the tables
 	}
@@ -373,4 +398,23 @@ func (c *PostgresConnector) ValidateMirrorDestination(
 	}
 
 	return nil
+}
+
+// keylessTablesError names the tables among names whose schema has no primary key columns. A name without a schema
+// isn't named (fails open): normalize skips tables it has no schema for, and validation without the source
+// schema (resync) has nothing to check. Their
+// changes can't be applied to Postgres: normalize matches rows by primary key, and as a batch normalizes all
+// its tables together, a keyless table's malformed MERGE would fail every table's. A Postgres source reports
+// all columns as the key of a REPLICA IDENTITY FULL table, so only tables with nothing to match on count.
+func keylessTablesError(names []string, schemas map[string]*protos.TableSchema, running bool) error {
+	var keyless []string
+	for _, name := range names {
+		if schema, ok := schemas[name]; ok && len(schema.PrimaryKeyColumns) == 0 {
+			keyless = append(keyless, name)
+		}
+	}
+	if len(keyless) == 0 {
+		return nil
+	}
+	return exceptions.NewKeylessTablesError(keyless, running)
 }

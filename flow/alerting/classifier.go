@@ -192,6 +192,9 @@ var (
 	ErrorNotifyBadSourceTableReplicaIdentity = ErrorClass{
 		Class: "NOTIFY_BAD_POSTGRES_TABLE_REPLICA_IDENTITY", action: NotifyUser,
 	}
+	ErrorNotifyTablesWithoutPrimaryKey = ErrorClass{
+		Class: "NOTIFY_TABLES_WITHOUT_PRIMARY_KEY", action: NotifyUser,
+	}
 	ErrorNotifyPublicationMissing = ErrorClass{
 		Class: "NOTIFY_PUBLICATION_MISSING", action: NotifyUser,
 	}
@@ -447,6 +450,13 @@ func GetErrorClass(ctx context.Context, err error) (ErrorClass, ErrorInfo) {
 		return ErrorNotifyBadSourceTableReplicaIdentity, ErrorInfo{
 			Source: pgErrSource,
 			Code:   "MISSING_PRIMARY_KEY",
+		}
+	}
+
+	if _, ok := errors.AsType[*exceptions.KeylessTablesError](err); ok {
+		return ErrorNotifyTablesWithoutPrimaryKey, ErrorInfo{
+			Source: ErrorSourcePostgres,
+			Code:   "TABLES_WITHOUT_PRIMARY_KEY",
 		}
 	}
 
