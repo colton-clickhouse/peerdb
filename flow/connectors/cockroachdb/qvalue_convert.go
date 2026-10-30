@@ -168,7 +168,8 @@ type pgValues struct {
 	invalidGeo bool
 	// arrayInfinity: +-infinity date/timestamp array elements become defaultTime on destinations without
 	// specialValues, on both paths, instead of the zero time (snapshot) or a parse error (changefeed)
-	// (InternalVersion_ArrayConversionIntegrity)
+	// (InternalVersion_ArrayConversionIntegrity). The changefeed path does the same for scalars, as the snapshot
+	// already did: NULL, or defaultTime in a column that isn't nullable, instead of the parse error that stopped CDC.
 	arrayInfinity bool
 	defaultTime   time.Time
 }

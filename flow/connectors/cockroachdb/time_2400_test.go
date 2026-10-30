@@ -61,3 +61,30 @@ func TestNewPgValues(t *testing.T) {
 	require.Equal(t, pgValues{specialValues: true, time2400: true, invalidGeo: true, arrayInfinity: true},
 		newPgValues(shared.InternalVersion_ArrayConversionIntegrity, protos.DBType_POSTGRES))
 }
+
+// An infinite date or timestamp in a changefeed row for a destination that doesn't keep infinity (ClickHouse) gets the
+// snapshot's value, NULL or the destination's default time, instead of the parse error that stopped CDC.
+func TestChangefeedScalarInfinityFallback(t *testing.T) {
+	pg := newPgValues(shared.InternalVersion_Latest, protos.DBType_CLICKHOUSE)
+	epoch := time.Unix(0, 0).UTC()
+	for _, tc := range []struct {
+		kind     types.QValueKind
+		raw      string
+		nullable bool
+		want     types.QValue
+	}{
+		{types.QValueKindDate, `"infinity"`, true, types.QValueNull(types.QValueKindDate)},
+		{types.QValueKindDate, `"-infinity"`, false, types.QValueDate{Val: epoch}},
+		{types.QValueKindTimestamp, `"infinity"`, false, types.QValueTimestamp{Val: epoch}},
+		{types.QValueKindTimestampTZ, `"-infinity"`, true, types.QValueNull(types.QValueKindTimestampTZ)},
+	} {
+		qv, err := qvalueFromChangefeedJSON(types.QField{Name: "c", Type: tc.kind, Nullable: tc.nullable},
+			json.RawMessage(tc.raw), pg)
+		require.NoError(t, err, "%s %s", tc.kind, tc.raw)
+		require.Equal(t, tc.want, qv, "%s %s", tc.kind, tc.raw)
+	}
+	// mirrors from before ArrayConversionIntegrity still fail, as they did
+	_, err := qvalueFromChangefeedJSON(types.QField{Name: "c", Type: types.QValueKindDate, Nullable: true},
+		json.RawMessage(`"infinity"`), newPgValues(shared.InternalVersion_ArrayConversionIntegrity-1, protos.DBType_CLICKHOUSE))
+	require.Error(t, err)
+}
