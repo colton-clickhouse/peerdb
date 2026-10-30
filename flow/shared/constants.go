@@ -81,6 +81,9 @@ const (
 	// Postgres destinations, CockroachDB sources: TIME '24:00:00' is kept (Postgres time holds it). Older mirrors, and
 	// other destinations, clamp it to 23:59:59.999999.
 	InternalVersion_PgTime2400
+	// Postgres destinations: INTERVAL and INTERVAL[] (TypeSystem_Q, e.g. from CockroachDB) are created as interval and
+	// interval[] and written as intervals. Older mirrors create text / text[] holding PeerDB's interval JSON.
+	InternalVersion_PgInterval
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1

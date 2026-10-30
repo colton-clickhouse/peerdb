@@ -64,6 +64,8 @@ func NewCockroachDBConnector(ctx context.Context, env map[string]string, config 
 	connConfig.Config.RuntimeParams["idle_in_transaction_session_timeout"] = "0"
 	connConfig.Config.RuntimeParams["statement_timeout"] = "0"
 	connConfig.Config.RuntimeParams["DateStyle"] = "ISO, DMY"
+	// the snapshot reads INTERVAL columns as text, which follows the session's style; a role can default to another
+	connConfig.Config.RuntimeParams["intervalstyle"] = "postgres"
 
 	pgMetadata, err := metadataStore.NewPostgresMetadata(ctx)
 	if err != nil {

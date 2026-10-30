@@ -106,6 +106,7 @@ func syncRecordsCore[Items model.Items](
 	if noNumericInfinity {
 		notNullByTable = notNullColumns(req.TableNameSchemaMapping)
 	}
+	pgIntervals := req.Version >= shared.InternalVersion_PgInterval
 	streamReadFunc := func() ([]any, error) {
 		for record := range req.Records.GetRecords() {
 			var row []any
@@ -119,6 +120,7 @@ func syncRecordsCore[Items model.Items](
 					NonFiniteFloats:   nonFiniteFloats,
 					NoNumericInfinity: noNumericInfinity,
 					NotNullColumns:    notNullByTable[typedRecord.DestinationTableName],
+					PgIntervals:       pgIntervals,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize insert record items to JSON: %w", err)
@@ -144,6 +146,7 @@ func syncRecordsCore[Items model.Items](
 					NonFiniteFloats:   nonFiniteFloats,
 					NoNumericInfinity: noNumericInfinity,
 					NotNullColumns:    notNullByTable[typedRecord.DestinationTableName],
+					PgIntervals:       pgIntervals,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize update record new items to JSON: %w", err)
@@ -156,6 +159,7 @@ func syncRecordsCore[Items model.Items](
 					NonFiniteFloats:   nonFiniteFloats,
 					NoNumericInfinity: noNumericInfinity,
 					NotNullColumns:    notNullByTable[typedRecord.DestinationTableName],
+					PgIntervals:       pgIntervals,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize update record old items to JSON: %w", err)
@@ -181,6 +185,7 @@ func syncRecordsCore[Items model.Items](
 					NonFiniteFloats:   nonFiniteFloats,
 					NoNumericInfinity: noNumericInfinity,
 					NotNullColumns:    notNullByTable[typedRecord.DestinationTableName],
+					PgIntervals:       pgIntervals,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize delete record items to JSON: %w", err)

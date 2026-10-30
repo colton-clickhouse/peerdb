@@ -190,6 +190,7 @@ type ToJSONOptions struct {
 	NonFiniteFloats      bool                // write NaN and +-Inf floats as their Postgres input text instead of JSON null
 	NoNumericInfinity    bool                // write numeric +-Infinity as null (WithoutNumericInfinity), for Postgres before 14
 	NotNullColumns       map[string]struct{} // with NoNumericInfinity: columns that get 0 instead of null
+	PgIntervals          bool                // write intervals as Postgres interval text instead of PeerDB's interval JSON
 }
 
 func NewToJSONOptions(unnestCols []string, hstoreAsJSON bool) ToJSONOptions {
