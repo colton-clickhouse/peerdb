@@ -9,7 +9,6 @@ import (
 	geom "github.com/twpayne/go-geos"
 )
 
-// returns the WKT representation of the geometry object if it is valid
 // GeoToWKT is GeoValidate without the validity check, for destinations that store invalid shapes (PostGIS does).
 func GeoToWKT(hexWkb string) (string, error) {
 	wkb, err := hex.DecodeString(hexWkb)
@@ -27,6 +26,7 @@ func GeoToWKT(hexWkb string) (string, error) {
 	return wkt, nil
 }
 
+// GeoValidate returns the WKT representation of the geometry object if it is valid
 func GeoValidate(hexWkb string) (string, error) {
 	// Decode the WKB hex string into binary
 	wkb, hexErr := hex.DecodeString(hexWkb)
