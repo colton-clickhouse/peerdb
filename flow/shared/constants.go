@@ -69,6 +69,10 @@ const (
 	// CockroachDB: NULL elements inside arrays are marked (types.ArrayNulls), and Postgres destinations write them as
 	// NULL. Older mirrors write the element type's zero value ({1,NULL,3} -> {1,0,3}, text '', bool false, ...).
 	InternalVersion_ArrayNullElements
+	// CockroachDB: a batch stays open past its sync interval and batch size until a resolved timestamp advances the
+	// cursor (for at most an hour). Older mirrors end the batch at the deadline with the cursor unchanged, so a
+	// transaction or a catch-up that takes longer to emit than the batch window replays forever.
+	InternalVersion_CockroachHoldBatchForResolved
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
