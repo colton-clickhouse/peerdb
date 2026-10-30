@@ -301,6 +301,10 @@ func ParsePgArrayToStringSlice(data []byte, delim byte) []string {
 		case psSearch2:
 			if ch == '{' {
 				ps = psSearch
+				if result == nil {
+					// an empty array is empty, not NULL: callers marshal a nil slice as JSON null
+					result = []string{}
+				}
 			}
 		case psQuoted:
 			if ch == '\\' {
