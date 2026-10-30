@@ -63,3 +63,15 @@ func TestTimestampArrayAfterYear9999(t *testing.T) {
 	require.NoError(t, err)
 	require.JSONEq(t, `{"a":["10000-01-02 03:04:05","2024-01-02 00:00:00"]}`, out)
 }
+
+// An infinite element next to a BC one: each keeps its own Postgres input text (Postgres reads Infinity in any case).
+func TestToJSONPgBCDatesNextToSpecial(t *testing.T) {
+	items := NewRecordItems(1)
+	items.AddColumn("d", types.QValueArrayDate{
+		Val:      []time.Time{time.Date(-43, 3, 15, 0, 0, 0, 0, time.UTC), {}, time.Date(10000, 1, 2, 0, 0, 0, 0, time.UTC)},
+		Specials: []types.SpecialValue{types.SpecialNone, types.SpecialInfinity, types.SpecialNone},
+	})
+	out, err := items.ToJSONWithOptions(ToJSONOptions{PgBCDates: true})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"d":["0044-03-15 BC","Infinity","10000-01-02"]}`, out)
+}

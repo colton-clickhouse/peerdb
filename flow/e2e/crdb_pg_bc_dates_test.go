@@ -10,14 +10,16 @@ import (
 // BC dates and timestamps replicate in the snapshot, but CDC wrote them into the raw table with Go's
 // astronomical years ("-0043-03-15" for 44 BC), which Postgres rejects in normalize, stalling the mirror; a BC
 // TIMESTAMP[] element failed the sync itself (time.Time can't marshal years before 0 to JSON). Rows 1 and 2 come
-// from the snapshot, 3 from a CDC insert and 2 is then updated through CDC.
+// from the snapshot, 3 from a CDC insert and 2 is then updated through CDC. The arrays also hold an infinite element next
+// to a BC one, and a year after 9999, which Go's JSON times can't write either.
 func (s CRDBPGSuite) Test_BC_Dates_Snapshot_And_CDC() {
 	t := s.t
 	srcTable := "bc_values"
 	srcFull := AttachSchema(s, srcTable)
 	dstFull := s.DestinationTable(srcTable)
 	const bc = `'0044-03-15 BC', '0044-03-15 12:00:00.5 BC', '0001-01-01 00:00:00+00 BC',
-		ARRAY['0044-03-15 BC', '2026-01-01', NULL]::DATE[], ARRAY['4713-01-01 00:00:00 BC', '2026-01-01 00:00:00']::TIMESTAMP[],
+		ARRAY['0044-03-15 BC', '2026-01-01', NULL, 'infinity']::DATE[],
+		ARRAY['4713-01-01 00:00:00 BC', '2026-01-01 00:00:00', '10000-01-02 03:04:05']::TIMESTAMP[],
 		ARRAY['0001-12-31 23:59:59.999999+00 BC', NULL]::TIMESTAMPTZ[]`
 
 	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT8 PRIMARY KEY, d DATE, ts TIMESTAMP,
@@ -41,8 +43,8 @@ func (s CRDBPGSuite) Test_BC_Dates_Snapshot_And_CDC() {
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
 
-	const want = `0044-03-15 BC|0044-03-15 12:00:00.5 BC|0001-01-01 00:00:00 BC|{"0044-03-15 BC",2026-01-01,NULL}|` +
-		`{"4713-01-01 00:00:00 BC","2026-01-01 00:00:00"}|{"0001-12-31 23:59:59.999999 BC",NULL}`
+	const want = `0044-03-15 BC|0044-03-15 12:00:00.5 BC|0001-01-01 00:00:00 BC|{"0044-03-15 BC",2026-01-01,NULL,infinity}|` +
+		`{"4713-01-01 00:00:00 BC","2026-01-01 00:00:00","10000-01-02 03:04:05"}|{"0001-12-31 23:59:59.999999 BC",NULL}`
 	for id := 1; id <= 3; id++ {
 		require.Equal(t, want, s.destText(fmt.Sprintf(`SELECT d::text || '|' || ts::text || '|' || (tz AT TIME ZONE 'UTC')::text
 			|| '|' || da::text || '|' || tsa::text || '|'
