@@ -127,7 +127,9 @@ func (c *CockroachDBConnector) getTableSchema(
 					FROM pg_catalog.pg_class pc
 					JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace
 					JOIN pg_catalog.pg_attribute pa ON pa.attrelid = pc.oid
-					WHERE pn.nspname = k.table_schema AND pc.relname = k.table_name AND pa.attname = k.column_name
+					-- the table's own row: an index or constraint can have the table's name too
+					WHERE pn.nspname = k.table_schema AND pc.relname = k.table_name AND pc.relkind = 'r'
+					AND pa.attname = k.column_name
 				), false),
 				COALESCE(c.generation_expression, '')
 			FROM information_schema.key_column_usage k
