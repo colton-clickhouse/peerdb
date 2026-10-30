@@ -394,6 +394,12 @@ func (c *CockroachDBConnector) PullRecords(
 		}
 		if err == nil {
 			// watchdog fired without records: reconnect and keep waiting
+			if len(state.buffer) > 0 {
+				// the reconnect replays the buffered changes from the cursor
+				c.logger.Warn("[cockroachdb] changefeed silent past the stall window with changes buffered; reconnecting",
+					slog.String("cursor", state.cursor.String()), slog.Int("bufferedRecords", len(state.buffer)),
+					slog.Duration("stallWindow", state.watchdogWindow()))
+			}
 			continue
 		}
 		if isCursorTooOldError(err) {
