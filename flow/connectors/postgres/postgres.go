@@ -80,6 +80,16 @@ func setIdleSessionTimeout(ctx context.Context, conn *pgx.Conn, logger log.Logge
 	}
 }
 
+// setExtraFloatDigits best-effort sets extra_float_digits = 3 on conn, so floats in text form (COPY, ::text,
+// to_json) are exact: a role or database setting of 0 or less rounds them to 15 (double precision) or 6 (real)
+// significant digits. A SET rather than a startup parameter, because connection poolers such as pgbouncer
+// refuse startup parameters they don't track.
+func setExtraFloatDigits(ctx context.Context, conn *pgx.Conn, logger log.Logger) {
+	if _, err := conn.Exec(ctx, "SET extra_float_digits = 3"); err != nil {
+		logger.Warn("failed to set extra_float_digits, floats in text form may be rounded", slog.Any("error", err))
+	}
+}
+
 func newPostgresConnector(
 	ctx context.Context, env map[string]string, pgConfig *protos.PostgresConfig, destinationType protos.DBType,
 ) (*PostgresConnector, error) {
@@ -105,9 +115,6 @@ func newPostgresConnector(
 	// Required for QueryExecModeSimpleProtocol, which is set in some places while querying;
 	// pgx refuses simple protocol when the server reports standard_conforming_strings=off.
 	connConfig.Config.RuntimeParams["standard_conforming_strings"] = "on"
-	// floats in text form exactly (shortest exact since Postgres 12, all digits before): a role or database
-	// setting of 0 or less would round them to 15 (double) or 6 (real) digits
-	connConfig.Config.RuntimeParams["extra_float_digits"] = "3"
 
 	tunnel, err := utils.NewSSHTunnel(ctx, pgConfig.SshConfig)
 	if err != nil {
@@ -141,6 +148,7 @@ func newPostgresConnector(
 		return nil, fmt.Errorf("failed to create connection: %w", err)
 	}
 	setIdleSessionTimeout(ctx, conn, logger)
+	setExtraFloatDigits(ctx, conn, logger)
 
 	metadataSchema := "_peerdb_internal"
 	if pgConfig.MetadataSchema != nil {
