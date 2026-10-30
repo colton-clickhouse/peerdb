@@ -72,3 +72,30 @@ func TestIntervalSnapshotMatchesChangefeed(t *testing.T) {
 		})
 	}
 }
+
+// The snapshot reads INTERVAL columns as text, which follows the session's intervalstyle: a role whose default is
+// iso_8601 or sql_standard gave P1DT2H or 1 2:00:00, which the snapshot's parser doesn't read. The connector pins the
+// postgres style for its sessions.
+func TestConnectorPinsIntervalStyle(t *testing.T) {
+	if os.Getenv("CI_COCKROACH_HOST") == "" {
+		t.Skip("needs CockroachDB: set CI_COCKROACH_HOST (e2e services)")
+	}
+	admin, err := NewCockroachDBConnector(t.Context(), nil, internal.GetCockroachDBConfigFromEnv())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+	user := fmt.Sprintf("intervalstyle_%d", time.Now().UnixNano())
+	for _, stmt := range []string{"CREATE USER " + user, "ALTER ROLE " + user + " SET intervalstyle = 'iso_8601'"} {
+		_, err := admin.conn.Exec(t.Context(), stmt)
+		require.NoError(t, err)
+	}
+	t.Cleanup(func() { _, _ = admin.conn.Exec(context.Background(), "DROP USER IF EXISTS "+user) })
+
+	config := internal.GetCockroachDBConfigFromEnv()
+	config.User, config.Password = user, ""
+	c, err := NewCockroachDBConnector(t.Context(), nil, config)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	var text string
+	require.NoError(t, c.conn.QueryRow(t.Context(), "SELECT '1 day 02:00:00'::INTERVAL::STRING").Scan(&text))
+	require.Equal(t, "1 day 02:00:00", text)
+}
