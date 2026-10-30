@@ -303,13 +303,19 @@ func (c *CockroachDBConnector) PullRecords(
 	syncSettings := frozenCursorSettings{idleTimeout: req.IdleTimeout, maxBatchSize: req.MaxBatchSize}
 	frozen, frozenSince, frozenBatches := frozenCursor.frozen(cursor, syncSettings, time.Now())
 	notAdvancing := func(waited time.Duration) error {
+		remedy := "pause the mirror and resume it with a longer sync interval (idle timeout, e.g. 300 s) and a" +
+			" larger batch size for one batch to catch up, or resync the mirror"
+		if req.InternalVersion >= shared.InternalVersion_CockroachHoldBatchForResolved {
+			// batches already stay open up to an hour for a resolved timestamp: a longer sync interval doesn't help
+			remedy = "check the source for a transaction or range that holds resolved timestamps back, or resync the" +
+				" mirror; if the backlog is older than the tables' gc.ttlseconds, raise it first, or the resync's" +
+				" cursor won't be able to catch up either"
+		}
 		return exceptions.NewCockroachChangefeedIrrecoverableError("CURSOR_NOT_ADVANCING",
 			fmt.Errorf("mirror %s: the changefeed cursor %s has not advanced for %d batches since %s: each batch"+
 				" ended without a covering resolved timestamp and replayed the same changes, so later changes never"+
-				" arrive, and no resolved timestamp advanced it within %s either; pause the mirror and resume it"+
-				" with a longer sync interval (idle timeout, e.g. 300 s) and a larger batch size for one batch to"+
-				" catch up, or resync the mirror", req.FlowJobName, cursor, frozenBatches,
-				frozenSince.UTC().Format(time.RFC3339), waited.Round(time.Second)))
+				" arrive, and no resolved timestamp advanced it within %s either; %s", req.FlowJobName, cursor,
+				frozenBatches, frozenSince.UTC().Format(time.RFC3339), waited.Round(time.Second), remedy))
 	}
 	state := &changefeedPullState{
 		req:              req,
@@ -414,7 +420,13 @@ func (c *CockroachDBConnector) PullRecords(
 			return notAdvancing(frozenCursorStrictWait)
 		}
 		if done {
-			frozenCursor.observe(state.forcedEmit, cursor, state.cursor, syncSettings, time.Now())
+			capped := state.holdForResolved && !time.Now().Before(state.pullStart.Add(changefeedCatchUpMaxDuration))
+			if state.forcedEmit && capped {
+				c.logger.Warn("[cockroachdb] a batch held for a resolved timestamp as long as it may and still had to"+
+					" emit past the checkpoint: the next batch waits for one without emitting",
+					slog.String("cursor", cursor.String()), slog.Uint64("records", uint64(state.recordCount)))
+			}
+			frozenCursor.observe(state.forcedEmit, capped, cursor, state.cursor, syncSettings, time.Now())
 			return nil
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -432,6 +444,12 @@ func (c *CockroachDBConnector) PullRecords(
 				return notAdvancing(frozenCursorStrictWait)
 			}
 			// watchdog fired without records: reconnect and keep waiting
+			if len(state.buffer) > 0 {
+				// the reconnect replays the buffered changes from the cursor
+				c.logger.Warn("[cockroachdb] changefeed silent past the stall window with changes buffered; reconnecting",
+					slog.String("cursor", state.cursor.String()), slog.Int("bufferedRecords", len(state.buffer)),
+					slog.Duration("stallWindow", state.watchdogWindow()))
+			}
 			continue
 		}
 		if isCursorTooOldError(err) {
