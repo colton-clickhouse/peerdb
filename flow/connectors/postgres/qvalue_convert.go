@@ -43,6 +43,17 @@ func (c *PostgresConnector) postgresOIDToQValueKind(
 	return colType
 }
 
+// pgColumnTypeForKind is the Postgres type PeerDB creates a column of kind colTypeStr as, in a mirror of the given
+// version from a source of sourceType: at table setup and for columns added later alike.
+func pgColumnTypeForKind(colTypeStr string, version uint32, sourceType protos.DBType) string {
+	// MySQL TIME is a duration (-838:59:59 to 838:59:59), which time (a time of day) can't hold
+	if colTypeStr == string(types.QValueKindTime) && sourceType == protos.DBType_MYSQL &&
+		version >= shared.InternalVersion_PgMySQLTimeAsInterval {
+		return "INTERVAL"
+	}
+	return qValueKindToPostgresType(colTypeStr, version)
+}
+
 func qValueKindToPostgresType(colTypeStr string, version uint32) string {
 	switch types.QValueKind(colTypeStr) {
 	case types.QValueKindBoolean:
