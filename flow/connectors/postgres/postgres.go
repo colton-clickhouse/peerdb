@@ -80,6 +80,16 @@ func setIdleSessionTimeout(ctx context.Context, conn *pgx.Conn, logger log.Logge
 	}
 }
 
+// setExtraFloatDigits best-effort sets extra_float_digits = 3 on conn, so floats in text form (COPY, ::text,
+// to_json) are exact: a role or database setting of 0 or less rounds them to 15 (double precision) or 6 (real)
+// significant digits. A SET rather than a startup parameter, because connection poolers such as pgbouncer
+// refuse startup parameters they don't track.
+func setExtraFloatDigits(ctx context.Context, conn *pgx.Conn, logger log.Logger) {
+	if _, err := conn.Exec(ctx, "SET extra_float_digits = 3"); err != nil {
+		logger.Warn("failed to set extra_float_digits, floats in text form may be rounded", slog.Any("error", err))
+	}
+}
+
 func newPostgresConnector(
 	ctx context.Context, env map[string]string, pgConfig *protos.PostgresConfig, destinationType protos.DBType,
 ) (*PostgresConnector, error) {
@@ -138,6 +148,7 @@ func newPostgresConnector(
 		return nil, fmt.Errorf("failed to create connection: %w", err)
 	}
 	setIdleSessionTimeout(ctx, conn, logger)
+	setExtraFloatDigits(ctx, conn, logger)
 
 	metadataSchema := "_peerdb_internal"
 	if pgConfig.MetadataSchema != nil {
