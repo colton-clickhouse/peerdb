@@ -123,3 +123,21 @@ func NewReplStateDesyncError(message string) *ReplStateDesyncError {
 func (e *ReplStateDesyncError) Error() string {
 	return e.Message
 }
+
+// SharedRawTableError: two mirrors into one Postgres database whose raw table names Postgres truncates to the same
+// name, so they share one raw table
+type SharedRawTableError struct {
+	Mirror      string
+	OtherMirror string
+	RawTable    string
+}
+
+func NewSharedRawTableError(mirror string, otherMirror string, rawTable string) *SharedRawTableError {
+	return &SharedRawTableError{Mirror: mirror, OtherMirror: otherMirror, RawTable: rawTable}
+}
+
+func (e *SharedRawTableError) Error() string {
+	return fmt.Sprintf("mirrors %s and %s write to the same database and share the raw table %s, since Postgres "+
+		"truncates their names to 63 bytes: one's cleanup deletes the other's unnormalized rows; recreate one of them "+
+		"with a shorter name", e.Mirror, e.OtherMirror, e.RawTable)
+}
