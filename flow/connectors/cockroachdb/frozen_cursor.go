@@ -1,6 +1,7 @@
 package conncockroachdb
 
 import (
+	"errors"
 	"sync"
 	"time"
 )
@@ -9,11 +10,17 @@ import (
 // it was, so the next batch restarts the changefeed from the same cursor and replays. When the replay itself
 // outlasts the batch window that repeats forever: rows keep landing, the mirror looks healthy, and nothing after
 // the cursor ever arrives (when a replay outlasts the batch window). frozenCursorTracker spots that pattern so
-// PullRecords can raise a user-actionable error instead.
+// PullRecords stops replaying and, if no resolved timestamp comes, raises a user-actionable error instead.
 const (
 	frozenCursorMinBatches  = 20
 	frozenCursorMinDuration = 15 * time.Minute
+	// frozenCursorStrictWait is how long a batch from a frozen cursor waits for a resolved timestamp before failing
+	frozenCursorStrictWait = 15 * time.Minute
 )
+
+// errStrictWaitOver ends a strict batch (changefeedPullState.strictUntil) that got no covering resolved timestamp in
+// time, or would have had to emit past the checkpoint to bound its buffer
+var errStrictWaitOver = errors.New("no covering resolved timestamp within the strict wait")
 
 // frozenCursorSettings are the sync settings the replay happened under: changing them (a longer sync interval or a
 // larger batch, the fix the error suggests) gives the mirror a fresh chance.
@@ -30,9 +37,10 @@ type frozenCursorTracker struct {
 	batches  int
 }
 
-// frozenCursors outlives the connector: once the cursor is frozen, every retry of the SyncFlow activity must fail
-// right away, without replaying (and syncing) the same changes again, or the mirror would keep looking like it makes
-// progress and never be reported STALLED. Kept per flow-worker process: a restart starts counting again.
+// frozenCursors outlives the connector: once the cursor is frozen, every retry of the SyncFlow activity must run
+// strict, without replaying (and syncing) the same changes again, or the mirror would keep looking like it makes
+// progress and never be reported STALLED. A strict batch waits for a resolved timestamp instead, so the mirror
+// recovers by itself once one arrives. Kept per flow-worker process: a restart starts counting again.
 var frozenCursors sync.Map // flow job name -> *frozenCursorTracker
 
 func frozenCursorFor(flowJobName string) *frozenCursorTracker {
