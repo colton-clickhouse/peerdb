@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,7 +28,7 @@ type CockroachDBConnector struct {
 	logger log.Logger
 	ssh    *utils.SSHTunnel
 	// conn is the connector's own connection, held for the connector's life (a SyncFlow activity's, for CDC).
-	// connMu guards replacing it in ensureConn.
+	// Only one goroutine uses it at a time; connMu only orders ensureConn's swap with the SSH keepalive's close.
 	conn   *crdbConn
 	connMu sync.Mutex
 	// dialConfig is what conn was dialed with, to dial it again
@@ -107,8 +108,9 @@ func NewCockroachDBConnector(ctx context.Context, env map[string]string, config 
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		connector.connMu.Lock()
-		defer connector.connMu.Unlock()
-		if err := connector.conn.Close(closeCtx); err != nil {
+		conn := connector.conn
+		connector.connMu.Unlock()
+		if err := conn.Close(closeCtx); err != nil {
 			connector.logger.Error("failed to close CockroachDB connection on SSH keepalive failure", slog.Any("error", err))
 		}
 	})
@@ -150,37 +152,53 @@ func (c *CockroachDBConnector) ConnectionActive(ctx context.Context) error {
 	return c.ensureConn(ctx)
 }
 
-// ensureConn checks the connector's own connection and dials it again, once, if it's closed or doesn't answer. A
-// SyncFlow activity keeps one connector, and so one connection, for its whole life: once the node behind it fails,
-// or a load balancer drops it while the mirror is idle, every sync of the activity would fail with "connection to
-// source down" until the activity ends, though any other node can serve it. Changefeed sessions dial their own
-// connections, so this is about the reads around them: the connection check before each sync, the schema read
-// for added columns and the source key read.
+// Bounds for ensureConn: a connection whose peer vanished without a reset (a hard node kill, a blackholed route)
+// doesn't fail a ping by itself until TCP gives up, many minutes later.
+const (
+	connPingTimeout = 15 * time.Second
+	connDialTimeout = 30 * time.Second
+)
+
+// ensureConn checks the connector's own connection and dials it again, once, if it's closed or doesn't answer within
+// connPingTimeout. A SyncFlow activity keeps one connector, and so one connection, for its whole life: once the node
+// behind it fails, or a load balancer drops it while the mirror is idle, every sync of the activity would fail with
+// "connection to source down" until the activity ends, though any other node can serve it. Changefeed sessions dial
+// their own connections, so this is about the reads around them: the connection check before each sync, the schema
+// read for added columns and the source key read. Call it with no result set open on the connection: a busy
+// connection counts as healthy, and isn't replaced.
 func (c *CockroachDBConnector) ensureConn(ctx context.Context) error {
 	c.connMu.Lock()
-	defer c.connMu.Unlock()
-	if c.conn == nil {
+	conn := c.conn
+	c.connMu.Unlock()
+	if conn == nil {
 		return errors.New("connection is nil")
 	}
 	pingErr := errors.New("connection closed")
-	if !c.conn.conn.IsClosed() {
-		if pingErr = c.conn.Ping(ctx); pingErr == nil {
+	if !conn.conn.IsClosed() {
+		pingCtx, cancel := context.WithTimeout(ctx, connPingTimeout)
+		pingErr = conn.Ping(pingCtx)
+		cancel()
+		if pingErr == nil || strings.Contains(pingErr.Error(), "conn busy") {
 			return nil
 		}
 	}
 	if ctx.Err() != nil {
 		return pingErr
 	}
-	conn, err := NewCockroachDBConnFromConfig(ctx, c.dialConfig, c.ssh)
+	dialCtx, cancel := context.WithTimeout(ctx, connDialTimeout)
+	defer cancel()
+	newConn, err := NewCockroachDBConnFromConfig(dialCtx, c.dialConfig, c.ssh)
 	if err != nil {
-		return fmt.Errorf("%w (reconnecting failed: %w)", pingErr, err)
+		// the dial's error leads: it says why the connection can't be restored (e.g. rotated credentials)
+		return fmt.Errorf("reconnecting failed: %w (the connection had failed: %v)", classifyConnectError(err), pingErr)
 	}
 	c.logger.Info("[cockroachdb] reconnected the connector's connection", slog.Any("error", pingErr))
-	old := c.conn
-	c.conn = conn
-	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = old.Close(closeCtx)
+	c.connMu.Lock()
+	c.conn = newConn
+	c.connMu.Unlock()
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelClose()
+	_ = conn.Close(closeCtx)
 	return nil
 }
 
