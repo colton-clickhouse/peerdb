@@ -19,6 +19,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/model"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 )
 
 // NeedsSetupMetadataTables returns true if the metadata tables need to be set up.
@@ -474,7 +475,7 @@ func (c *PostgresConnector) normalizeBatch(
 				slog.String("destinationTableName", entry.tableName),
 				slog.Any("error", err),
 			)
-			return 0, fmt.Errorf("error executing normalize statement for table %s: %w", entry.tableName, err)
+			return 0, exceptions.NewPostgresNormalizeTableError(entry.tableName, err)
 		}
 		totalRowsAffected += int(ct.RowsAffected())
 	}

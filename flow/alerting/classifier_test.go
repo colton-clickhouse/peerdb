@@ -2106,3 +2106,51 @@ func TestNormalizeGapDue(t *testing.T) {
 	_, kept := a.normalizeGapLogged.Load("f")
 	require.False(t, kept, "a flow not logged for two gaps is forgotten")
 }
+
+func TestPostgresNormalizeErrorsNeedingTheUser(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		code    string
+		message string
+		class   ErrorClass
+	}{
+		// a column the mirror writes was dropped from the destination table
+		{pgerrcode.UndefinedColumn, "", ErrorNotifyDestinationModified},
+		// a value the destination column's type can't hold, or a type it can't take
+		{pgerrcode.NumericValueOutOfRange, "", ErrorNotifyInvalidDestinationTableDefinition},
+		{pgerrcode.DatatypeMismatch, "", ErrorNotifyInvalidDestinationTableDefinition},
+		{pgerrcode.StringDataRightTruncationDataException, "value too long for type character varying(5)",
+			ErrorNotifyInvalidDestinationTableDefinition},
+		{pgerrcode.DatetimeFieldOverflow, "", ErrorNotifyInvalidDestinationTableDefinition},
+		{pgerrcode.InvalidTextRepresentation, `invalid input syntax for type integer: "x"`,
+			ErrorNotifyInvalidDestinationTableDefinition},
+		// a NOT NULL or foreign key on the destination the data doesn't satisfy
+		{pgerrcode.NotNullViolation, "", ErrorNotifyConstraintViolation},
+		{pgerrcode.ForeignKeyViolation, "", ErrorNotifyConstraintViolation},
+	} {
+		// as startNormalize returns them: the destination's error, wrapped by the connector and the activity
+		err := exceptions.NewNormalizationError(fmt.Errorf("failed to normalize records: %w",
+			exceptions.NewPostgresNormalizeTableError("public.t", &pgconn.PgError{Code: tc.code, Message: tc.message})))
+		errorClass, errInfo := GetErrorClass(t.Context(), err)
+		assert.Equal(t, tc.class, errorClass, tc.code)
+		assert.Equal(t, NotifyUser, errorClass.ErrorAction(), tc.code)
+		assert.Equal(t, ErrorInfo{Source: ErrorSourcePostgres, Code: tc.code}, errInfo, tc.code)
+
+		// outside normalize (e.g. a source query) the code keeps its existing class
+		otherClass, _ := GetErrorClass(t.Context(), fmt.Errorf("query failed: %w", &pgconn.PgError{Code: tc.code}))
+		assert.NotEqual(t, tc.class, otherClass, tc.code)
+	}
+
+	// other Postgres errors during normalize (the catalog, a ClickHouse mirror's metadata) aren't the destination's
+	catalogErr := exceptions.NewNormalizationError(fmt.Errorf("failed to update metadata: %w",
+		&pgconn.PgError{Code: pgerrcode.UndefinedColumn}))
+	errorClass, _ := GetErrorClass(t.Context(), catalogErr)
+	assert.Equal(t, ErrorOther, errorClass)
+
+	// an invalid enum value keeps its own class
+	enumErr := exceptions.NewNormalizationError(exceptions.NewPostgresNormalizeTableError("public.t",
+		&pgconn.PgError{Code: pgerrcode.InvalidTextRepresentation, Message: `invalid input value for enum mood: "x"`}))
+	errorClass, _ = GetErrorClass(t.Context(), enumErr)
+	assert.Equal(t, ErrorNotifyInvalidEnumValue, errorClass)
+}
