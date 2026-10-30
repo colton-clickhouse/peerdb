@@ -16,7 +16,8 @@ import (
 
 // getTableSchema with an asOf timestamp is what the changefeed uses to type columns added since the schema was
 // cached. AS OF SYSTEM TIME has to follow the whole FROM clause, joins included, or every such read fails and CDC
-// stops at the first row of a table that gained a column. Needs a CockroachDB (CI_COCKROACH_HOST), so it only runs
+// stops at the first row of a table that gained a column. The same reads look up a table's columns in pg_class by
+// name, where an index or constraint can have the table's name too. Needs a CockroachDB (CI_COCKROACH_HOST), so it only runs
 // with the e2e services.
 func TestGetTableSchemaAsOf(t *testing.T) {
 	if os.Getenv("CI_COCKROACH_HOST") == "" {
@@ -41,6 +42,8 @@ func TestGetTableSchemaAsOf(t *testing.T) {
 		"composite_pk": {"(a INT8, b STRING, v STRING, PRIMARY KEY (a, b))", []string{"a", "b"}},
 		// the shard column is a virtual key column: the destination is keyed without it
 		"hash_sharded_pk": {"(ts TIMESTAMPTZ, id INT8, v STRING, PRIMARY KEY (ts, id) USING HASH)", []string{"ts", "id"}},
+		// the primary key constraint has the table's name, so pg_class has a row for each: only the table's counts
+		"pk_named_like_table": {"(id INT8, v STRING, CONSTRAINT pk_named_like_table PRIMARY KEY (id))", []string{"id"}},
 	}
 	for name, table := range tables {
 		_, err := c.conn.Exec(ctx, fmt.Sprintf("CREATE TABLE %s.%s %s", schema, name, table.ddl))
