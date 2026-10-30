@@ -88,6 +88,20 @@ func constructArray[T any](v []T) *pgtype.Array[T] {
 	}
 }
 
+// constructNullableArray is constructArray with NULL elements where nulls says so (types.ArrayNulls).
+func constructNullableArray[T any](v []T, nulls []bool) any {
+	if nulls == nil {
+		return constructArray(v)
+	}
+	elems := make([]*T, len(v))
+	for i := range v {
+		if !nulls[i] {
+			elems[i] = &v[i]
+		}
+	}
+	return constructArray(elems)
+}
+
 type QRecordCopyFromSource struct {
 	stream        *QRecordStream
 	currentRecord []types.QValue
@@ -129,6 +143,9 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		if qValue == nil || qValue.Value() == nil {
 			values[i] = nil
 			continue
+		}
+		if err := types.CheckArrayNulls(qValue); err != nil {
+			return nil, err
 		}
 
 		switch v := qValue.(type) {
@@ -209,33 +226,33 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 			}
 			values[i] = wkb
 		case types.QValueArrayString:
-			values[i] = constructArray(stripNulBytesAll(v.Val))
+			values[i] = constructNullableArray(stripNulBytesAll(v.Val), v.Nulls)
 		case types.QValueArrayEnum:
-			values[i] = constructArray(stripNulBytesAll(v.Val))
+			values[i] = constructNullableArray(stripNulBytesAll(v.Val), v.Nulls)
 		case types.QValueArrayDate:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayInterval:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayTimestamp:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayTimestampTZ:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayInt16:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayInt32:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayInt64:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayFloat32:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayFloat64:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayBoolean:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayUUID:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayNumeric:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueJSON:
 			if v.IsArray {
 				var arrayJ []any

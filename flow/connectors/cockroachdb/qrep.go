@@ -268,9 +268,10 @@ func (c *CockroachDBConnector) PullQRepRecords(
 	schema := qRecordSchemaFromFieldDescriptions(tableSchema, fds)
 	stream.SetSchema(schema)
 
+	arrayNullElements := config.Version >= shared.InternalVersion_ArrayNullElements
 	var totalRecords, totalBytes int64
 	for rows.Next() {
-		record, err := c.mapRowToQRecord(rows, fds, schema, dstType)
+		record, err := c.mapRowToQRecord(rows, fds, schema, dstType, arrayNullElements)
 		if err != nil {
 			return totalRecords, totalBytes, fmt.Errorf("failed to map row to QRecord: %w", err)
 		}
@@ -337,6 +338,7 @@ func (c *CockroachDBConnector) mapRowToQRecord(
 	fds []pgconn.FieldDescription,
 	schema types.QRecordSchema,
 	dstType protos.DBType,
+	arrayNullElements bool,
 ) ([]types.QValue, error) {
 	record := make([]types.QValue, len(fds))
 	rawValues := rows.RawValues()
@@ -396,6 +398,21 @@ func (c *CockroachDBConnector) mapRowToQRecord(
 				switch fd.Format {
 				case pgtype.TextFormatCode:
 					value = string(buf)
+					if arrayNullElements && field.Type.IsArray() {
+						// e.g. enum arrays: an array's text form doesn't depend on the element type, so read it as
+						// text[] to learn which elements are NULL
+						var elems pgtype.FlatArray[pgtype.Text]
+						if err := typeMap.Scan(pgtype.TextArrayOID, pgtype.TextFormatCode, buf, &elems); err != nil {
+							return nil, fmt.Errorf("failed to scan array %s: %w", fd.Name, err)
+						}
+						anyElems := make([]any, len(elems))
+						for j, el := range elems {
+							if el.Valid {
+								anyElems[j] = el.String
+							}
+						}
+						value = anyElems
+					}
 				case pgtype.BinaryFormatCode:
 					value = slices.Clone(buf)
 				default:
@@ -406,6 +423,12 @@ func (c *CockroachDBConnector) mapRowToQRecord(
 			qv, err := qvalueFromCrdbValue(field, dstType, fd.DataTypeOID, typeMap, value)
 			if err != nil {
 				return nil, fmt.Errorf("failed to convert value for %s: %w", fd.Name, err)
+			}
+			if arrayNullElements {
+				// pgx decodes arrays to []any, NULL elements as nil
+				if elems, ok := value.([]any); ok {
+					qv = types.WithArrayNulls(qv, nilElements(elems))
+				}
 			}
 			record[i] = qv
 		}
@@ -531,4 +554,13 @@ func qRecordSchemaFromFieldDescriptions(
 		})
 	}
 	return types.NewQRecordSchema(fields)
+}
+
+// nilElements marks the nil (NULL) elements of a decoded array.
+func nilElements(elems []any) []bool {
+	nulls := make([]bool, len(elems))
+	for i, el := range elems {
+		nulls[i] = el == nil
+	}
+	return nulls
 }
