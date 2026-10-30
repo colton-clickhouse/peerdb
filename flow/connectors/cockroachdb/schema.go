@@ -348,8 +348,26 @@ func destinationKeyColumns(sourceKey []sourceKeyColumn, tableColumns []string) (
 }
 
 // referencesColumn reports whether a generation expression mentions the column as a whole identifier. It errs
-// towards yes (a string literal with the column's name counts), which only turns a safe key into an error.
+// towards yes (a string literal with the column's name counts), which only turns a safe key into an error. A name
+// used as a function (md5(...)), a qualifier (crdb_internal.f) or a type (x::int8) isn't the column: matching those
+// refused hash-sharded tables whose columns are named like one of the functions their shard expression calls.
 func referencesColumn(expression, column string) bool {
-	return regexp.MustCompile(`(?i)(^|[^\pL\pN_$])` + regexp.QuoteMeta(column) + `($|[^\pL\pN_$])`).
-		MatchString(strings.ReplaceAll(expression, `""`, `"`))
+	expression = strings.ReplaceAll(expression, `""`, `"`)
+	re := regexp.MustCompile(`(?i)(^|[^\pL\pN_$])(` + regexp.QuoteMeta(column) + `)($|[^\pL\pN_$])`)
+	for _, m := range re.FindAllStringSubmatchIndex(expression, -1) {
+		start, end := m[4], m[5]
+		quoted := start > 0 && expression[start-1] == '"' && end < len(expression) && expression[end] == '"'
+		if quoted {
+			return true // a quoted identifier is always a name
+		}
+		after := strings.TrimLeft(expression[end:], " \t\n")
+		if strings.HasPrefix(after, "(") || strings.HasPrefix(after, ".") {
+			continue
+		}
+		if strings.HasSuffix(strings.TrimRight(expression[:start], " \t\n"), "::") {
+			continue
+		}
+		return true
+	}
+	return false
 }
