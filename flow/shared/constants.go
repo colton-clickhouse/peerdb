@@ -100,6 +100,11 @@ const (
 	// for Postgres destinations (DefaultTime for others), on both paths; CockroachDB changefeed date/timestamp
 	// arrays accept infinity like the snapshot. Older mirrors keep 0001-01-01 for both.
 	InternalVersion_ArrayConversionIntegrity
+	// CockroachDB sources: changefeed geometry / geography values with an M dimension keep it. GeoJSON has no M, so a
+	// 4-coordinate value (XYZM) is written as ZM instead of failing to parse and becoming NULL, and 3 coordinates are
+	// XYM in a column whose type has M (geometry(PointM)). A value that still can't be read fails with an error
+	// instead of becoming NULL. 3 coordinates in other columns stay XYZ.
+	InternalVersion_CockroachGeoDimensions
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1

@@ -172,6 +172,9 @@ type pgValues struct {
 	// already did: NULL, or defaultTime in a column that isn't nullable, instead of the parse error that stopped CDC.
 	arrayInfinity bool
 	defaultTime   time.Time
+	// geoDims reads changefeed geometries with an M dimension, and fails on ones it can't read instead of writing NULL
+	// (InternalVersion_CockroachGeoDimensions, every destination: the value changes only where it was lost)
+	geoDims bool
 }
 
 func newPgValues(version uint32, dstType protos.DBType) pgValues {
@@ -182,6 +185,7 @@ func newPgValues(version uint32, dstType protos.DBType) pgValues {
 		invalidGeo:    pg && version >= shared.InternalVersion_PgConstrainedGeo,
 		arrayInfinity: version >= shared.InternalVersion_ArrayConversionIntegrity,
 		defaultTime:   qvalue.DefaultTime(dstType),
+		geoDims:       version >= shared.InternalVersion_CockroachGeoDimensions,
 	}
 }
 
