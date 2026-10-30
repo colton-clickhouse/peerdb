@@ -40,6 +40,18 @@ func InitializeCDCFlow(ctx context.Context, pool shared.CatalogPool, flowJobName
 	return nil
 }
 
+// DeleteOpenCDCBatches deletes a flow's batches that were synced but never normalized, when the flow's raw table
+// is (re)created: a resync keeps the flow and, with stats kept, its batches, and restarts batch ids, so the old
+// open ones would count as this mirror's pending normalize lag (and raise the normalize-gap alert) for good.
+func DeleteOpenCDCBatches(ctx context.Context, pool shared.CatalogPool, flowJobName string) error {
+	if _, err := pool.Exec(ctx,
+		`DELETE FROM peerdb_stats.cdc_batches WHERE flow_name = $1 AND end_time IS NULL`, flowJobName,
+	); err != nil {
+		return fmt.Errorf("error while deleting open batches of %s: %w", flowJobName, err)
+	}
+	return nil
+}
+
 func UpdateLatestLSNAtSourceForCDCFlow(ctx context.Context, pool shared.CatalogPool, flowJobName string,
 	latestLSNAtSource int64,
 ) error {
@@ -144,12 +156,15 @@ func GetPendingNormalizeLagByFlow(
 	ctx context.Context,
 	pool shared.CatalogPool,
 ) (map[string]int64, error) {
-	// using catalog time to avoid clock skew with ScheduledTasks
+	// using catalog time to avoid clock skew with ScheduledTasks. Only the current mirror's batches: dropping a
+	// mirror keeps its cdc_batches, so a mirror recreated under the same name would inherit the old one's
+	// unnormalized batches (and their lag) otherwise.
 	rows, err := pool.Query(ctx,
-		`SELECT flow_name, (EXTRACT(EPOCH FROM (NOW() - MIN(sync_time))) * 1000000)::bigint
-		FROM peerdb_stats.cdc_batches
-		WHERE end_time IS NULL AND sync_time IS NOT NULL
-		GROUP BY flow_name`)
+		`SELECT b.flow_name, (EXTRACT(EPOCH FROM (NOW() - MIN(b.sync_time))) * 1000000)::bigint
+		FROM peerdb_stats.cdc_batches b
+		WHERE b.end_time IS NULL AND b.sync_time IS NOT NULL
+		AND b.sync_time >= (SELECT max(f.created_at) FROM flows f WHERE f.name = b.flow_name)
+		GROUP BY b.flow_name`)
 	if err != nil {
 		return nil, fmt.Errorf("error while querying normalize lag: %w", err)
 	}
