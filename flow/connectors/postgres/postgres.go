@@ -102,6 +102,9 @@ func newPostgresConnector(
 	connConfig.Config.RuntimeParams["idle_in_transaction_session_timeout"] = "0"
 	connConfig.Config.RuntimeParams["statement_timeout"] = "0"
 	connConfig.Config.RuntimeParams["DateStyle"] = "ISO, DMY"
+	// interval text (a destination's text[] for INTERVAL[], a source's text-format values) in the postgres style,
+	// whatever the role defaults to
+	connConfig.Config.RuntimeParams["IntervalStyle"] = "postgres"
 	// Required for QueryExecModeSimpleProtocol, which is set in some places while querying;
 	// pgx refuses simple protocol when the server reports standard_conforming_strings=off.
 	connConfig.Config.RuntimeParams["standard_conforming_strings"] = "on"
