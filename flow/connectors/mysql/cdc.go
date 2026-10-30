@@ -920,11 +920,11 @@ func (c *MySqlConnector) PullRecords(
 								continue
 							}
 							val, err := QValueFromMysqlRowEvent(ev.Table, idx, enumMap[idx], setMap[idx],
-								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported)
+								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, req.InternalVersion)
 							if err != nil {
 								return err
 							}
-							items.AddColumn(fd.Name, val)
+							items.AddColumn(fd.Name, notNullBinary(val, !fd.Nullable))
 						}
 						if sourceSchemaAsDestinationColumn {
 							items.AddColumn("_peerdb_source_schema", types.QValueString{Val: string(ev.Table.Schema)})
@@ -957,11 +957,11 @@ func (c *MySqlConnector) PullRecords(
 								continue
 							}
 							val, err := QValueFromMysqlRowEvent(ev.Table, idx, enumMap[idx], setMap[idx],
-								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported)
+								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, req.InternalVersion)
 							if err != nil {
 								return err
 							}
-							oldItems.AddColumn(fd.Name, val)
+							oldItems.AddColumn(fd.Name, notNullBinary(val, !fd.Nullable))
 						}
 						newRow := ev.Rows[idx+1]
 						newItems := model.NewRecordItems(len(newRow))
@@ -971,11 +971,11 @@ func (c *MySqlConnector) PullRecords(
 								continue
 							}
 							val, err := QValueFromMysqlRowEvent(ev.Table, idx, enumMap[idx], setMap[idx],
-								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported)
+								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, req.InternalVersion)
 							if err != nil {
 								return err
 							}
-							newItems.AddColumn(fd.Name, val)
+							newItems.AddColumn(fd.Name, notNullBinary(val, !fd.Nullable))
 						}
 						if sourceSchemaAsDestinationColumn {
 							newItems.AddColumn("_peerdb_source_schema", types.QValueString{Val: string(ev.Table.Schema)})
@@ -1009,11 +1009,11 @@ func (c *MySqlConnector) PullRecords(
 								continue
 							}
 							val, err := QValueFromMysqlRowEvent(ev.Table, idx, enumMap[idx], setMap[idx],
-								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported)
+								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, req.InternalVersion)
 							if err != nil {
 								return err
 							}
-							items.AddColumn(fd.Name, val)
+							items.AddColumn(fd.Name, notNullBinary(val, !fd.Nullable))
 						}
 						if sourceSchemaAsDestinationColumn {
 							items.AddColumn("_peerdb_source_schema", types.QValueString{Val: string(ev.Table.Schema)})

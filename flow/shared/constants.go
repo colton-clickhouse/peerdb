@@ -45,6 +45,9 @@ const (
 	// inserting into ClickHouse. Otherwise inference is indeterministic depending on initial
 	// input data, and can silently corrupts out-of-range values (e,g, pre-1970 date becomes 1970-01-01).
 	InternalVersion_AlwaysUseDateTime64Inference
+	// MySQL: empty (non-NULL) binary values (BLOB, VARBINARY, CHARACTER SET binary strings) replicated
+	// as empty bytes instead of NULL. Older mirrors emit a nil slice for them, which sinks write as NULL.
+	InternalVersion_MySQLEmptyBinaryAsEmpty
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
