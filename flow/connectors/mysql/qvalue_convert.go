@@ -150,7 +150,8 @@ func QRecordSchemaFromMysqlFields(tableSchema *protos.TableSchema, fields []*mys
 }
 
 // MySQL's internal geometry format is 4-byte SRID (little-endian) followed by standard WKB.
-// SRID is stripped because destinations like ClickHouse don't support EWKT (SRID=N;WKT).
+// The SRID isn't put in the WKT because destinations like ClickHouse don't support EWKT (SRID=N;WKT);
+// it's kept beside it for destinations that do (Postgres).
 func processGeometryData(data []byte) (types.QValueGeometry, error) {
 	if len(data) == 0 {
 		// MariaDB and MySQL 5.X store a zero-length value when a NOT NULL geometry column is filled
@@ -165,7 +166,7 @@ func processGeometryData(data []byte) (types.QValueGeometry, error) {
 	if err != nil {
 		return types.QValueGeometry{}, exceptions.NewMySQLGeometryParseError(err)
 	}
-	return types.QValueGeometry{Val: g.ToWKT()}, nil
+	return types.QValueGeometry{Val: g.ToWKT(), SRID: binary.LittleEndian.Uint32(data[:4])}, nil
 }
 
 // https://dev.mysql.com/doc/refman/8.4/en/time.html

@@ -570,6 +570,9 @@ func (v QValueGeography) LValue(ls *lua.LState) lua.LValue {
 
 type QValueGeometry struct {
 	Val string
+	// SRID beside a plain WKT Val (MySQL, whose SRID ClickHouse can't take as EWKT); 0 when none or in Val.
+	// MySQL SRIDs are unsigned 32-bit.
+	SRID uint32
 }
 
 func (QValueGeometry) Kind() QValueKind {

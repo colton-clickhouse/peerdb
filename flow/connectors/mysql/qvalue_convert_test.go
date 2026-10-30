@@ -220,7 +220,13 @@ func TestProcessGeometryData(t *testing.T) {
 	}
 	qv, err = processGeometryData(point)
 	require.NoError(t, err)
-	require.Equal(t, "POINT (1 2)", qv.Val)
+	require.Equal(t, types.QValueGeometry{Val: "POINT (1 2)"}, qv)
+
+	// the SRID stays out of the WKT (ClickHouse) and is kept beside it
+	copy(point, []byte{0x11, 0x0f, 0, 0}) // SRID 3857
+	qv, err = processGeometryData(point)
+	require.NoError(t, err)
+	require.Equal(t, types.QValueGeometry{Val: "POINT (1 2)", SRID: 3857}, qv)
 }
 
 // NULL stays NULL; an empty NOT NULL binary value is empty on every version, since NULL can't come from the source
