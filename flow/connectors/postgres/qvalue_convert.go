@@ -492,7 +492,14 @@ func (c *PostgresConnector) parseFieldFromPostgresOID(
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse time: %w", err)
 		}
-		return types.QValueTimeTZ{Val: t.UTC().Sub(shared.Year0000)}, nil
+		d := t.UTC().Sub(shared.Year0000)
+		if dstType == protos.DBType_POSTGRES {
+			// the UTC time of day can fall on another day (01:00+05 is -4h, 23:30-05 is 28:30), which a timetz
+			// doesn't take: wrap it into the day, the same instant of day in UTC. Other destinations keep the value
+			// as before.
+			d = (d%(24*time.Hour) + 24*time.Hour) % (24 * time.Hour)
+		}
+		return types.QValueTimeTZ{Val: d}, nil
 	case types.QValueKindBoolean:
 		boolVal := value.(bool)
 		return types.QValueBoolean{Val: boolVal}, nil
