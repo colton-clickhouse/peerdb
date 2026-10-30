@@ -152,6 +152,23 @@ func crdbOIDToQValueKind(oid uint32) types.QValueKind {
 	}
 }
 
+// pgValues are the conversions a Postgres destination gets from the mirror's internal version: values other
+// destinations can't hold, so they keep the older fallbacks. The snapshot and changefeed paths share them.
+type pgValues struct {
+	// specialValues marks NaN and infinity values (InternalVersion_PgSpecialValues)
+	specialValues bool
+	// time2400 keeps TIME '24:00:00' instead of clamping it to 23:59:59.999999 (InternalVersion_PgTime2400)
+	time2400 bool
+}
+
+func newPgValues(version uint32, dstType protos.DBType) pgValues {
+	pg := dstType == protos.DBType_POSTGRES
+	return pgValues{
+		specialValues: pg && version >= shared.InternalVersion_PgSpecialValues,
+		time2400:      pg && version >= shared.InternalVersion_PgTime2400,
+	}
+}
+
 // qvalueFromCrdbValue converts a value decoded by pgx into the QValue matching field.Type.
 func qvalueFromCrdbValue(
 	field types.QField,
@@ -159,7 +176,7 @@ func qvalueFromCrdbValue(
 	oid uint32,
 	typeMap *pgtype.Map,
 	value any,
-	special bool,
+	pg pgValues,
 ) (types.QValue, error) {
 	if value == nil {
 		return types.QValueNull(field.Type), nil
@@ -199,7 +216,7 @@ func qvalueFromCrdbValue(
 		if v, ok := value.(pgtype.Numeric); ok {
 			num, valid := numericToDecimal(v)
 			if !valid {
-				if sv := numericSpecial(v, field.Precision); special && sv != types.SpecialNone {
+				if sv := numericSpecial(v, field.Precision); pg.specialValues && sv != types.SpecialNone {
 					return types.QValueNumeric{Precision: field.Precision, Scale: field.Scale, Special: sv}, nil
 				}
 				if field.Nullable {
@@ -232,7 +249,7 @@ func qvalueFromCrdbValue(
 		case time.Time:
 			return types.QValueTimestamp{Val: v}, nil
 		case pgtype.InfinityModifier:
-			if special {
+			if pg.specialValues {
 				return types.QValueTimestamp{Special: infinitySpecial(v)}, nil
 			}
 			if field.Nullable {
@@ -245,7 +262,7 @@ func qvalueFromCrdbValue(
 		case time.Time:
 			return types.QValueTimestampTZ{Val: v}, nil
 		case pgtype.InfinityModifier:
-			if special {
+			if pg.specialValues {
 				return types.QValueTimestampTZ{Special: infinitySpecial(v)}, nil
 			}
 			if field.Nullable {
@@ -258,7 +275,7 @@ func qvalueFromCrdbValue(
 		case time.Time:
 			return types.QValueDate{Val: v}, nil
 		case pgtype.InfinityModifier:
-			if special {
+			if pg.specialValues {
 				return types.QValueDate{Special: infinitySpecial(v)}, nil
 			}
 			if field.Nullable {
@@ -274,9 +291,11 @@ func qvalueFromCrdbValue(
 				}
 				return types.QValueTime{}, nil
 			}
-			// CockroachDB permits TIME '24:00:00'; clamp it into the day like
-			// the changefeed path so both deliver the same value
-			return types.QValueTime{Val: time.Duration(min(v.Microseconds, maxTimeMicroseconds)) * time.Microsecond}, nil
+			// CockroachDB permits TIME '24:00:00', which only Postgres can hold
+			if !pg.time2400 {
+				v.Microseconds = min(v.Microseconds, maxTimeMicroseconds)
+			}
+			return types.QValueTime{Val: time.Duration(v.Microseconds) * time.Microsecond}, nil
 		}
 	case types.QValueKindTimeTZ:
 		if v, ok := value.(string); ok {
@@ -357,7 +376,7 @@ func qvalueFromCrdbValue(
 			return nil, err
 		}
 		var specials []types.SpecialValue
-		if elems, ok := value.([]any); ok && special {
+		if elems, ok := value.([]any); ok && pg.specialValues {
 			// pgx decodes infinity elements as pgtype.InfinityModifier, which convertToArray left as zero times
 			specials = make([]types.SpecialValue, len(elems))
 			for i, el := range elems {
@@ -385,7 +404,7 @@ func qvalueFromCrdbValue(
 		if v, ok := value.([]any); ok {
 			numArr := make([]decimal.Decimal, 0, len(v))
 			var specials []types.SpecialValue
-			if special {
+			if pg.specialValues {
 				specials = make([]types.SpecialValue, len(v))
 			}
 			for i, anyVal := range v {
@@ -400,7 +419,7 @@ func qvalueFromCrdbValue(
 				num, valid := numericToDecimal(numVal)
 				if !valid {
 					num = decimal.Decimal{}
-					if special {
+					if pg.specialValues {
 						specials[i] = numericSpecial(numVal, field.Precision)
 					}
 				}
@@ -571,7 +590,7 @@ func parseUUIDArray(value any) ([]uuid.UUID, error) {
 }
 
 // maxTimeMicroseconds is 23:59:59.999999, the clamp target for CockroachDB's
-// legal TIME '24:00:00' extreme, shared by the snapshot and changefeed paths.
+// legal TIME '24:00:00' extreme without pgValues.time2400, shared by the snapshot and changefeed paths.
 const maxTimeMicroseconds = 24*3600*1000000 - 1
 
 // inetPrefixText renders an INET value decoded by pgx with host addresses bare ("192.168.1.5", not the

@@ -28,7 +28,7 @@ func TestQValueFromCrdbValueSpecialValues(t *testing.T) {
 	five := pgtype.Numeric{Int: big.NewInt(5), Valid: true}
 	convert := func(field types.QField, value any, special bool) types.QValue {
 		t.Helper()
-		qv, err := qvalueFromCrdbValue(field, protos.DBType_POSTGRES, 0, typeMap, value, special)
+		qv, err := qvalueFromCrdbValue(field, protos.DBType_POSTGRES, 0, typeMap, value, pgValues{specialValues: special})
 		require.NoError(t, err)
 		return qv
 	}
@@ -71,7 +71,7 @@ func TestQValueFromCrdbValueSpecialValues(t *testing.T) {
 func TestQValueFromChangefeedJSONSpecialValues(t *testing.T) {
 	convert := func(field types.QField, raw string, special bool) types.QValue {
 		t.Helper()
-		qv, err := qvalueFromChangefeedJSON(field, json.RawMessage(raw), special)
+		qv, err := qvalueFromChangefeedJSON(field, json.RawMessage(raw), pgValues{specialValues: special})
 		require.NoError(t, err)
 		return qv
 	}
@@ -112,6 +112,6 @@ func TestQValueFromChangefeedJSONSpecialValues(t *testing.T) {
 	require.Nil(t, plain.(types.QValueArrayTimestamp).Specials)
 
 	// older mirrors: an infinity date still fails to parse, as before
-	_, err := qvalueFromChangefeedJSON(specialField(types.QValueKindDate, 0, true), json.RawMessage(`"infinity"`), false)
+	_, err := qvalueFromChangefeedJSON(specialField(types.QValueKindDate, 0, true), json.RawMessage(`"infinity"`), pgValues{})
 	require.Error(t, err)
 }

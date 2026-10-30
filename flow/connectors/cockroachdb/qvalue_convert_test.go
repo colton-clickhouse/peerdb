@@ -315,7 +315,7 @@ func TestQValueFromCrdbValue(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			qv, err := qvalueFromCrdbValue(tc.field, protos.DBType_CLICKHOUSE, tc.oid, typeMap, tc.value, false)
+			qv, err := qvalueFromCrdbValue(tc.field, protos.DBType_CLICKHOUSE, tc.oid, typeMap, tc.value, pgValues{})
 			require.NoError(t, err)
 			require.Equal(t, tc.expected, qv)
 		})
@@ -326,7 +326,7 @@ func TestQValueFromCrdbValueErrors(t *testing.T) {
 	typeMap := pgtype.NewMap()
 	field := types.QField{Name: "f", Type: types.QValueKindInt64, Nullable: false}
 
-	_, err := qvalueFromCrdbValue(field, protos.DBType_CLICKHOUSE, 0, typeMap, "not an int", false)
+	_, err := qvalueFromCrdbValue(field, protos.DBType_CLICKHOUSE, 0, typeMap, "not an int", pgValues{})
 	require.Error(t, err)
 }
 
