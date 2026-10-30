@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/PeerDB-io/peerdb/flow/connectors"
 	connpostgres "github.com/PeerDB-io/peerdb/flow/connectors/postgres"
@@ -805,27 +804,7 @@ func (s CRDBPGSuite) Test_Column_Families_Stalls_Mirror() {
 
 	client, err := NewApiClient()
 	require.NoError(t, err)
-	// the setting is global for the stack and the API can't unset it: restore its previous value
-	const setting = "PEERDB_STALLED_THRESHOLD_MINUTES"
-	settings, err := client.GetDynamicSettings(t.Context(), &protos.GetDynamicSettingsRequest{})
-	require.NoError(t, err)
-	previous := ""
-	for _, ds := range settings.Settings {
-		if ds.Name == setting {
-			previous = ds.GetValue()
-			if previous == "" {
-				previous = ds.DefaultValue
-			}
-		}
-	}
-	require.NotEmpty(t, previous, setting)
-	setThreshold := func(ctx context.Context, minutes string) error {
-		_, err := client.PostDynamicSetting(ctx, &protos.PostDynamicSettingRequest{Name: setting, Value: proto.String(minutes)})
-		return err
-	}
-	require.NoError(t, setThreshold(t.Context(), "1"))
-	// t.Context() is already canceled when cleanups run
-	t.Cleanup(func() { require.NoError(t, setThreshold(context.Background(), previous)) })
+	SetDynamicSetting(t, "PEERDB_STALLED_THRESHOLD_MINUTES", "1")
 
 	flowConnConfig := s.startMirror(srcTable)
 	tc := NewTemporalClient(t)
