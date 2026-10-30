@@ -52,6 +52,13 @@ const (
 	// insert of the new one. Older mirrors emit an update, which normalize applies by the new key only,
 	// leaving the old row behind.
 	InternalVersion_MySQLPKeyChangeAsDeleteInsert
+	// Postgres: unsigned integers created wide enough for their range (UInt16 -> INTEGER, UInt32 -> BIGINT).
+	// UInt64 stays BIGINT: NUMERIC(20,0) is lossless but can't be an identity column, so it's the user's
+	// choice (pre-create or alter the target column), which InternalVersion_PgNormalizeCastToTargetTypes honours.
+	InternalVersion_PgWidenUnsignedInts
+	// Postgres: normalize casts values to the target columns' own types instead of PeerDB's mapped types, so
+	// columns widened or pre-created by the user hold through CDC, as they already do for the snapshot.
+	InternalVersion_PgNormalizeCastToTargetTypes
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1

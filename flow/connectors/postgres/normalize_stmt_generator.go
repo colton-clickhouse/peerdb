@@ -30,13 +30,31 @@ type normalizeStmtGenerator struct {
 	metadataSchema string
 	// Postgres version 15 introduced MERGE, fallback statements before that
 	supportsMerge bool
+	// the mirror's internal version
+	version uint32
+	// destination table -> column -> the target column's type without modifiers, read per batch from
+	// InternalVersion_PgNormalizeCastToTargetTypes on
+	targetColumnTypes map[string]map[string]string
 }
 
-func (n *normalizeStmtGenerator) columnTypeToPg(schema *protos.TableSchema, column *protos.FieldDescription) string {
+func (n *normalizeStmtGenerator) columnTypeToPg(
+	dstTableName string, schema *protos.TableSchema, column *protos.FieldDescription,
+) string {
 	var pgType string
 	switch schema.System {
 	case protos.TypeSystem_Q:
-		pgType = qValueKindToPostgresType(column.Type)
+		// cast to the target column's own type, so columns widened or pre-created by the user hold through
+		// CDC as they do for the snapshot COPY; the modifier is left to assignment (an explicit cast to
+		// varchar(n) or char(n) would truncate silently)
+		if targetType, ok := n.targetColumnTypes[dstTableName][column.Name]; ok {
+			pgType = targetType
+			kindType := qValueKindToPostgresType(column.Type, n.version)
+			if castThroughKindType(types.QValueKind(column.Type), targetType) && !strings.EqualFold(kindType, targetType) {
+				pgType = kindType + "::" + targetType
+			}
+		} else {
+			pgType = qValueKindToPostgresType(column.Type, n.version)
+		}
 	case protos.TypeSystem_PG:
 		pgType = column.Type
 		// Add schema qualification for user-defined types
@@ -54,6 +72,34 @@ func (n *normalizeStmtGenerator) columnTypeToPg(schema *protos.TableSchema, colu
 	return pgType
 }
 
+// castThroughKindType reports whether a value of kind goes through PeerDB's own Postgres type for it on the way
+// to a target column of another type, as by assignment before casts followed the target, instead of being cast
+// from its JSON text directly:
+//   - floats: read as real or double precision, as the snapshot COPY writes them, then converted (a float's text
+//     isn't integer input, and a float32's shortest text isn't the value the snapshot stores in a double column)
+//   - numeric into integers: decimal text ('5.00') isn't integer input; numeric rounds
+//   - arrays: the elements arrive as text[], which has no cast to most targets (pgvector's vector from REAL[],
+//     integer[] from DOUBLE PRECISION[])
+//
+// Everything else is cast directly, since PeerDB's own type can be narrower than the value: TIME as time can't
+// hold -838:59:59, which an interval target can, and BIGINT UNSIGNED as bigint can't hold 2^64-1, which a
+// numeric target can.
+func castThroughKindType(kind types.QValueKind, targetType string) bool {
+	if kind.IsArray() {
+		return true
+	}
+	switch kind {
+	case types.QValueKindFloat32, types.QValueKindFloat64:
+		return true
+	case types.QValueKindNumeric:
+		switch targetType {
+		case "smallint", "integer", "bigint":
+			return true
+		}
+	}
+	return false
+}
+
 func (n *normalizeStmtGenerator) generateExpr(
 	normalizedTableSchema *protos.TableSchema,
 	genericColumnType string,
@@ -66,6 +112,14 @@ func (n *normalizeStmtGenerator) generateExpr(
 			return fmt.Sprintf("ARRAY(SELECT JSON_ARRAY_ELEMENTS_TEXT((_peerdb_data->>%s)::JSON))::%s", stringCol, pgType)
 		} else if qkind == types.QValueKindBytes {
 			return fmt.Sprintf("decode(_peerdb_data->>%s, 'base64')::%s", stringCol, pgType)
+		} else if pgType == "bytea" {
+			// into a bytea target: text::bytea would read backslash escapes ('\x41' is the byte 'A')
+			switch qkind {
+			case types.QValueKindString, types.QValueKindEnum, types.QValueKindJSON:
+				return fmt.Sprintf("convert_to(_peerdb_data->>%s, 'UTF8')", stringCol)
+			case types.QValueKindUUID:
+				return fmt.Sprintf("uuid_send((_peerdb_data->>%s)::uuid)", stringCol)
+			}
 		}
 	}
 	return fmt.Sprintf("(_peerdb_data->>%s)::%s", stringCol, pgType)
@@ -99,7 +153,7 @@ func (n *normalizeStmtGenerator) generateFallbackStatements(
 		quotedCol := common.QuoteIdentifier(column.Name)
 		stringCol := utils.QuoteLiteral(column.Name)
 		columnNames = append(columnNames, quotedCol)
-		pgType := n.columnTypeToPg(normalizedTableSchema, column)
+		pgType := n.columnTypeToPg(dstTableName, normalizedTableSchema, column)
 		expr := n.generateExpr(normalizedTableSchema, genericColumnType, stringCol, pgType)
 
 		flattenedCastsSQLArray = append(flattenedCastsSQLArray, fmt.Sprintf("%s AS %s", expr, quotedCol))
@@ -171,7 +225,7 @@ func (n *normalizeStmtGenerator) generateMergeStatement(
 		quotedCol := common.QuoteIdentifier(column.Name)
 		stringCol := utils.QuoteLiteral(column.Name)
 		quotedColumnNames[i] = quotedCol
-		pgType := n.columnTypeToPg(normalizedTableSchema, column)
+		pgType := n.columnTypeToPg(dstTableName, normalizedTableSchema, column)
 
 		if useJsonbToRecord {
 			// json/jsonb columns are stored as stringified text inside _peerdb_data,
