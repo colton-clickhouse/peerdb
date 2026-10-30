@@ -9,6 +9,7 @@ package e2e
 // helpers treat NULL / empty values as equal and decode the source with the snapshot's own code.
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"strconv"
@@ -612,7 +613,7 @@ func (s CRDBPGSuite) Test_Column_Families_Warns_No_Progress() {
 // array element type, each [v, NULL, v], through the snapshot (id 1), a CDC insert (id 101) and a CDC update (id 1).
 func (s CRDBPGSuite) Test_Array_Null_Elements() {
 	if bad := s.arrayNullElementProblems("array_null_elems", shared.InternalVersion_Latest); len(bad) > 0 {
-		s.t.Errorf("%d array columns lost their NULL element:\n  %s", len(bad), strings.Join(bad, "\n  "))
+		s.t.Errorf("%d array columns lost their NULL element or a value:\n  %s", len(bad), strings.Join(bad, "\n  "))
 	}
 }
 
@@ -631,6 +632,8 @@ var arrayNullElementColumns = []struct{ name, typ, elem string }{
 	{"c_i2", "INT2[]", "1"}, {"c_i4", "INT4[]", "1"}, {"c_i8", "INT8[]", "1"},
 	{"c_f4", "FLOAT4[]", "1.5"}, {"c_f8", "FLOAT8[]", "1.5"}, {"c_dec", "DECIMAL[]", "1.5"},
 	{"c_bool", "BOOL[]", "true"}, {"c_text", "STRING[]", "'a'"},
+	// elements that array text has to quote, one of them spelled like the NULL next to it
+	{"c_text_null", "STRING[]", "'NULL'"}, {"c_text_space", "STRING[]", "'in progress'"}, {"c_text_comma", "STRING[]", "'a,b'"},
 	{"c_uuid", "UUID[]", "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'"},
 	{"c_date", "DATE[]", "'2026-01-02'"}, {"c_ts", "TIMESTAMP[]", "'2026-01-02 03:04:05'"},
 	{"c_tstz", "TIMESTAMPTZ[]", "'2026-01-02 03:04:05+00'"}, {"c_iv", "INTERVAL[]", "'1h'"},
@@ -638,8 +641,12 @@ var arrayNullElementColumns = []struct{ name, typ, elem string }{
 	{"c_enum", "{mood}[]", "'ok'"}, // pgx doesn't know enum types: their arrays arrive as text
 }
 
+// arrayNullElementDestination is the element on the destination where it isn't the source's: PeerDB creates INTERVAL[]
+// as text[] holding its interval JSON.
+var arrayNullElementDestination = map[string]string{"c_iv": `'{"hours":1,"valid":true}'`}
+
 // arrayNullElementProblems replicates [v, NULL, v] arrays of every element type on a mirror of the given version and
-// returns "<id> <column>: <value>" for each destination array that doesn't have exactly its second element NULL.
+// returns "<id> <column>: <value>" for each destination array that isn't [v, NULL, v] with the source's v.
 func (s CRDBPGSuite) arrayNullElementProblems(srcTable string, version uint32) []string {
 	t := s.t
 	srcFull := AttachSchema(s, srcTable)
@@ -682,8 +689,8 @@ func (s CRDBPGSuite) arrayNullElementProblems(srcTable string, version uint32) [
 	for _, id := range []int{1, 2, 101} {
 		for _, c := range arrayNullElementColumns {
 			ok, err := s.destBool(fmt.Sprintf(
-				`SELECT cardinality(%[1]s) = 3 AND %[1]s[1] IS NOT NULL AND %[1]s[2] IS NULL AND %[1]s[3] IS NOT NULL
-				FROM %[2]s WHERE id = %[3]d`, c.name, dstFull, id))
+				`SELECT cardinality(%[1]s) = 3 AND %[1]s[1] = %[4]s AND %[1]s[2] IS NULL AND %[1]s[3] = %[4]s
+				FROM %[2]s WHERE id = %[3]d`, c.name, dstFull, id, cmp.Or(arrayNullElementDestination[c.name], c.elem)))
 			if err != nil || !ok {
 				bad = append(bad, fmt.Sprintf("%d %s: %s (%v)", id, c.name,
 					s.destText(fmt.Sprintf(`SELECT %s::text FROM %s WHERE id = %d`, c.name, dstFull, id)), err))
