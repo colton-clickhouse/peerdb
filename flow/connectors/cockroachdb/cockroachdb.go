@@ -123,6 +123,10 @@ func NewCockroachDBConnector(ctx context.Context, env map[string]string, config 
 // classifyConnectError wraps authentication and privilege failures in
 // exceptions.AuthError like the postgres connector does, so drop flow skips
 // source cleanup instead of hammering a peer whose credentials were rotated.
+//
+// A re-dial during a node failure can get 28000 too, when the node it reaches can't check the credentials yet: that
+// is an AuthError as well, which the classifier files under NOTIFY_CONNECTIVITY, not a class that marks the mirror
+// STALLED, so a transient one doesn't stall it.
 func classifyConnectError(err error) error {
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
 		switch pgErr.Code {
@@ -185,7 +189,7 @@ func (c *CockroachDBConnector) ensureConn(ctx context.Context) error {
 		}
 	}
 	if ctx.Err() != nil {
-		return pingErr
+		return errors.Join(ctx.Err(), pingErr)
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, connDialTimeout)
 	defer cancel()

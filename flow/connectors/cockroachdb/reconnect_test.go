@@ -13,12 +13,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
 	"github.com/PeerDB-io/peerdb/flow/internal"
 	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
+	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
 func crdbForReconnectTests(t *testing.T, config *protos.CockroachDBConfig) *CockroachDBConnector {
@@ -139,7 +139,7 @@ func TestConnectorReconnectsDeadConnection(t *testing.T) {
 			var n int
 			err := killer.conn.QueryRow(t.Context(),
 				"SELECT count(*) FROM [SHOW CLUSTER SESSIONS] WHERE session_id = $1", session).Scan(&n)
-			return assert.NoError(t, err) && n == 0
+			return err == nil && n == 0
 		}, 10*time.Second, 100*time.Millisecond, "the server ended the session")
 		require.False(t, old.conn.IsClosed(), "the client hasn't noticed yet")
 
@@ -180,7 +180,31 @@ func TestConnectorReconnectsDeadConnection(t *testing.T) {
 		require.NoError(t, old.Close(t.Context()))
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
-		require.Error(t, c.ConnectionActive(ctx))
+		err := c.ConnectionActive(ctx)
+		require.ErrorIs(t, err, context.Canceled)
 		require.Same(t, old, c.conn, "no reconnect for a canceled caller")
+	})
+
+	// a connection in the middle of a query answers a ping with "conn busy": it is alive, so it's kept
+	t.Run("busy", func(t *testing.T) {
+		c := crdbForReconnectTests(t, nil)
+		old := c.conn
+		rows, err := c.conn.Query(t.Context(), "SELECT generate_series(1, 1000)")
+		require.NoError(t, err)
+		require.NoError(t, c.ensureConn(t.Context()))
+		require.Same(t, old, c.conn, "a busy connection is kept")
+		rows.Close()
+	})
+
+	// the changefeed's key read at the start of every pull reconnects too
+	t.Run("source keys", func(t *testing.T) {
+		c := crdbForReconnectTests(t, nil)
+		old := c.conn
+		require.NoError(t, old.Close(t.Context()))
+		state := &changefeedPullState{schemas: map[string]*changefeedTableSchema{
+			table: {primaryKeys: []string{"id"}, fields: map[string]types.QField{"id": {Name: "id"}}},
+		}}
+		require.NoError(t, c.loadSourceKeys(t.Context(), state))
+		require.NotSame(t, old, c.conn, "a new connection")
 	})
 }
