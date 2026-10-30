@@ -20,6 +20,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/otel_metrics"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared"
+	"github.com/PeerDB-io/peerdb/flow/shared/datatypes"
 	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
@@ -912,6 +913,16 @@ func (c *CockroachDBConnector) emitSchemaDelta(
 			Precision: precision,
 			Scale:     scale,
 			Nullable:  col.Nullable,
+		}
+		// a constrained geometry's SRID, as the schema read at the next pull would give it: without it, rows until
+		// then would get none and rows after it the column's, two SRIDs in one column
+		if kind := types.QValueKind(col.Type); kind == types.QValueKindGeometry || kind == types.QValueKindGeography {
+			if srid := datatypes.GeoTypmodSRID(col.TypeModifier); srid != 0 {
+				if schema.geoSRIDs == nil {
+					schema.geoSRIDs = make(map[string]int)
+				}
+				schema.geoSRIDs[colName] = srid
+			}
 		}
 	}
 	if len(delta.AddedColumns) > 0 {
