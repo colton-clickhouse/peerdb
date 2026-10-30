@@ -57,3 +57,41 @@ func (s CRDBPGSuite) Test_Constrained_Geo_Snapshot_And_CDC() {
 			ST_AsEWKT(pz), ST_AsEWKT(anyg), ST_AsEWKT(gl)) FROM %s WHERE id = %d`, dstFull, id)), "id %d", id)
 	}
 }
+
+// Unconstrained geometry / geography values with an SRID: changefeed GeoJSON carries none, so CDC writes geometry
+// without an SRID and geography as 4326. The snapshot must write the same, or one column holds values in several SRIDs
+// (which PostGIS refuses to combine) and a CDC update changes a snapshot row's SRID. Row 1 is checked as the snapshot
+// wrote it, before any CDC, then after a CDC update; row 2 comes from a CDC insert.
+func (s CRDBPGSuite) Test_Unconstrained_Geo_SRID_Same_On_Both_Paths() {
+	t := s.t
+	srcTable := "unconstrained_geo"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+	const values = `'SRID=4326;POINT(1 2)', 'SRID=4269;POINT(1 2)'`
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+		`CREATE TABLE %s (id INT8 PRIMARY KEY, v INT8, g GEOMETRY, gg GEOGRAPHY)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 0, %s)`, srcFull, values)))
+
+	flowConnConfig := s.startMirror(srcTable)
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	srids := func(id int) string {
+		return s.destText(fmt.Sprintf(`SELECT concat_ws('|', ST_SRID(g), ST_SRID(gg::geometry), ST_AsText(g), ST_AsText(gg))
+			FROM %s WHERE id = %d`, dstFull, id))
+	}
+	const want = "0|4326|POINT(1 2)|POINT(1 2)"
+	EnvWaitFor(t, env, 3*time.Minute, "snapshot row", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 1
+	})
+	require.Equal(t, want, srids(1), "snapshot row")
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (2, 0, %s)`, srcFull, values)))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET v = 1 WHERE id = 1`, srcFull)))
+	EnvWaitFor(t, env, 3*time.Minute, "cdc rows", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id = 2 OR (id = 1 AND v = 1)`, dstFull)) == 2
+	})
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+	require.Equal(t, want, srids(1), "row 1 after a CDC update")
+	require.Equal(t, want, srids(2), "CDC insert")
+}
