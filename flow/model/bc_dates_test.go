@@ -52,3 +52,14 @@ func TestToJSONPgBCDatesOff(t *testing.T) {
 	_, err = items.ToJSONWithOptions(ToJSONOptions{})
 	require.ErrorContains(t, err, "year outside of range")
 }
+
+// time.Time can't marshal a year after 9999 to JSON either: such an array element failed the whole sync
+func TestTimestampArrayAfterYear9999(t *testing.T) {
+	items := NewRecordItems(1)
+	items.AddColumn("a", types.QValueArrayTimestamp{Val: []time.Time{
+		time.Date(10000, 1, 2, 3, 4, 5, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC),
+	}})
+	out, err := items.ToJSONWithOptions(ToJSONOptions{PgBCDates: true})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"a":["10000-01-02 03:04:05","2024-01-02 00:00:00"]}`, out)
+}
