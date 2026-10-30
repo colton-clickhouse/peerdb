@@ -352,6 +352,7 @@ func (c *CockroachDBConnector) PullRecords(
 		if schema, ok := req.TableNameSchemaMapping[target.Name]; ok {
 			state.schemas[source] = newChangefeedTableSchema(schema, target.Exclude)
 			state.schemas[source].arrayNullElements = req.InternalVersion >= shared.InternalVersion_ArrayNullElements
+			state.schemas[source].omitInternal = req.InternalVersion >= shared.InternalVersion_CockroachOmitInternalColumns
 			state.schemas[source].pg = newPgValues(req.InternalVersion, req.DestinationType)
 		}
 	}
