@@ -176,10 +176,19 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		return nil, err
 	}
 
+	var fields []types.QField
+	if src.noNumericInfinity && src.stream.IsSchemaSet() {
+		schema, err := src.stream.Schema()
+		if err != nil {
+			return nil, err
+		}
+		fields = schema.Fields
+	}
 	values := make([]any, len(src.currentRecord))
 	for i, qValue := range src.currentRecord {
 		if src.noNumericInfinity {
-			qValue = WithoutNumericInfinity(qValue)
+			// a column the schema doesn't describe is taken as nullable, the more common case
+			qValue = WithoutNumericInfinity(qValue, i >= len(fields) || fields[i].Nullable)
 		}
 		if qValue == nil || qValue.Value() == nil {
 			values[i] = nil

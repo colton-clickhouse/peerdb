@@ -184,11 +184,12 @@ type NormalizeQueryCDCRequest struct {
 type ToJSONOptions struct {
 	UnnestColumns        map[string]struct{}
 	HStoreAsJSON         bool
-	ClearValuesOverBytes int  // 0 means preserve values
-	StripNulBytes        bool // drop U+0000 from strings (PG destinations can't store it)
-	ArrayNullElements    bool // write marked NULL array elements (types.ArrayNulls) as JSON null
-	NonFiniteFloats      bool // write NaN and +-Inf floats as their Postgres input text instead of JSON null
-	NoNumericInfinity    bool // write numeric +-Infinity as null (WithoutNumericInfinity), for Postgres before 14
+	ClearValuesOverBytes int                 // 0 means preserve values
+	StripNulBytes        bool                // drop U+0000 from strings (PG destinations can't store it)
+	ArrayNullElements    bool                // write marked NULL array elements (types.ArrayNulls) as JSON null
+	NonFiniteFloats      bool                // write NaN and +-Inf floats as their Postgres input text instead of JSON null
+	NoNumericInfinity    bool                // write numeric +-Infinity as null (WithoutNumericInfinity), for Postgres before 14
+	NotNullColumns       map[string]struct{} // with NoNumericInfinity: columns that get 0 instead of null
 }
 
 func NewToJSONOptions(unnestCols []string, hstoreAsJSON bool) ToJSONOptions {

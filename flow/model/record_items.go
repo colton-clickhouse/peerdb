@@ -90,7 +90,8 @@ func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 	jsonStruct := make(map[string]any, len(r.ColToVal))
 	for col, qv := range r.ColToVal {
 		if opts.NoNumericInfinity {
-			qv = WithoutNumericInfinity(qv)
+			_, notNull := opts.NotNullColumns[col]
+			qv = WithoutNumericInfinity(qv, !notNull)
 		}
 		if qv == nil {
 			jsonStruct[col] = nil
