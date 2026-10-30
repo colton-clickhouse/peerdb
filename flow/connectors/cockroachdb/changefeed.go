@@ -20,7 +20,6 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/model"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared/datatypes"
-	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
@@ -246,13 +245,9 @@ func changefeedKeyItems(
 		return model.RecordItems{}, fmt.Errorf("changefeed key %s does not match primary key columns %v",
 			key, keyColumns)
 	}
-	for _, col := range schema.primaryKeys {
-		if !slices.Contains(keyColumns, col) {
-			// e.g. ALTER PRIMARY KEY (tenant, id) -> (id): a delete without a row image would match nothing
-			return model.RecordItems{}, exceptions.NewCockroachChangefeedIrrecoverableError("PRIMARY_KEY_CHANGED",
-				fmt.Errorf("the source key %v no longer includes %s, a key column of the destination table: the"+
-					" table's primary key changed since the mirror read its schema; resync the mirror", keyColumns, col))
-		}
+	// e.g. ALTER PRIMARY KEY (tenant, id) -> (id): a delete without a row image would match nothing
+	if err := checkSourceKey("the table", keyColumns, schema); err != nil {
+		return model.RecordItems{}, err
 	}
 	items := model.NewRecordItems(len(elems))
 	for i, col := range keyColumns {

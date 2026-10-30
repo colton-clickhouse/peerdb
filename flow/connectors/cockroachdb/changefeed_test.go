@@ -651,6 +651,26 @@ func TestChangefeedKeyItems(t *testing.T) {
 	require.ErrorAs(t, err, &irrecoverable)
 	require.Equal(t, "PRIMARY_KEY_CHANGED", irrecoverable.Code)
 
+	// reordered, (id, region) -> (region, id), and widened, (id, region) -> (id, region, name): the destination's key
+	// no longer identifies a source row, and the key's layout no longer follows it
+	for _, sourceKey := range [][]string{{"region", "id"}, {"id", "region", "name"}} {
+		widened := newChangefeedTableSchema(&protos.TableSchema{
+			PrimaryKeyColumns: []string{"id", "region"},
+			Columns: []*protos.FieldDescription{
+				{Name: "id", Type: string(types.QValueKindInt64)}, {Name: "region", Type: string(types.QValueKindString)},
+				{Name: "name", Type: string(types.QValueKindString)},
+			},
+		}, nil)
+		widened.sourceKey = sourceKey
+		key := `["us-east", 7]`
+		if len(sourceKey) == 3 {
+			key = `[7, "us-east", "x"]`
+		}
+		_, err = changefeedKeyItems([]byte(key), widened, nil)
+		require.ErrorAs(t, err, &irrecoverable, "%v", sourceKey)
+		require.Equal(t, "PRIMARY_KEY_CHANGED", irrecoverable.Code)
+	}
+
 	_, err = changefeedKeyItems([]byte(`{"id": 7}`), schema, nil)
 	require.ErrorContains(t, err, "failed to parse changefeed key")
 

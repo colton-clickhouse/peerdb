@@ -882,9 +882,35 @@ func (c *CockroachDBConnector) loadSourceKeys(ctx context.Context, state *change
 		return fmt.Errorf("failed to read source primary keys: %w", err)
 	}
 	for source, key := range keys {
-		if schema := state.schemas[source]; !slices.Equal(key, schema.primaryKeys) {
+		schema := state.schemas[source]
+		if err := checkSourceKey(source, key, schema); err != nil {
+			return err
+		}
+		if !slices.Equal(key, schema.primaryKeys) {
 			schema.sourceKey = key
 		}
 	}
 	return nil
+}
+
+// checkSourceKey fails with PRIMARY_KEY_CHANGED unless the source's primary key, without its virtual columns, is the
+// destination's key, in the same order. A changed key (a column added or removed, or the columns reordered) leaves
+// the destination keyed on columns that no longer identify a source row: upserts can merge rows, and deletes without a
+// row image are decoded from the changefeed key, whose layout follows the new key. Virtual key columns (a hash-sharded
+// key's shard column) aren't replicated, so they are the key columns the mirror's schema doesn't have.
+func checkSourceKey(source string, key []string, schema *changefeedTableSchema) error {
+	replicated := make([]string, 0, len(key))
+	for _, col := range key {
+		_, known := schema.fields[col]
+		_, excluded := schema.ignored[col]
+		if known || excluded || slices.Contains(schema.primaryKeys, col) {
+			replicated = append(replicated, col)
+		}
+	}
+	if slices.Equal(replicated, schema.primaryKeys) {
+		return nil
+	}
+	return exceptions.NewCockroachChangefeedIrrecoverableError("PRIMARY_KEY_CHANGED",
+		fmt.Errorf("the primary key of %s is now %v, but the destination is keyed on %v: the table's primary key"+
+			" changed since the mirror read its schema; resync the mirror", source, key, schema.primaryKeys))
 }
