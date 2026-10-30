@@ -89,6 +89,9 @@ func (r RecordItems) Len() int {
 func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 	jsonStruct := make(map[string]any, len(r.ColToVal))
 	for col, qv := range r.ColToVal {
+		if opts.NoNumericInfinity {
+			qv = WithoutNumericInfinity(qv)
+		}
 		if qv == nil {
 			jsonStruct[col] = nil
 			continue
@@ -158,11 +161,23 @@ func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 				jsonStruct[col] = v.Val
 			}
 		case types.QValueTimestamp:
-			jsonStruct[col] = v.Val.Format("2006-01-02 15:04:05.999999")
+			if v.Special != types.SpecialNone {
+				jsonStruct[col] = v.Special.Text()
+			} else {
+				jsonStruct[col] = v.Val.Format("2006-01-02 15:04:05.999999")
+			}
 		case types.QValueTimestampTZ:
-			jsonStruct[col] = v.Val.Format("2006-01-02 15:04:05.999999-0700")
+			if v.Special != types.SpecialNone {
+				jsonStruct[col] = v.Special.Text()
+			} else {
+				jsonStruct[col] = v.Val.Format("2006-01-02 15:04:05.999999-0700")
+			}
 		case types.QValueDate:
-			jsonStruct[col] = v.Val.Format("2006-01-02")
+			if v.Special != types.SpecialNone {
+				jsonStruct[col] = v.Special.Text()
+			} else {
+				jsonStruct[col] = v.Val.Format("2006-01-02")
+			}
 		case types.QValueTime:
 			jsonStruct[col] = types.FormatExtendedTimeDuration(v.Val)
 		case types.QValueTimeTZ:
@@ -182,7 +197,11 @@ func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 			}
 			jsonStruct[col] = formattedTimeArr
 		case types.QValueNumeric:
-			jsonStruct[col] = v.Val.String()
+			if v.Special != types.SpecialNone {
+				jsonStruct[col] = v.Special.Text()
+			} else {
+				jsonStruct[col] = v.Val.String()
+			}
 		case types.QValueArrayNumeric:
 			numericArr := v.Val
 			strArr := make([]any, 0, len(numericArr))
@@ -191,41 +210,29 @@ func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 			}
 			jsonStruct[col] = strArr
 		case types.QValueFloat64:
-			if math.IsNaN(v.Val) || math.IsInf(v.Val, 0) {
-				jsonStruct[col] = nil
-			} else {
-				jsonStruct[col] = v.Val
-			}
+			jsonStruct[col] = nonFiniteFloat(v.Val, opts)
 		case types.QValueFloat32:
-			if math.IsNaN(float64(v.Val)) || math.IsInf(float64(v.Val), 0) {
-				jsonStruct[col] = nil
-			} else {
-				jsonStruct[col] = v.Val
-			}
+			jsonStruct[col] = nonFiniteFloat(float64(v.Val), opts)
 		case types.QValueArrayFloat64:
 			floatArr := v.Val
 			nullableFloatArr := make([]any, 0, len(floatArr))
 			for _, val := range floatArr {
-				if math.IsNaN(val) || math.IsInf(val, 0) {
-					nullableFloatArr = append(nullableFloatArr, nil)
-				} else {
-					nullableFloatArr = append(nullableFloatArr, val)
-				}
+				nullableFloatArr = append(nullableFloatArr, nonFiniteFloat(val, opts))
 			}
 			jsonStruct[col] = nullableFloatArr
 		case types.QValueArrayFloat32:
 			floatArr := v.Val
 			nullableFloatArr := make([]any, 0, len(floatArr))
 			for _, val := range floatArr {
-				if math.IsNaN(float64(val)) || math.IsInf(float64(val), 0) {
-					nullableFloatArr = append(nullableFloatArr, nil)
-				} else {
-					nullableFloatArr = append(nullableFloatArr, val)
-				}
+				nullableFloatArr = append(nullableFloatArr, nonFiniteFloat(float64(val), opts))
 			}
 			jsonStruct[col] = nullableFloatArr
 		default:
 			jsonStruct[col] = v.Value()
+		}
+		// only set for destinations that store them (types.SpecialValue)
+		if specials := types.ArraySpecials(qv); specials != nil {
+			jsonStruct[col] = withSpecialElements(jsonStruct[col], specials)
 		}
 		if opts.ArrayNullElements {
 			if nulls := types.ArrayNulls(qv); nulls != nil {
@@ -235,6 +242,40 @@ func (r RecordItems) toMap(opts ToJSONOptions) (map[string]any, error) {
 	}
 
 	return jsonStruct, nil
+}
+
+// nonFiniteFloat is f for JSON: NaN and +-Inf, which JSON numbers can't express, are null, or their Postgres input
+// text with NonFiniteFloats.
+func nonFiniteFloat(f float64, opts ToJSONOptions) any {
+	switch {
+	case !math.IsNaN(f) && !math.IsInf(f, 0):
+		return f
+	case !opts.NonFiniteFloats:
+		return nil
+	case math.IsNaN(f):
+		return types.SpecialNaN.Text()
+	case f > 0:
+		return types.SpecialInfinity.Text()
+	default:
+		return types.SpecialNegInfinity.Text()
+	}
+}
+
+// withSpecialElements turns an encoded array into a []any with the special values' text where specials says so.
+func withSpecialElements(encoded any, specials []types.SpecialValue) any {
+	rv := reflect.ValueOf(encoded)
+	if rv.Kind() != reflect.Slice || rv.Len() != len(specials) {
+		return encoded
+	}
+	out := make([]any, rv.Len())
+	for i := range out {
+		if specials[i] != types.SpecialNone {
+			out[i] = specials[i].Text()
+		} else {
+			out[i] = rv.Index(i).Interface()
+		}
+	}
+	return out
 }
 
 // withNullElements turns an encoded array into a []any with nil where nulls says so, so it marshals JSON nulls.

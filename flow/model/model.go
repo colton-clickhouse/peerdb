@@ -100,6 +100,8 @@ type PullRecordsRequest[T Items] struct {
 	InternalVersion uint32
 	// IdleTimeout is the timeout to wait for new records.
 	IdleTimeout time.Duration
+	// DestinationType is the mirror's destination peer type, for values only some destinations can store.
+	DestinationType protos.DBType
 }
 
 // PullTableRecordsRequest is one table's pull request in the query-based CDC
@@ -185,6 +187,8 @@ type ToJSONOptions struct {
 	ClearValuesOverBytes int  // 0 means preserve values
 	StripNulBytes        bool // drop U+0000 from strings (PG destinations can't store it)
 	ArrayNullElements    bool // write marked NULL array elements (types.ArrayNulls) as JSON null
+	NonFiniteFloats      bool // write NaN and +-Inf floats as their Postgres input text instead of JSON null
+	NoNumericInfinity    bool // write numeric +-Infinity as null (WithoutNumericInfinity), for Postgres before 14
 }
 
 func NewToJSONOptions(unnestCols []string, hstoreAsJSON bool) ToJSONOptions {

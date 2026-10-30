@@ -96,6 +96,12 @@ func syncRecordsCore[Items model.Items](
 
 	numRecords := int64(0)
 	tableNameRowsMapping := utils.InitialiseTableRowsMap(req.TableMappings)
+	nonFiniteFloats := req.Version >= shared.InternalVersion_PgSpecialValues
+	pgVersion, err := c.MajorVersion(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get the destination's version: %w", err)
+	}
+	noNumericInfinity := pgVersion < shared.POSTGRES_14
 	streamReadFunc := func() ([]any, error) {
 		for record := range req.Records.GetRecords() {
 			var row []any
@@ -106,6 +112,8 @@ func syncRecordsCore[Items model.Items](
 					HStoreAsJSON:      false,
 					StripNulBytes:     true,
 					ArrayNullElements: true,
+					NonFiniteFloats:   nonFiniteFloats,
+					NoNumericInfinity: noNumericInfinity,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize insert record items to JSON: %w", err)
@@ -128,6 +136,8 @@ func syncRecordsCore[Items model.Items](
 					HStoreAsJSON:      false,
 					StripNulBytes:     true,
 					ArrayNullElements: true,
+					NonFiniteFloats:   nonFiniteFloats,
+					NoNumericInfinity: noNumericInfinity,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize update record new items to JSON: %w", err)
@@ -137,6 +147,8 @@ func syncRecordsCore[Items model.Items](
 					HStoreAsJSON:      false,
 					StripNulBytes:     true,
 					ArrayNullElements: true,
+					NonFiniteFloats:   nonFiniteFloats,
+					NoNumericInfinity: noNumericInfinity,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize update record old items to JSON: %w", err)
@@ -159,6 +171,8 @@ func syncRecordsCore[Items model.Items](
 					HStoreAsJSON:      false,
 					StripNulBytes:     true,
 					ArrayNullElements: true,
+					NonFiniteFloats:   nonFiniteFloats,
+					NoNumericInfinity: noNumericInfinity,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize delete record items to JSON: %w", err)
