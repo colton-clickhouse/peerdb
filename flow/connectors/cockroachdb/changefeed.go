@@ -163,6 +163,9 @@ type changefeedTableSchema struct {
 	pg pgValues
 	// geoSRIDs are the SRIDs of constrained geometry / geography columns: changefeed GeoJSON has none
 	geoSRIDs map[string]int
+	// geoM are the geometry / geography columns whose type has an M dimension but no Z (geometry(PointM)): their
+	// 3-coordinate GeoJSON is XYM, not XYZ (pgValues.geoDims)
+	geoM map[string]struct{}
 }
 
 // newChangefeedTableSchema builds the cached per-table schema for envelope
@@ -172,9 +175,16 @@ type changefeedTableSchema struct {
 func newChangefeedTableSchema(schema *protos.TableSchema, exclude map[string]struct{}) *changefeedTableSchema {
 	fields := make(map[string]types.QField, len(schema.Columns))
 	var geoSRIDs map[string]int
+	var geoM map[string]struct{}
 	for _, col := range schema.Columns {
 		kind := types.QValueKind(col.Type)
 		if kind == types.QValueKindGeometry || kind == types.QValueKindGeography {
+			if col.TypeModifier >= 0 && col.TypeModifier&3 == 1 {
+				if geoM == nil {
+					geoM = make(map[string]struct{})
+				}
+				geoM[col.Name] = struct{}{}
+			}
 			if srid := datatypes.GeoTypmodSRID(col.TypeModifier); srid != 0 {
 				if geoSRIDs == nil {
 					geoSRIDs = make(map[string]int)
@@ -201,6 +211,7 @@ func newChangefeedTableSchema(schema *protos.TableSchema, exclude map[string]str
 		primaryKeys:     schema.PrimaryKeyColumns,
 		nullableEnabled: schema.NullableEnabled,
 		geoSRIDs:        geoSRIDs,
+		geoM:            geoM,
 	}
 }
 
@@ -244,8 +255,17 @@ func changefeedRecordItems(
 		if !ok {
 			continue
 		}
-		qv, err := qvalueFromChangefeedJSON(field, raw, schema.pg)
+		var qv types.QValue
+		var err error
+		if _, m := schema.geoM[col]; m && schema.pg.geoDims && !isJSONNull(raw) {
+			qv, err = changefeedGeoValue(field, raw, true)
+		} else {
+			qv, err = qvalueFromChangefeedJSON(field, raw, schema.pg)
+		}
 		if err != nil {
+			if _, ok := errors.AsType[*exceptions.GeometryParseError](err); ok {
+				return items, fmt.Errorf("column %s: %w", col, err)
+			}
 			if arrayErr, ok := errors.AsType[*exceptions.ArrayElementTypeError](err); ok {
 				// it says what to do; the generic advice below doesn't apply to it
 				arrayErr.WithColumn(col)
@@ -515,6 +535,9 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, pg pgValu
 		}
 		return types.QValueINET{Val: s}, nil
 	case types.QValueKindGeography, types.QValueKindGeometry:
+		if pg.geoDims {
+			return changefeedGeoValue(field, raw, false)
+		}
 		wkt, err := geoJSONToWKT(raw)
 		if err != nil {
 			// mirror the QRep fallback for unparseable geo values
@@ -1098,6 +1121,198 @@ func parsePgIntervalToJSON(s string) (string, error) {
 		return "", fmt.Errorf("failed to marshal interval: %w", err)
 	}
 	return string(intervalJSON), nil
+}
+
+// changefeedGeoValue reads a changefeed geometry / geography with its M dimension (pgValues.geoDims): GeoJSON has
+// none, so 4 coordinates are XYZM and, with m (a column whose type has M), 3 coordinates are XYM. Those are written
+// here, since GEOS refuses 4 coordinates and reads 3 as XYZ; everything else goes through GEOS as before. A value
+// neither reads is an error, not the NULL the older fallback wrote.
+func changefeedGeoValue(field types.QField, raw json.RawMessage, m bool) (types.QValue, error) {
+	wkt, ok, err := geoJSONToWKTWithM(raw, m)
+	if err == nil && !ok {
+		wkt, err = geoJSONToWKT(raw)
+	}
+	if err != nil {
+		return nil, exceptions.NewGeometryParseError(fmt.Errorf("GeoJSON %s: %w", truncateForError(string(raw)), err))
+	}
+	if field.Type == types.QValueKindGeography {
+		if !strings.HasPrefix(wkt, "SRID=") {
+			wkt = "SRID=4326;" + wkt
+		}
+		return types.QValueGeography{Val: wkt}, nil
+	}
+	return types.QValueGeometry{Val: wkt}, nil
+}
+
+// geoJSON is the part of a changefeed GeoJSON object geoJSONToWKTWithM reads.
+type geoJSON struct {
+	Type        string            `json:"type"`
+	Coordinates json.RawMessage   `json:"coordinates"`
+	Geometries  []json.RawMessage `json:"geometries"`
+}
+
+// geoJSONToWKTWithM writes GeoJSON with an M dimension as WKT: ok is false when the value has none (2 coordinates, or
+// 3 without m), and GEOS reads it as it is.
+func geoJSONToWKTWithM(raw json.RawMessage, m bool) (string, bool, error) {
+	var g geoJSON
+	if err := json.Unmarshal(raw, &g); err != nil {
+		return "", false, err
+	}
+	dims, err := geoJSONDims(g)
+	if err != nil {
+		return "", false, err
+	}
+	var tag string
+	switch {
+	case dims == 4:
+		tag = " ZM"
+	case dims == 3 && m:
+		tag = " M"
+	default:
+		return "", false, nil
+	}
+	var b strings.Builder
+	if err := writeGeoJSONWKT(&b, g, tag, dims); err != nil {
+		return "", false, err
+	}
+	return b.String(), true, nil
+}
+
+// geoJSONDims is the number of coordinates of a GeoJSON value's first position (0 when it's empty).
+func geoJSONDims(g geoJSON) (int, error) {
+	if g.Type == "GeometryCollection" {
+		for _, raw := range g.Geometries {
+			var sub geoJSON
+			if err := json.Unmarshal(raw, &sub); err != nil {
+				return 0, err
+			}
+			if dims, err := geoJSONDims(sub); err != nil || dims != 0 {
+				return dims, err
+			}
+		}
+		return 0, nil
+	}
+	var v any
+	if err := json.Unmarshal(g.Coordinates, &v); err != nil {
+		return 0, err
+	}
+	for {
+		arr, ok := v.([]any)
+		if !ok || len(arr) == 0 {
+			return 0, nil
+		}
+		if _, isNum := arr[0].(float64); isNum {
+			return len(arr), nil
+		}
+		v = arr[0]
+	}
+}
+
+// writeGeoJSONWKT writes g as WKT with the dimension tag (" ZM" or " M") and dims coordinates per position.
+func writeGeoJSONWKT(b *strings.Builder, g geoJSON, tag string, dims int) error {
+	name := map[string]string{
+		"Point": "POINT", "LineString": "LINESTRING", "Polygon": "POLYGON", "MultiPoint": "MULTIPOINT",
+		"MultiLineString": "MULTILINESTRING", "MultiPolygon": "MULTIPOLYGON", "GeometryCollection": "GEOMETRYCOLLECTION",
+	}[g.Type]
+	if name == "" {
+		return fmt.Errorf("unknown GeoJSON type %q", g.Type)
+	}
+	b.WriteString(name)
+	b.WriteString(tag)
+	if g.Type == "GeometryCollection" {
+		if len(g.Geometries) == 0 {
+			b.WriteString(" EMPTY")
+			return nil
+		}
+		b.WriteString(" (")
+		for i, raw := range g.Geometries {
+			var sub geoJSON
+			if err := json.Unmarshal(raw, &sub); err != nil {
+				return err
+			}
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			if err := writeGeoJSONWKT(b, sub, tag, dims); err != nil {
+				return err
+			}
+		}
+		b.WriteByte(')')
+		return nil
+	}
+	// nesting: how many levels of lists hold the positions (Point 0, LineString and MultiPoint 1, Polygon and
+	// MultiLineString 2, MultiPolygon 3)
+	depth := map[string]int{"Point": 0, "LineString": 1, "MultiPoint": 1, "Polygon": 2, "MultiLineString": 2,
+		"MultiPolygon": 3}[g.Type]
+	var v any
+	if err := json.Unmarshal(g.Coordinates, &v); err != nil {
+		return err
+	}
+	if arr, ok := v.([]any); !ok || len(arr) == 0 {
+		b.WriteString(" EMPTY")
+		return nil
+	}
+	b.WriteByte(' ')
+	return writeWKTPositions(b, v, depth, dims)
+}
+
+func writeWKTPositions(b *strings.Builder, v any, depth int, dims int) error {
+	arr, ok := v.([]any)
+	if !ok {
+		return fmt.Errorf("GeoJSON coordinates: expected a list, got %v", v)
+	}
+	b.WriteByte('(')
+	if depth == 0 {
+		if len(arr) != dims {
+			return fmt.Errorf("GeoJSON position %v has %d coordinates, others %d", arr, len(arr), dims)
+		}
+		for i, c := range arr {
+			f, ok := c.(float64)
+			if !ok {
+				return fmt.Errorf("GeoJSON coordinate %v is not a number", c)
+			}
+			if i > 0 {
+				b.WriteByte(' ')
+			}
+			b.WriteString(strconv.FormatFloat(f, 'f', -1, 64))
+		}
+	} else {
+		for i, sub := range arr {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			if depth == 1 {
+				// positions of a LineString or MultiPoint are written bare: (0 0 1, 1 1 2)
+				if err := writeWKTPosition(b, sub, dims); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := writeWKTPositions(b, sub, depth-1, dims); err != nil {
+				return err
+			}
+		}
+	}
+	b.WriteByte(')')
+	return nil
+}
+
+func writeWKTPosition(b *strings.Builder, v any, dims int) error {
+	arr, ok := v.([]any)
+	if !ok || len(arr) != dims {
+		return fmt.Errorf("GeoJSON position %v doesn't have %d coordinates", v, dims)
+	}
+	for i, c := range arr {
+		f, ok := c.(float64)
+		if !ok {
+			return fmt.Errorf("GeoJSON coordinate %v is not a number", c)
+		}
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(strconv.FormatFloat(f, 'f', -1, 64))
+	}
+	return nil
 }
 
 // geoJSONToWKT converts the GeoJSON objects changefeeds emit for

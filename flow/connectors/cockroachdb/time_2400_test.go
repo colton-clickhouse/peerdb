@@ -54,12 +54,14 @@ func TestNewPgValues(t *testing.T) {
 	require.Equal(t, pgValues{specialValues: true},
 		newPgValues(shared.InternalVersion_PgSpecialValues, protos.DBType_POSTGRES))
 	// ClickHouse coerces missing times to the Unix epoch, which is its DefaultTime
-	require.Equal(t, pgValues{arrayInfinity: true, defaultTime: time.Unix(0, 0).UTC()},
+	require.Equal(t, pgValues{arrayInfinity: true, defaultTime: time.Unix(0, 0).UTC(), geoDims: true},
 		newPgValues(shared.InternalVersion_Latest, protos.DBType_CLICKHOUSE))
 	require.Equal(t, pgValues{defaultTime: time.Unix(0, 0).UTC()},
 		newPgValues(shared.InternalVersion_ArrayConversionIntegrity-1, protos.DBType_CLICKHOUSE))
 	require.Equal(t, pgValues{specialValues: true, time2400: true, invalidGeo: true, arrayInfinity: true},
 		newPgValues(shared.InternalVersion_ArrayConversionIntegrity, protos.DBType_POSTGRES))
+	require.Equal(t, pgValues{specialValues: true, time2400: true, invalidGeo: true, arrayInfinity: true, geoDims: true},
+		newPgValues(shared.InternalVersion_CockroachGeoDimensions, protos.DBType_POSTGRES))
 }
 
 // An infinite date or timestamp in a changefeed row for a destination that doesn't keep infinity (ClickHouse) gets the

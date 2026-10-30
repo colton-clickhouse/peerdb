@@ -2184,3 +2184,11 @@ func TestArrayElementTypeErrorShouldNotifyUser(t *testing.T) {
 	assert.True(t, errorClass.Stalls(), "a mismatch repeats on every retry: it counts toward STALLED")
 	assert.Equal(t, ErrorInfo{Source: ErrorSourceOther, Code: "int32"}, errInfo)
 }
+
+func TestGeometryParseErrorStalls(t *testing.T) {
+	err := fmt.Errorf("column g: %w", exceptions.NewGeometryParseError(errors.New("unknown GeoJSON type")))
+	errorClass, errInfo := GetErrorClass(t.Context(), err)
+	assert.Equal(t, ErrorUnsupportedDatatype, errorClass)
+	assert.True(t, errorClass.Stalls(), "a value that can't be read fails on every retry: it counts toward STALLED")
+	assert.Equal(t, "UNSUPPORTED_GEOMETRY", errInfo.Code)
+}

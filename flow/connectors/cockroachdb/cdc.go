@@ -932,6 +932,12 @@ func (c *CockroachDBConnector) emitSchemaDelta(
 				}
 				schema.geoSRIDs[colName] = srid
 			}
+			if col.TypeModifier >= 0 && col.TypeModifier&3 == 1 {
+				if schema.geoM == nil {
+					schema.geoM = make(map[string]struct{})
+				}
+				schema.geoM[colName] = struct{}{}
+			}
 		}
 	}
 	if len(delta.AddedColumns) > 0 {
