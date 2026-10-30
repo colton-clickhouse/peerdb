@@ -540,7 +540,9 @@ func parseTimeTZ(value string) (time.Duration, error) {
 	value = strings.Replace(value, "24:00:00", "23:59:59.999999", 1)
 	for _, layout := range timeTZLayouts {
 		if t, err := time.Parse(layout, value); err == nil {
-			return t.UTC().Sub(shared.Year0000), nil
+			// the UTC time of day: an offset can move it past midnight either way
+			const day = 24 * time.Hour
+			return (t.UTC().Sub(shared.Year0000)%day + day) % day, nil
 		}
 	}
 	return 0, fmt.Errorf("failed to parse timetz: %s", value)
