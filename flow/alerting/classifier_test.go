@@ -2181,5 +2181,6 @@ func TestArrayElementTypeErrorShouldNotifyUser(t *testing.T) {
 	errorClass, errInfo := GetErrorClass(t.Context(), err)
 	assert.Equal(t, ErrorNotifyArrayElementTypeMismatch, errorClass)
 	assert.Equal(t, NotifyUser, errorClass.ErrorAction())
+	assert.True(t, errorClass.Stalls(), "a mismatch repeats on every retry: it counts toward STALLED")
 	assert.Equal(t, ErrorInfo{Source: ErrorSourceOther, Code: "int32"}, errInfo)
 }
