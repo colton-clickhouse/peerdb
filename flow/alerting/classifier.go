@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -329,6 +330,41 @@ var (
 		Class: "OTHER", action: NotifyTelemetry,
 	}
 )
+
+// stallingErrorClasses are the user-actionable classes that don't clear by themselves: a missing or changed
+// table, publication or slot, a source setting, unsupported data. They count toward STALLED. The other
+// notify_user classes (connectivity, OOM, a failover, too many parts) recover once the outage ends, so a long one
+// mustn't make a healthy mirror STALLED.
+var stallingErrorClasses = []ErrorClass{
+	ErrorNotifyDestinationModified, ErrorNotifyMVOrView, ErrorNotifySlotInvalid, ErrorNotifyBinlogInvalid,
+	ErrorNotifyChangefeedInvalid, ErrorNotifyBinlogEventExceededMaxAllowedPacket,
+	ErrorNotifyBinlogPartialRowEventUnsupported, ErrorNotifyBinlogPartialJsonUnsupported,
+	ErrorNotifyMySQLCompressedColumnUnsupported, ErrorNotifyMySQLSecureTransportRequired,
+	ErrorNotifyBinlogRowMetadataInvalid, ErrorNotifyBadGTIDSetup, ErrorNotifySourceTableMissing,
+	ErrorNotifyBadSourceTableReplicaIdentity, ErrorNotifyTablesWithoutPrimaryKey, ErrorNotifyPublicationMissing,
+	ErrorNotifyTablesNotInPublication, ErrorNotifyReplicationSlotMissing, ErrorNotifyIncreaseLogicalDecodingWorkMem,
+	ErrorUnsupportedDatatype, ErrorNotifyInvalidSortKey, ErrorNotifyInvalidEnumValue,
+	ErrorNotifyConstraintViolation, ErrorNotifyPostgresExtensionNotAvailable, ErrorNotifyGeneratedAlwaysColumn,
+	ErrorNotifyInvalidSynchronizedStandbySlots, ErrorNotifySnapshotExportDisabled, ErrorNotifyReplicationStandbySetup,
+	ErrorNotifyLogicalDecodingStandbyNotSupported, ErrorUnsupportedSchemaChange,
+	ErrNotifyPostgresCreatingSlotOnReader, ErrorNotifyChangeStreamHistoryLost, ErrorNotifyWalSegmentRemoved,
+	ErrorNotifyClickHouseSupportIsDisabledError, ErrorNotifyClickHousePermissionsError,
+	ErrorNotifyInvalidDestinationTableDefinition, ErrorNotifyMySQLZeroDateKey,
+}
+
+// Stalls reports whether errors of this class count toward the STALLED status
+func (e ErrorClass) Stalls() bool {
+	return slices.Contains(stallingErrorClasses, e)
+}
+
+// StallingErrorClassNames are the classes (as recorded in flow_errors.error_class) that count toward STALLED
+func StallingErrorClassNames() []string {
+	names := make([]string, 0, len(stallingErrorClasses))
+	for _, c := range stallingErrorClasses {
+		names = append(names, c.Class)
+	}
+	return names
+}
 
 func (e ErrorClass) String() string {
 	return e.Class

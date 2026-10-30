@@ -11,7 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
@@ -402,9 +404,11 @@ func (a *Alerter) recordFlowErrorInternal(
 		return
 	}
 
-	// 2. Insert log to flow_errors table
-	if err := InsertFlowLog(ctx, a.CatalogPool, flowName, errMessage, errorType); err != nil {
+	// 2. Insert log to flow_errors table, with its class: the STALLED status counts user-actionable errors
+	if err := insertFlowLog(ctx, a.CatalogPool, flowName, errMessage, errorType, &errClass); err != nil {
 		logger.Error("failed to insert flow error", slog.Any("error", err))
+	} else if errorType == FlowErrorTypeError && errClass.ErrorAction() == NotifyUser {
+		a.markStalledIfPersistent(ctx, flowName, errClass)
 	}
 
 	// 3. Record error metrics
@@ -428,6 +432,39 @@ func (a *Alerter) recordFlowErrorInternal(
 	}
 	counter.Add(ctx, 1, errorAttributeSet)
 	gauge.Record(ctx, 1, errorAttributeSet)
+}
+
+// markStalledIfPersistent sets a running mirror to STALLED once errors that don't clear by themselves (like the
+// one just recorded, see stallingErrorClasses) have kept it from making progress for longer than
+// PEERDB_STALLED_THRESHOLD_MINUTES. The scheduled
+// tasks set it back to RUNNING once it makes progress again.
+func (a *Alerter) markStalledIfPersistent(ctx context.Context, flowName string, errClass ErrorClass) {
+	logger := internal.LoggerFromCtx(ctx)
+	threshold, err := internal.PeerDBStalledThresholdMinutes(ctx, nil)
+	if err != nil {
+		logger.Warn("failed to get stalled threshold from catalog", slog.Any("error", err))
+		return
+	}
+	if threshold == 0 {
+		return
+	}
+	if !errClass.Stalls() {
+		return
+	}
+	stalled, err := internal.MarkFlowStalledIfPersistent(ctx, a.CatalogPool, flowName, threshold, StallingErrorClassNames())
+	if err != nil {
+		logger.Warn("failed to check whether the mirror is stalled", slog.Any("error", err))
+		return
+	}
+	if stalled {
+		message := fmt.Sprintf("Mirror is STALLED: errors that need a fix have kept it from making progress for more "+
+			"than %d minutes (error class %s). It returns to RUNNING once it makes progress again or stops failing.",
+			threshold, errClass.String())
+		logger.Warn(message, slog.String("flowName", flowName))
+		if err := InsertFlowLog(ctx, a.CatalogPool, flowName, message, FlowErrorTypeWarn); err != nil {
+			logger.Warn("failed to insert flow warning", slog.Any("error", err))
+		}
+	}
 }
 
 func (a *Alerter) LogFlowError(ctx context.Context, flowName string, err error) error {
@@ -455,6 +492,22 @@ func InsertFlowLog(
 	message string,
 	errorType FlowErrorType,
 ) error {
+	return insertFlowLog(ctx, catalogPool, flowName, message, errorType, nil)
+}
+
+// insertFlowLog inserts a flow log, with the error's class and action when errClass isn't nil
+func insertFlowLog(
+	ctx context.Context,
+	catalogPool shared.CatalogPool,
+	flowName string,
+	message string,
+	errorType FlowErrorType,
+	errClass *ErrorClass,
+) error {
+	var class, action *string
+	if errClass != nil {
+		class, action = &errClass.Class, (*string)(&errClass.action)
+	}
 	logger := internal.SlogLoggerFromCtx(ctx)
 	logger.InfoContext(ctx, fmt.Sprintf("inserting user-facing flow log: [%s] %s", errorType.String(), message),
 		slog.String("flowName", flowName),
@@ -462,9 +515,12 @@ func InsertFlowLog(
 		slog.String("message", message),
 		slog.String("logAudience", "user"),
 	)
-	_, err := catalogPool.Exec(
-		ctx, "INSERT INTO peerdb_stats.flow_errors(flow_name,error_message,error_type) VALUES($1,$2,$3)",
-		flowName, message, errorType.String(),
-	)
+	_, err := catalogPool.Exec(ctx, `INSERT INTO peerdb_stats.flow_errors(flow_name,error_message,error_type,error_class,error_action)
+		VALUES($1,$2,$3,$4,$5)`, flowName, message, errorType.String(), class, action)
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == pgerrcode.UndefinedColumn {
+		// a catalog not migrated yet (workers rolled out before the migration): keep the log, without its class
+		_, err = catalogPool.Exec(ctx, `INSERT INTO peerdb_stats.flow_errors(flow_name,error_message,error_type)
+			VALUES($1,$2,$3)`, flowName, message, errorType.String())
+	}
 	return err
 }

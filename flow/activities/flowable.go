@@ -1457,6 +1457,10 @@ func (a *FlowableActivity) getFlowsForMetrics(ctx context.Context) ([]metricsFlo
 func (a *FlowableActivity) RecordSlotSizes(ctx context.Context) error {
 	logger := log.With(internal.LoggerFromCtx(ctx), slog.String("scheduledTask", "RecordSlotSizes"))
 	logger.Info("Recording Slot Information")
+	// first, so that an early return below can't skip it
+	if err := a.clearStalledFlows(ctx); err != nil {
+		logger.Error("Failed to clear stalled mirrors", slog.Any("error", err))
+	}
 	slotMetricGauges := otel_metrics.SlotMetricGauges{}
 	slotMetricGauges.SlotLagGauge = a.OtelManager.Metrics.SlotLagGauge
 	slotMetricGauges.RestartLSNGauge = a.OtelManager.Metrics.RestartLSNGauge
@@ -1572,6 +1576,23 @@ func normalizeHeldByStatus(status protos.FlowStatus) bool {
 	default:
 		return false
 	}
+}
+
+// clearStalledFlows sets STALLED mirrors back to RUNNING once they make progress again or stop failing (the
+// Alerter sets STALLED when a user-actionable error persists).
+func (a *FlowableActivity) clearStalledFlows(ctx context.Context) error {
+	threshold, err := internal.PeerDBStalledThresholdMinutes(ctx, nil)
+	if err != nil {
+		return err
+	}
+	cleared, err := internal.ClearStalledFlows(ctx, a.CatalogPool, threshold, alerting.StallingErrorClassNames())
+	if err != nil {
+		return err
+	}
+	for _, flowName := range cleared {
+		a.Alerter.LogFlowInfo(ctx, flowName, "Mirror is no longer stalled: status STALLED -> RUNNING")
+	}
+	return nil
 }
 
 // alertIfNormalizeStalled raises the normalize-gap alert for a flow whose oldest synced batch has waited lag
@@ -1724,6 +1745,7 @@ func (a *FlowableActivity) recordServerSideCommitLag(
 
 var activeFlowStatuses = map[protos.FlowStatus]struct{}{
 	protos.FlowStatus_STATUS_RUNNING:   {},
+	protos.FlowStatus_STATUS_STALLED:   {},
 	protos.FlowStatus_STATUS_PAUSED:    {},
 	protos.FlowStatus_STATUS_PAUSING:   {},
 	protos.FlowStatus_STATUS_SETUP:     {},
