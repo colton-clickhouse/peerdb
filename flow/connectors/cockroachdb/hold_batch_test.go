@@ -73,3 +73,33 @@ func TestHoldBatchEndsOnAdvancingResolved(t *testing.T) {
 	require.True(t, done)
 	require.Equal(t, crdbHLC{WallNanos: base + 3}, state.cursor)
 }
+
+// A held batch whose records are all still buffered (none emitted yet, e.g. the batch size was reached before any
+// resolved timestamp) must not end on a resolved timestamp at the start cursor: that would be an empty batch at the
+// same cursor, and the next one would do the same.
+func TestHoldBatchWithOnlyBufferedRecordsStaysOpen(t *testing.T) {
+	ctx := t.Context()
+	om, _ := newMetricsTestOtelManager(t)
+	c := &CockroachDBConnector{logger: log.NewStructuredLogger(slog.Default())}
+	base := time.Now().Add(-time.Hour).UnixNano()
+	state := newHoldTestState(crdbHLC{WallNanos: base}, true, 10*time.Minute)
+	state.recordCount = 0
+
+	row := &changefeedEnvelope{
+		After:   map[string]json.RawMessage{"id": json.RawMessage(`1`)},
+		Updated: fmt.Sprintf("%d.0000000000", base+2),
+	}
+	require.NoError(t, c.processChangefeedRow(ctx, om, state, "defaultdb.public.users", []byte("[1]"), row, 10))
+	state.graceDeadline = time.Now().Add(-time.Second) // the batch filled
+	require.Zero(t, state.recordCount)
+	require.Len(t, state.buffer, 1)
+
+	done, err := c.handleResolved(ctx, om, state, fmt.Sprintf("%d.0000000000", base))
+	require.NoError(t, err)
+	require.False(t, done, "a resolved timestamp at the start cursor doesn't end the batch")
+
+	done, err = c.handleResolved(ctx, om, state, fmt.Sprintf("%d.0000000000", base+3))
+	require.NoError(t, err)
+	require.True(t, done)
+	require.Equal(t, uint32(1), state.recordCount, "the resolved timestamp past the row emitted it")
+}
