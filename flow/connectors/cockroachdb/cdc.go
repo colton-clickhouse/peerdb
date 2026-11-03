@@ -316,6 +316,7 @@ func (c *CockroachDBConnector) PullRecords(
 		if schema, ok := req.TableNameSchemaMapping[target.Name]; ok {
 			state.schemas[source] = newChangefeedTableSchema(schema, target.Exclude)
 			state.schemas[source].arrayNullElements = req.InternalVersion >= shared.InternalVersion_ArrayNullElements
+			state.schemas[source].omitInternal = req.InternalVersion >= shared.InternalVersion_CockroachOmitInternalColumns
 			state.schemas[source].pg = newPgValues(req.InternalVersion, req.DestinationType)
 		}
 	}
@@ -898,9 +899,17 @@ func (c *CockroachDBConnector) emitSchemaDelta(
 	for _, colName := range unknown {
 		col, ok := freshColumns[colName]
 		if !ok {
+			schema.ignored[colName] = struct{}{}
+			// changefeeds emit hidden columns, so CockroachDB's internal ones
+			// (left out of the schema) arrive here on the first row of a table
+			if isInternalColumn(colName) &&
+				state.req.InternalVersion >= shared.InternalVersion_CockroachOmitInternalColumns {
+				c.logger.Info("[cockroachdb] leaving out CockroachDB internal column",
+					slog.String("table", source), slog.String("column", colName))
+				continue
+			}
 			// column vanished between the row event and the schema read
 			// (e.g. added then dropped); don't look it up again
-			schema.ignored[colName] = struct{}{}
 			c.logger.Warn("[cockroachdb] ignoring unknown changefeed column absent from source schema",
 				slog.String("table", source), slog.String("column", colName))
 			continue
@@ -984,6 +993,31 @@ func (c *CockroachDBConnector) loadSourceKeys(ctx context.Context, state *change
 		if !slices.Equal(key, schema.primaryKeys) {
 			schema.sourceKey = key
 		}
+	}
+
+	// which tables have CockroachDB's internal columns as hidden ones (row-level TTL's), so the changefeed leaves them
+	// out without a schema read
+	rows, err = c.conn.Query(ctx, `
+		SELECT c.table_schema, c.table_name, c.column_name
+		FROM information_schema.columns c
+		JOIN unnest($1::STRING[], $2::STRING[]) AS t (table_schema, table_name)
+			ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+		WHERE c.is_hidden = 'YES' AND c.column_name = ANY($3::STRING[])
+	`, namespaces, tables, internalColumns)
+	if err != nil {
+		return fmt.Errorf("failed to read source hidden columns: %w", err)
+	}
+	if _, err := pgx.ForEachRow(rows, []any{&namespace, &table, &column}, func() error {
+		if source, ok := sources[[2]string{namespace, table}]; ok {
+			schema := state.schemas[source]
+			if schema.hiddenInternal == nil {
+				schema.hiddenInternal = make(map[string]struct{}, 1)
+			}
+			schema.hiddenInternal[column] = struct{}{}
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to read source hidden columns: %w", err)
 	}
 	return nil
 }
