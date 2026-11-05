@@ -37,7 +37,7 @@ func TestToJSONPgBCDates(t *testing.T) {
 	}`, s, "arrays without a BC element keep time.Time's encoding")
 }
 
-// Without PgBCDates (other destinations, older mirrors) the output is unchanged: astronomical years, and a timestamp
+// Without PgBCDates (other destinations) the output is unchanged: astronomical years, and a timestamp
 // array with a year before 0 fails to marshal.
 func TestToJSONPgBCDatesOff(t *testing.T) {
 	bc := time.Date(-43, 3, 15, 12, 0, 0, 0, time.UTC)
