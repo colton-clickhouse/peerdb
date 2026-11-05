@@ -96,6 +96,16 @@ func syncRecordsCore[Items model.Items](
 
 	numRecords := int64(0)
 	tableNameRowsMapping := utils.InitialiseTableRowsMap(req.TableMappings)
+	nonFiniteFloats := req.Version >= shared.InternalVersion_PgSpecialValues
+	pgVersion, err := c.MajorVersion(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get the destination's version: %w", err)
+	}
+	noNumericInfinity := pgVersion < shared.POSTGRES_14
+	var notNullByTable map[string]map[string]struct{}
+	if noNumericInfinity {
+		notNullByTable = notNullColumns(req.TableNameSchemaMapping)
+	}
 	streamReadFunc := func() ([]any, error) {
 		for record := range req.Records.GetRecords() {
 			var row []any
@@ -106,6 +116,9 @@ func syncRecordsCore[Items model.Items](
 					HStoreAsJSON:      false,
 					StripNulBytes:     true,
 					ArrayNullElements: true,
+					NonFiniteFloats:   nonFiniteFloats,
+					NoNumericInfinity: noNumericInfinity,
+					NotNullColumns:    notNullByTable[typedRecord.DestinationTableName],
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize insert record items to JSON: %w", err)
@@ -128,6 +141,9 @@ func syncRecordsCore[Items model.Items](
 					HStoreAsJSON:      false,
 					StripNulBytes:     true,
 					ArrayNullElements: true,
+					NonFiniteFloats:   nonFiniteFloats,
+					NoNumericInfinity: noNumericInfinity,
+					NotNullColumns:    notNullByTable[typedRecord.DestinationTableName],
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize update record new items to JSON: %w", err)
@@ -137,6 +153,9 @@ func syncRecordsCore[Items model.Items](
 					HStoreAsJSON:      false,
 					StripNulBytes:     true,
 					ArrayNullElements: true,
+					NonFiniteFloats:   nonFiniteFloats,
+					NoNumericInfinity: noNumericInfinity,
+					NotNullColumns:    notNullByTable[typedRecord.DestinationTableName],
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize update record old items to JSON: %w", err)
@@ -159,6 +178,9 @@ func syncRecordsCore[Items model.Items](
 					HStoreAsJSON:      false,
 					StripNulBytes:     true,
 					ArrayNullElements: true,
+					NonFiniteFloats:   nonFiniteFloats,
+					NoNumericInfinity: noNumericInfinity,
+					NotNullColumns:    notNullByTable[typedRecord.DestinationTableName],
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize delete record items to JSON: %w", err)
@@ -827,4 +849,23 @@ func (c *PostgresConnector) RemoveTableEntriesFromRawTable(
 	}
 
 	return nil
+}
+
+// notNullColumns returns, for each destination table, its key columns and the columns its source doesn't allow NULL
+// in: a numeric infinity before Postgres 14 becomes 0 there instead of NULL (model.WithoutNumericInfinity).
+func notNullColumns(schemas map[string]*protos.TableSchema) map[string]map[string]struct{} {
+	byTable := make(map[string]map[string]struct{}, len(schemas))
+	for table, schema := range schemas {
+		cols := make(map[string]struct{}, len(schema.PrimaryKeyColumns))
+		for _, col := range schema.PrimaryKeyColumns {
+			cols[col] = struct{}{}
+		}
+		for _, col := range schema.Columns {
+			if !col.Nullable {
+				cols[col.Name] = struct{}{}
+			}
+		}
+		byTable[table] = cols
+	}
+	return byTable
 }

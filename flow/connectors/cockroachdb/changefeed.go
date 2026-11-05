@@ -149,6 +149,8 @@ type changefeedTableSchema struct {
 	nullableEnabled bool
 	// arrayNullElements marks NULL array elements (InternalVersion_ArrayNullElements)
 	arrayNullElements bool
+	// specialValues marks NaN and infinity values for a Postgres destination (InternalVersion_PgSpecialValues)
+	specialValues bool
 }
 
 // newChangefeedTableSchema builds the cached per-table schema for envelope
@@ -216,7 +218,7 @@ func changefeedRecordItems(
 		if !ok {
 			continue
 		}
-		qv, err := qvalueFromChangefeedJSON(field, raw)
+		qv, err := qvalueFromChangefeedJSON(field, raw, schema.specialValues)
 		if err != nil {
 			return items, fmt.Errorf("column %s as %s: %w"+
 				" (the source column type may have changed; resync the mirror to pick up the new type)",
@@ -266,7 +268,7 @@ func changefeedKeyItems(
 		if !ok {
 			return items, fmt.Errorf("primary key column %s missing from cached schema", col)
 		}
-		qv, err := qvalueFromChangefeedJSON(field, elems[i])
+		qv, err := qvalueFromChangefeedJSON(field, elems[i], schema.specialValues)
 		if err != nil {
 			return items, fmt.Errorf("primary key column %s: %w", col, err)
 		}
@@ -329,9 +331,14 @@ func jsonString(raw json.RawMessage) (string, error) {
 
 // qvalueFromChangefeedJSON converts one changefeed JSON column value into the
 // QValue matching field.Type.
-func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage) (types.QValue, error) {
+func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, special bool) (types.QValue, error) {
 	if isJSONNull(raw) {
 		return types.QValueNull(field.Type), nil
+	}
+	if special {
+		if qv, ok := changefeedSpecialValue(field, raw); ok {
+			return qv, nil
+		}
 	}
 
 	switch field.Type {
@@ -564,7 +571,11 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage) (types.QV
 		if err != nil {
 			return nil, err
 		}
-		return types.QValueArrayNumeric{Val: a, Precision: field.Precision, Scale: field.Scale}, nil
+		var specials []types.SpecialValue
+		if special {
+			specials = changefeedArraySpecials(raw, field)
+		}
+		return types.QValueArrayNumeric{Val: a, Precision: field.Precision, Scale: field.Scale, Specials: specials}, nil
 	case types.QValueKindArrayUUID:
 		a, err := changefeedArray(raw, func(el json.RawMessage) (uuid.UUID, error) {
 			if isJSONNull(el) {
@@ -589,7 +600,7 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage) (types.QV
 			parseElem = parseChangefeedTimestampTZ
 		}
 		a, err := changefeedArray(raw, func(el json.RawMessage) (time.Time, error) {
-			if isJSONNull(el) {
+			if isJSONNull(el) || (special && changefeedTimeSpecial(el) != types.SpecialNone) {
 				return time.Time{}, nil
 			}
 			return parseWithString(el, parseElem)
@@ -597,13 +608,17 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage) (types.QV
 		if err != nil {
 			return nil, err
 		}
+		var specials []types.SpecialValue
+		if special {
+			specials = changefeedArraySpecials(raw, field)
+		}
 		switch field.Type {
 		case types.QValueKindArrayDate:
-			return types.QValueArrayDate{Val: a}, nil
+			return types.QValueArrayDate{Val: a, Specials: specials}, nil
 		case types.QValueKindArrayTimestamp:
-			return types.QValueArrayTimestamp{Val: a}, nil
+			return types.QValueArrayTimestamp{Val: a, Specials: specials}, nil
 		default:
-			return types.QValueArrayTimestampTZ{Val: a}, nil
+			return types.QValueArrayTimestampTZ{Val: a, Specials: specials}, nil
 		}
 	case types.QValueKindArrayInterval:
 		a, err := changefeedArray(raw, func(el json.RawMessage) (string, error) {
@@ -642,6 +657,88 @@ func parseWithString[T any](raw json.RawMessage, parse func(string) (T, error)) 
 		return none, err
 	}
 	return parse(s)
+}
+
+// changefeedSpecialValue converts a NaN or infinite scalar numeric, date or timestamp to a value marked with it.
+func changefeedSpecialValue(field types.QField, raw json.RawMessage) (types.QValue, bool) {
+	switch field.Type {
+	case types.QValueKindNumeric:
+		if sv := changefeedNumericSpecial(raw, field.Precision); sv != types.SpecialNone {
+			return types.QValueNumeric{Precision: field.Precision, Scale: field.Scale, Special: sv}, true
+		}
+	case types.QValueKindDate:
+		if sv := changefeedTimeSpecial(raw); sv != types.SpecialNone {
+			return types.QValueDate{Special: sv}, true
+		}
+	case types.QValueKindTimestamp:
+		if sv := changefeedTimeSpecial(raw); sv != types.SpecialNone {
+			return types.QValueTimestamp{Special: sv}, true
+		}
+	case types.QValueKindTimestampTZ:
+		if sv := changefeedTimeSpecial(raw); sv != types.SpecialNone {
+			return types.QValueTimestampTZ{Special: sv}, true
+		}
+	}
+	return nil, false
+}
+
+// changefeedArraySpecials marks the NaN and infinite elements of a numeric, date or timestamp array; nil if none.
+func changefeedArraySpecials(raw json.RawMessage, field types.QField) []types.SpecialValue {
+	var elems []json.RawMessage
+	if err := json.Unmarshal(raw, &elems); err != nil {
+		return nil
+	}
+	specials := make([]types.SpecialValue, len(elems))
+	for i, el := range elems {
+		if field.Type == types.QValueKindArrayNumeric {
+			specials[i] = changefeedNumericSpecial(el, field.Precision)
+		} else {
+			specials[i] = changefeedTimeSpecial(el)
+		}
+	}
+	return types.CompactSpecials(specials)
+}
+
+// changefeedNumericSpecial recognises the JSON strings "NaN", "Infinity" and "-Infinity"; like numericSpecial,
+// infinities only count without a precision (Postgres can't store them in numeric(p, s)).
+func changefeedNumericSpecial(raw json.RawMessage, precision int16) types.SpecialValue {
+	s, err := jsonString(raw)
+	if err != nil {
+		return types.SpecialNone
+	}
+	switch {
+	case s == "NaN":
+		return types.SpecialNaN
+	case precision != 0:
+		return types.SpecialNone
+	case s == "Infinity":
+		return types.SpecialInfinity
+	case s == "-Infinity":
+		return types.SpecialNegInfinity
+	}
+	return types.SpecialNone
+}
+
+// CockroachDB stores infinite timestamps as values just outside the supported range and its changefeeds emit those
+// (294277-01-01T23:59:59.999999 and -4714-11-23T00:00:00, with a Z for TIMESTAMPTZ; verified on v25.4 and v26.2).
+// Infinite dates are emitted as "infinity" and "-infinity".
+const (
+	crdbTimestampInfinity    = "294277-01-01T23:59:59.999999"
+	crdbTimestampNegInfinity = "-4714-11-23T00:00:00"
+)
+
+func changefeedTimeSpecial(raw json.RawMessage) types.SpecialValue {
+	s, err := jsonString(raw)
+	if err != nil {
+		return types.SpecialNone
+	}
+	switch {
+	case s == "infinity" || strings.HasPrefix(s, crdbTimestampInfinity):
+		return types.SpecialInfinity
+	case s == "-infinity" || strings.HasPrefix(s, crdbTimestampNegInfinity):
+		return types.SpecialNegInfinity
+	}
+	return types.SpecialNone
 }
 
 func changefeedArray[T any](raw json.RawMessage, conv func(json.RawMessage) (T, error)) ([]T, error) {

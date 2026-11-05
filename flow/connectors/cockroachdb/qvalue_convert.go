@@ -159,6 +159,7 @@ func qvalueFromCrdbValue(
 	oid uint32,
 	typeMap *pgtype.Map,
 	value any,
+	special bool,
 ) (types.QValue, error) {
 	if value == nil {
 		return types.QValueNull(field.Type), nil
@@ -198,6 +199,9 @@ func qvalueFromCrdbValue(
 		if v, ok := value.(pgtype.Numeric); ok {
 			num, valid := numericToDecimal(v)
 			if !valid {
+				if sv := numericSpecial(v, field.Precision); special && sv != types.SpecialNone {
+					return types.QValueNumeric{Precision: field.Precision, Scale: field.Scale, Special: sv}, nil
+				}
 				if field.Nullable {
 					return types.QValueNull(types.QValueKindNumeric), nil
 				}
@@ -228,6 +232,9 @@ func qvalueFromCrdbValue(
 		case time.Time:
 			return types.QValueTimestamp{Val: v}, nil
 		case pgtype.InfinityModifier:
+			if special {
+				return types.QValueTimestamp{Special: infinitySpecial(v)}, nil
+			}
 			if field.Nullable {
 				return types.QValueNull(field.Type), nil
 			}
@@ -238,6 +245,9 @@ func qvalueFromCrdbValue(
 		case time.Time:
 			return types.QValueTimestampTZ{Val: v}, nil
 		case pgtype.InfinityModifier:
+			if special {
+				return types.QValueTimestampTZ{Special: infinitySpecial(v)}, nil
+			}
 			if field.Nullable {
 				return types.QValueNull(field.Type), nil
 			}
@@ -248,6 +258,9 @@ func qvalueFromCrdbValue(
 		case time.Time:
 			return types.QValueDate{Val: v}, nil
 		case pgtype.InfinityModifier:
+			if special {
+				return types.QValueDate{Special: infinitySpecial(v)}, nil
+			}
 			if field.Nullable {
 				return types.QValueNull(field.Type), nil
 			}
@@ -349,13 +362,24 @@ func qvalueFromCrdbValue(
 		if err != nil {
 			return nil, err
 		}
+		var specials []types.SpecialValue
+		if elems, ok := value.([]any); ok && special {
+			// pgx decodes infinity elements as pgtype.InfinityModifier, which convertToArray left as zero times
+			specials = make([]types.SpecialValue, len(elems))
+			for i, el := range elems {
+				if inf, ok := el.(pgtype.InfinityModifier); ok {
+					specials[i] = infinitySpecial(inf)
+				}
+			}
+			specials = types.CompactSpecials(specials)
+		}
 		switch field.Type {
 		case types.QValueKindArrayDate:
-			return types.QValueArrayDate{Val: a}, nil
+			return types.QValueArrayDate{Val: a, Specials: specials}, nil
 		case types.QValueKindArrayTimestamp:
-			return types.QValueArrayTimestamp{Val: a}, nil
+			return types.QValueArrayTimestamp{Val: a, Specials: specials}, nil
 		default:
-			return types.QValueArrayTimestampTZ{Val: a}, nil
+			return types.QValueArrayTimestampTZ{Val: a, Specials: specials}, nil
 		}
 	case types.QValueKindArrayUUID:
 		a, err := parseUUIDArray(value)
@@ -366,7 +390,11 @@ func qvalueFromCrdbValue(
 	case types.QValueKindArrayNumeric:
 		if v, ok := value.([]any); ok {
 			numArr := make([]decimal.Decimal, 0, len(v))
-			for _, anyVal := range v {
+			var specials []types.SpecialValue
+			if special {
+				specials = make([]types.SpecialValue, len(v))
+			}
+			for i, anyVal := range v {
 				if anyVal == nil {
 					numArr = append(numArr, decimal.Decimal{})
 					continue
@@ -378,10 +406,15 @@ func qvalueFromCrdbValue(
 				num, valid := numericToDecimal(numVal)
 				if !valid {
 					num = decimal.Decimal{}
+					if special {
+						specials[i] = numericSpecial(numVal, field.Precision)
+					}
 				}
 				numArr = append(numArr, num)
 			}
-			return types.QValueArrayNumeric{Val: numArr, Precision: field.Precision, Scale: field.Scale}, nil
+			return types.QValueArrayNumeric{
+				Val: numArr, Precision: field.Precision, Scale: field.Scale, Specials: types.CompactSpecials(specials),
+			}, nil
 		}
 	case types.QValueKindArrayInterval:
 		if v, ok := value.([]any); ok {
@@ -459,6 +492,31 @@ func numericToDecimal(numVal pgtype.Numeric) (decimal.Decimal, bool) {
 		return decimal.Decimal{}, false
 	}
 	return decimal.NewFromBigInt(numVal.Int, numVal.Exp), true
+}
+
+// numericSpecial is the special value of a NaN or infinite numeric, or SpecialNone. Postgres can't store +-Infinity
+// in a numeric(p, s) column (CockroachDB can), so with a precision infinities keep the old fallback (NULL or 0).
+func numericSpecial(numVal pgtype.Numeric, precision int16) types.SpecialValue {
+	switch {
+	case !numVal.Valid:
+		return types.SpecialNone
+	case numVal.NaN:
+		return types.SpecialNaN
+	case precision != 0:
+		return types.SpecialNone
+	case numVal.InfinityModifier == pgtype.Infinity:
+		return types.SpecialInfinity
+	case numVal.InfinityModifier == pgtype.NegativeInfinity:
+		return types.SpecialNegInfinity
+	}
+	return types.SpecialNone
+}
+
+func infinitySpecial(inf pgtype.InfinityModifier) types.SpecialValue {
+	if inf == pgtype.NegativeInfinity {
+		return types.SpecialNegInfinity
+	}
+	return types.SpecialInfinity
 }
 
 func parseUUID(value any) (uuid.UUID, error) {

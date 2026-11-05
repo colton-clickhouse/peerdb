@@ -111,12 +111,20 @@ func (stream RecordStreamSink) ExecuteQueryWithTx(
 	return totalNumRows, totalNumBytes, nil
 }
 
-func (stream RecordStreamSink) CopyInto(ctx context.Context, _ *PostgresConnector, tx pgx.Tx, table pgx.Identifier) (int64, error) {
+func (stream RecordStreamSink) CopyInto(ctx context.Context, c *PostgresConnector, tx pgx.Tx, table pgx.Identifier) (int64, error) {
 	columnNames, err := stream.GetColumnNames()
 	if err != nil {
 		return 0, err
 	}
-	return tx.CopyFrom(ctx, table, columnNames, model.NewQRecordCopyFromSource(stream.QRecordStream))
+	pgVersion, err := c.MajorVersion(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get the destination's version: %w", err)
+	}
+	src := model.NewQRecordCopyFromSource(stream.QRecordStream)
+	if pgVersion < shared.POSTGRES_14 {
+		src.WithoutNumericInfinity()
+	}
+	return tx.CopyFrom(ctx, table, columnNames, src)
 }
 
 func (stream RecordStreamSink) GetColumnNames() ([]string, error) {
