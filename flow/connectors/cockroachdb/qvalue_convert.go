@@ -1,6 +1,7 @@
 package conncockroachdb
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/netip"
@@ -480,6 +481,11 @@ func qvalueFromCrdbValue(
 				if prefix, ok := anyVal.(netip.Prefix); ok {
 					// INET[] elements, like scalar INET
 					strs = append(strs, inetPrefixText(prefix))
+					continue
+				}
+				if b, ok := anyVal.([]byte); ok {
+					// BYTES[] elements in Postgres's bytea hex form, as the changefeed sends them
+					strs = append(strs, `\x`+hex.EncodeToString(b))
 					continue
 				}
 				strs = append(strs, convertToString(typeMap, 0, anyVal))
