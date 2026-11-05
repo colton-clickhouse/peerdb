@@ -43,6 +43,9 @@ CockroachDB's changefeed format; revisit them if they turn out to matter in prac
 
 ## Schema changes
 
+- **No DDL on a table while its initial snapshot is set up.** The mirror reads the schema at setup and the snapshot
+  reads rows at a timestamp taken just after; a change in between fails the snapshot (resync the mirror). Changes
+  after the snapshot timestamp are fine: the snapshot reads the columns as they were at it.
 - **Changing a table's primary key during CDC** (`ALTER PRIMARY KEY`) needs a resync: the target stays keyed on the old
   columns. Only a key-only delete that lacks one of the target's key columns fails (`PRIMARY_KEY_CHANGED`); a reordered
   or widened key isn't detected.

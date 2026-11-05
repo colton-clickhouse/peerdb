@@ -17,6 +17,7 @@ import (
 
 	"github.com/PeerDB-io/peerdb/flow/connectors/utils"
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
+	"github.com/PeerDB-io/peerdb/flow/internal"
 	"github.com/PeerDB-io/peerdb/flow/model"
 	"github.com/PeerDB-io/peerdb/flow/model/qvalue"
 	"github.com/PeerDB-io/peerdb/flow/otel_metrics"
@@ -218,7 +219,7 @@ func (c *CockroachDBConnector) GetDefaultPartitionKeyForTables(
 
 func (c *CockroachDBConnector) PullQRepRecords(
 	ctx context.Context,
-	_ shared.CatalogPool,
+	catalogPool shared.CatalogPool,
 	_ *otel_metrics.OtelManager,
 	config *protos.QRepConfig,
 	dstType protos.DBType,
@@ -231,12 +232,23 @@ func (c *CockroachDBConnector) PullQRepRecords(
 	// heartbeat the protection so loads longer than its window stay covered
 	c.maybeExtendSnapshotHistory(ctx, config)
 
-	tableSchemas, err := c.GetTableSchema(ctx, config.Env, config.Version, protos.TypeSystem_Q,
-		[]*protos.TableMapping{{SourceTableIdentifier: config.WatermarkTable}})
+	systemTime, err := c.snapshotSystemTime(ctx, config)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get schema for watermark table %s: %w", config.WatermarkTable, err)
+		return 0, 0, err
+	}
+
+	// the columns as they were at the snapshot time, which the query reads at: DDL since then neither drops a column's
+	// values nor makes the query fail
+	tableSchemas, err := c.getTableSchema(ctx, config.Env, config.Version, protos.TypeSystem_Q,
+		[]*protos.TableMapping{{SourceTableIdentifier: config.WatermarkTable}}, systemTime)
+	if err != nil {
+		return 0, 0, classifySnapshotReadError(
+			fmt.Errorf("failed to get schema for watermark table %s: %w", config.WatermarkTable, err))
 	}
 	tableSchema := tableSchemas[config.WatermarkTable]
+	if err := checkSnapshotColumns(ctx, catalogPool, config, tableSchema); err != nil {
+		return 0, 0, err
+	}
 
 	selectedColumns := buildSelectedColumns(tableSchema.Columns, config.Exclude)
 	if selectedColumns == "" {
@@ -246,11 +258,6 @@ func (c *CockroachDBConnector) PullQRepRecords(
 	parsedSrcTable, err := common.ParseTableIdentifier(config.WatermarkTable)
 	if err != nil {
 		return 0, 0, fmt.Errorf("unable to parse source table: %w", err)
-	}
-
-	systemTime, err := c.snapshotSystemTime(ctx, config)
-	if err != nil {
-		return 0, 0, err
 	}
 
 	query, queryArgs, err := buildPullQuery(config, partition, selectedColumns, parsedSrcTable, systemTime)
@@ -310,6 +317,48 @@ func (c *CockroachDBConnector) PullQRepRecords(
 		slog.Int64("bytes", totalBytes),
 		slog.Int("channelLen", len(stream.Records)))
 	return totalRecords, totalBytes, nil
+}
+
+// checkSnapshotColumns fails when the table's columns at the snapshot time aren't the ones the mirror stored at setup,
+// which its target table was created from: the schema is read before the snapshot time is taken, so DDL in between
+// would leave the target without a column the snapshot sends, or with one it doesn't. QRep mirrors without a stored
+// schema (no parent mirror) aren't checked.
+func checkSnapshotColumns(
+	ctx context.Context, catalogPool shared.CatalogPool, config *protos.QRepConfig, atSnapshot *protos.TableSchema,
+) error {
+	if config.ParentMirrorName == "" || catalogPool.Pool == nil {
+		return nil
+	}
+	stored, err := internal.LoadTableSchemaFromCatalog(ctx, catalogPool, config.ParentMirrorName,
+		config.DestinationTableIdentifier)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("failed to load the mirror's schema of %s: %w", config.DestinationTableIdentifier, err)
+	}
+	if got, want, ok := sameSnapshotColumns(atSnapshot.Columns, stored.Columns, config.Exclude); !ok {
+		return fmt.Errorf("the columns of %s at the snapshot time (%s) aren't the ones the mirror was set up with (%s):"+
+			" its schema changed while the mirror was being set up; resync the mirror, without DDL on the table during"+
+			" the initial snapshot", config.WatermarkTable, strings.Join(got, ", "), strings.Join(want, ", "))
+	}
+	return nil
+}
+
+// sameSnapshotColumns compares the columns, by name and type and in any order, leaving out excluded ones; got and
+// want describe them.
+func sameSnapshotColumns(atSnapshot, stored []*protos.FieldDescription, exclude []string) ([]string, []string, bool) {
+	describe := func(cols []*protos.FieldDescription) []string {
+		out := make([]string, 0, len(cols))
+		for _, col := range cols {
+			if !slices.Contains(exclude, col.Name) {
+				out = append(out, col.Name+" "+col.Type)
+			}
+		}
+		slices.Sort(out)
+		return out
+	}
+	got, want := describe(atSnapshot), describe(stored)
+	return got, want, slices.Equal(got, want)
 }
 
 // snapshotSystemTime returns the HLC timestamp QRep queries read at via AS OF SYSTEM TIME,
