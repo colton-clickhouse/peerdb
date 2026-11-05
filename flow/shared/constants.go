@@ -52,6 +52,9 @@ const (
 	// zero year) replicated like zero dates (the epoch). Older mirrors roll a zero month or day forward to 01,
 	// inventing a real date.
 	InternalVersion_MySQLZeroDatePartsAsZero
+	// Postgres: geometry and geography keep their SRID (EWKB in the snapshot, EWKT in CDC). Older mirrors write
+	// the snapshot with SRID 0, and MySQL's SRID through CDC too.
+	InternalVersion_PgGeoKeepSRID
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
