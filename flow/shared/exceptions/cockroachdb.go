@@ -26,7 +26,7 @@ func (e *CockroachDBError) Unwrap() error {
 type CockroachChangefeedIrrecoverableError struct {
 	err error
 	// Code is a stable machine-readable reason: CURSOR_PAST_GC,
-	// TABLE_TRUNCATED, TABLE_DROPPED or TABLE_NOT_AT_CURSOR.
+	// TABLE_TRUNCATED, TABLE_DROPPED, TABLE_NOT_AT_CURSOR or COLUMN_FAMILIES.
 	Code string
 }
 

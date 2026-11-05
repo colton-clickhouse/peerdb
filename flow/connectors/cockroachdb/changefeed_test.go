@@ -686,6 +686,16 @@ func TestChangefeedErrorClassification(t *testing.T) {
 	require.True(t, isCursorTooOldError(gcPgErr))
 	require.True(t, isPermanentChangefeedError(gcPgErr))
 
+	// a table with several column families is refused on every attempt (captured on v25.4)
+	familiesErr := &pgconn.PgError{
+		Code: pgerrcode.FeatureNotSupported,
+		Message: "CHANGEFEED targeting a table (t) with multiple column families requires WITH split_column_families" +
+			" and will emit multiple events per row.",
+	}
+	require.True(t, isColumnFamiliesError(familiesErr))
+	require.True(t, isPermanentChangefeedError(fmt.Errorf("failed to create changefeed: %w", familiesErr)))
+	require.False(t, isColumnFamiliesError(gcErr))
+
 	// missing CHANGEFEED/SELECT privilege recurs deterministically on every
 	// reconnect; surface it immediately instead of burning the retry budget
 	insufficientPrivilege := &pgconn.PgError{

@@ -940,6 +940,15 @@ const (
 // retrying cannot succeed.
 const targetNotAtCursorErrorSubstring = "supplied backups do not cover requested time"
 
+// columnFamiliesErrorSubstring appears when a watched table has more than one
+// column family: CREATE CHANGEFEED refuses it ("... has multiple column
+// families ... requires WITH split_column_families") on every attempt.
+const columnFamiliesErrorSubstring = "split_column_families"
+
+func isColumnFamiliesError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), columnFamiliesErrorSubstring)
+}
+
 func isTargetNotAtCursorError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), targetNotAtCursorErrorSubstring)
 }
@@ -993,7 +1002,7 @@ func isPermanentChangefeedError(err error) bool {
 	// wrapping), so they are matched on message before any code-based
 	// classification
 	if isCursorTooOldError(err) || isTableTruncatedError(err) || isTableDroppedError(err) ||
-		isTargetNotAtCursorError(err) {
+		isTargetNotAtCursorError(err) || isColumnFamiliesError(err) {
 		return true
 	}
 	if _, ok := errors.AsType[*terminalChangefeedError](err); ok {

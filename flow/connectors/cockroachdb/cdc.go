@@ -247,7 +247,6 @@ func (c *CockroachDBConnector) PullRecords(
 	if err != nil {
 		return err
 	}
-
 	state := &changefeedPullState{
 		req:              req,
 		tables:           make([]*common.QualifiedTable, 0, len(req.TableNameMapping)),
@@ -350,7 +349,8 @@ func (c *CockroachDBConnector) PullRecords(
 		if isCursorTooOldError(err) {
 			return exceptions.NewCockroachChangefeedIrrecoverableError("CURSOR_PAST_GC",
 				fmt.Errorf("changefeed cursor %s is older than the replica GC threshold and cannot resume;"+
-					" increase the CockroachDB gc.ttlseconds zone setting on the source tables or resync the mirror: %w",
+					" increase the CockroachDB gc.ttlseconds zone setting on the source tables or resync the mirror"+
+					" (a system range such as /Table/{0-4} means the system database's zone, 4 h by default): %w",
 					state.cursor, err))
 		}
 		if isTableTruncatedError(err) {
@@ -362,6 +362,13 @@ func (c *CockroachDBConnector) PullRecords(
 		if isTableDroppedError(err) {
 			return exceptions.NewCockroachChangefeedIrrecoverableError("TABLE_DROPPED",
 				fmt.Errorf("a table watched by mirror %s was dropped; remove it from the mirror or resync: %w",
+					req.FlowJobName, err))
+		}
+		if isColumnFamiliesError(err) {
+			return exceptions.NewCockroachChangefeedIrrecoverableError("COLUMN_FAMILIES",
+				fmt.Errorf("a table watched by mirror %s has more than one column family, which PeerDB's changefeed"+
+					" can't read; recreate the table with a single column family (columns can't move between families)"+
+					" or remove it from the mirror: %w",
 					req.FlowJobName, err))
 		}
 		if isTargetNotAtCursorError(err) {
