@@ -21,6 +21,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/otel_metrics"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared"
+	"github.com/PeerDB-io/peerdb/flow/shared/datatypes"
 	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
@@ -270,11 +271,17 @@ func (c *CockroachDBConnector) PullQRepRecords(
 
 	arrayNullElements := config.Version >= shared.InternalVersion_ArrayNullElements
 	pg := newPgValues(config.Version, dstType)
+	// a Postgres destination keeps the SRIDs the snapshot sends (InternalVersion_PgConstrainedGeo)
+	alignGeo := dstType == protos.DBType_POSTGRES && config.Version >= shared.InternalVersion_PgConstrainedGeo
+	geoSRIDs := constrainedGeoSRIDs(tableSchema)
 	var totalRecords, totalBytes int64
 	for rows.Next() {
 		record, err := c.mapRowToQRecord(rows, fds, schema, dstType, arrayNullElements, pg)
 		if err != nil {
 			return totalRecords, totalBytes, fmt.Errorf("failed to map row to QRecord: %w", err)
+		}
+		if alignGeo {
+			alignGeoSRIDs(record, schema, geoSRIDs)
 		}
 		if err := stream.Send(ctx, record); err != nil {
 			return totalRecords, totalBytes, fmt.Errorf("failed to send record to stream: %w", err)
@@ -574,4 +581,55 @@ func nilElements(elems []any) []bool {
 		nulls[i] = el == nil
 	}
 	return nulls
+}
+
+// constrainedGeoSRIDs maps the table's constrained geometry / geography columns (geometry(Point,4326)) to their SRID.
+func constrainedGeoSRIDs(tableSchema *protos.TableSchema) map[string]int {
+	var srids map[string]int
+	for _, col := range tableSchema.Columns {
+		kind := types.QValueKind(col.Type)
+		if kind != types.QValueKindGeometry && kind != types.QValueKindGeography {
+			continue
+		}
+		if srid := datatypes.GeoTypmodSRID(col.TypeModifier); srid != 0 {
+			if srids == nil {
+				srids = make(map[string]int)
+			}
+			srids[col.Name] = srid
+		}
+	}
+	return srids
+}
+
+// alignGeoSRIDs gives a snapshot row's geometry / geography values the SRIDs the changefeed gives the same row. Its
+// GeoJSON has none: CDC writes a constrained column's SRID, and none for the others (geography then defaults to
+// 4326). Keeping the snapshot's own SRIDs there would leave one column with values in several SRIDs, which PostGIS
+// functions refuse to combine, and a CDC update would change a row's SRID.
+func alignGeoSRIDs(record []types.QValue, schema types.QRecordSchema, constrained map[string]int) {
+	for i, field := range schema.Fields {
+		if field.Type != types.QValueKindGeometry && field.Type != types.QValueKindGeography {
+			continue
+		}
+		if srid, ok := constrained[field.Name]; ok {
+			record[i] = withGeoSRID(record[i], srid)
+			continue
+		}
+		switch v := record[i].(type) {
+		case types.QValueGeometry:
+			v.Val = withoutWKTSRID(v.Val)
+			record[i] = v
+		case types.QValueGeography:
+			v.Val = withoutWKTSRID(v.Val)
+			record[i] = v
+		}
+	}
+}
+
+func withoutWKTSRID(wkt string) string {
+	if rest, ok := strings.CutPrefix(wkt, "SRID="); ok {
+		if _, w, found := strings.Cut(rest, ";"); found {
+			return w
+		}
+	}
+	return wkt
 }

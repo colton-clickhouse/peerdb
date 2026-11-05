@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -132,11 +133,20 @@ func pgSpecialNumeric(sv types.SpecialValue) pgtype.Numeric {
 	return pgtype.Numeric{NaN: sv == types.SpecialNaN, InfinityModifier: pgInfinity(sv), Valid: true}
 }
 
+// PgCopyOptions are the internal-version dependent conversions of QRecordCopyFromSource.
+type PgCopyOptions struct {
+	// Intervals writes intervals as intervals, and as their Postgres text into text columns (InternalVersion_PgInterval)
+	Intervals bool
+	// GeoSRIDs keeps geometry / geography SRIDs (EWKB) instead of dropping them (InternalVersion_PgConstrainedGeo):
+	// a constrained target column (geometry(Point,4326)) rejects values without its SRID
+	GeoSRIDs bool
+}
+
 type QRecordCopyFromSource struct {
 	stream        *QRecordStream
 	currentRecord []types.QValue
-	// pgIntervals writes intervals as intervals, and as their Postgres text into text columns (InternalVersion_PgInterval)
-	pgIntervals bool
+	pgIntervals   bool
+	pgGeoSRIDs    bool
 	// noNumericInfinity writes numeric +-Infinity as NULL (WithoutNumericInfinity), for Postgres before 14
 	noNumericInfinity bool
 }
@@ -149,12 +159,13 @@ func (src *QRecordCopyFromSource) WithoutNumericInfinity() *QRecordCopyFromSourc
 
 func NewQRecordCopyFromSource(
 	stream *QRecordStream,
-	pgIntervals bool,
+	opts PgCopyOptions,
 ) *QRecordCopyFromSource {
 	return &QRecordCopyFromSource{
 		stream:        stream,
 		currentRecord: nil,
-		pgIntervals:   pgIntervals,
+		pgIntervals:   opts.Intervals,
+		pgGeoSRIDs:    opts.GeoSRIDs,
 	}
 }
 
@@ -173,6 +184,26 @@ func geoWktToWkb(wkt string) ([]byte, error) {
 	}
 
 	return geo.GeoToWKB(wkt)
+}
+
+// geoWkb is the binary COPY value of a geometry / geography WKT: EWKB keeping its SRID=n; prefix with pgGeoSRIDs,
+// else WKB without it.
+func (src *QRecordCopyFromSource) geoWkb(wkt string) ([]byte, error) {
+	if !src.pgGeoSRIDs {
+		return geoWktToWkb(wkt)
+	}
+	var srid int
+	if rest, ok := strings.CutPrefix(wkt, "SRID="); ok {
+		sridText, wktWithoutSRID, found := strings.Cut(rest, ";")
+		if found {
+			var err error
+			if srid, err = strconv.Atoi(sridText); err != nil {
+				return nil, fmt.Errorf("invalid SRID in %q: %w", wkt, err)
+			}
+			wkt = wktWithoutSRID
+		}
+	}
+	return geo.GeoToEWKB(wkt, srid)
 }
 
 func (src *QRecordCopyFromSource) Values() ([]any, error) {
@@ -277,13 +308,13 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		case types.QValueHStore:
 			values[i] = v.Val
 		case types.QValueGeography:
-			wkb, err := geoWktToWkb(v.Val)
+			wkb, err := src.geoWkb(v.Val)
 			if err != nil {
 				return nil, err
 			}
 			values[i] = wkb
 		case types.QValueGeometry:
-			wkb, err := geoWktToWkb(v.Val)
+			wkb, err := src.geoWkb(v.Val)
 			if err != nil {
 				return nil, err
 			}

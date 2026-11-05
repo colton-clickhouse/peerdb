@@ -20,6 +20,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/otel_metrics"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared"
+	"github.com/PeerDB-io/peerdb/flow/shared/datatypes"
 	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
@@ -878,7 +879,7 @@ func (c *CockroachDBConnector) emitSchemaDelta(
 	// DDL has run since. The timestamp is always readable: it lies at or ahead
 	// of the changefeed cursor, which itself must be inside the GC window for
 	// the feed to run at all.
-	freshSchemas, err := c.getTableSchema(ctx, state.req.Env, protos.TypeSystem_Q,
+	freshSchemas, err := c.getTableSchema(ctx, state.req.Env, state.req.InternalVersion, protos.TypeSystem_Q,
 		[]*protos.TableMapping{{SourceTableIdentifier: source}}, asOf)
 	if err != nil {
 		return fmt.Errorf("failed to refresh schema for %s: %w", source, err)
@@ -912,6 +913,16 @@ func (c *CockroachDBConnector) emitSchemaDelta(
 			Precision: precision,
 			Scale:     scale,
 			Nullable:  col.Nullable,
+		}
+		// a constrained geometry's SRID, as the schema read at the next pull would give it: without it, rows until
+		// then would get none and rows after it the column's, two SRIDs in one column
+		if kind := types.QValueKind(col.Type); kind == types.QValueKindGeometry || kind == types.QValueKindGeography {
+			if srid := datatypes.GeoTypmodSRID(col.TypeModifier); srid != 0 {
+				if schema.geoSRIDs == nil {
+					schema.geoSRIDs = make(map[string]int)
+				}
+				schema.geoSRIDs[colName] = srid
+			}
 		}
 	}
 	if len(delta.AddedColumns) > 0 {
