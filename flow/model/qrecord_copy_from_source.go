@@ -71,8 +71,8 @@ func (v pgTimeTZ) BytesValue() ([]byte, error) {
 	return nil, errors.New("a TIMETZ value can't go into a bytea column: bytea takes binary source columns only")
 }
 
-// StripNulBytes removes U+0000, which PG text can't hold (22021 in COPY, and JSONB refuses \u0000).
-// The value written to PG then differs from the source: a deliberate behavioral difference.
+// StripNulBytes removes U+0000, which PG text can't hold (22021 in COPY, and JSONB refuses \u0000). Opt-in
+// (PEERDB_PG_STRIP_NUL_BYTES): the value written to PG then differs from the source.
 func StripNulBytes(s string) string {
 	if strings.IndexByte(s, 0) < 0 {
 		return s
@@ -89,6 +89,20 @@ func stripNulBytesAll(a []string) []string {
 		out[i] = StripNulBytes(s)
 	}
 	return out
+}
+
+func (src *QRecordCopyFromSource) nulBytes(s string) string {
+	if src.stripNulBytes {
+		return StripNulBytes(s)
+	}
+	return s
+}
+
+func (src *QRecordCopyFromSource) nulBytesAll(a []string) []string {
+	if src.stripNulBytes {
+		return stripNulBytesAll(a)
+	}
+	return a
 }
 
 func constructArray[T any](v []T) *pgtype.Array[T] {
@@ -119,6 +133,14 @@ type QRecordCopyFromSource struct {
 	stream        *QRecordStream
 	currentRecord []types.QValue
 	pgGeoSRIDs    bool
+	// stripNulBytes removes U+0000 from strings (WithStripNulBytes)
+	stripNulBytes bool
+}
+
+// WithStripNulBytes makes src remove NUL bytes from strings, which Postgres can't store (PEERDB_PG_STRIP_NUL_BYTES).
+func (src *QRecordCopyFromSource) WithStripNulBytes() *QRecordCopyFromSource {
+	src.stripNulBytes = true
+	return src
 }
 
 func NewQRecordCopyFromSource(
@@ -211,9 +233,9 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		case types.QValueQChar:
 			values[i] = rune(v.Val)
 		case types.QValueString:
-			values[i] = StripNulBytes(v.Val)
+			values[i] = src.nulBytes(v.Val)
 		case types.QValueEnum:
-			values[i] = StripNulBytes(v.Val)
+			values[i] = src.nulBytes(v.Val)
 		case types.QValueUint16Enum:
 			values[i] = v.Val
 		case types.QValueUint64Set:
@@ -263,9 +285,9 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 			}
 			values[i] = wkb
 		case types.QValueArrayString:
-			values[i] = constructArray(stripNulBytesAll(v.Val))
+			values[i] = constructArray(src.nulBytesAll(v.Val))
 		case types.QValueArrayEnum:
-			values[i] = constructArray(stripNulBytesAll(v.Val))
+			values[i] = constructArray(src.nulBytesAll(v.Val))
 		case types.QValueArrayDate:
 			values[i] = constructArray(v.Val)
 		case types.QValueArrayInterval:

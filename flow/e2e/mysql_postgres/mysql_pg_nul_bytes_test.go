@@ -11,7 +11,7 @@ import (
 	e2e "github.com/PeerDB-io/peerdb/flow/e2e"
 )
 
-// NUL bytes in strings: PG text can't hold them, PeerDB strips them.
+// NUL bytes in strings: PG text can't hold them; with PEERDB_PG_STRIP_NUL_BYTES, PeerDB strips them.
 func (s MySQLPGSuite) Test_Nul_Bytes_Stripped() {
 	t := s.t
 	srcTable := "nul_strip"
@@ -28,6 +28,7 @@ func (s MySQLPGSuite) Test_Nul_Bytes_Stripped() {
 	}
 	flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
 	flowConnConfig.DoInitialSnapshot = true
+	flowConnConfig.Env = map[string]string{"PEERDB_PG_STRIP_NUL_BYTES": "true"}
 	tc := e2e.NewTemporalClient(t)
 	env := e2e.ExecutePeerflow(t, tc, flowConnConfig)
 	e2e.SetupCDCFlowStatusQuery(t, env, flowConnConfig)

@@ -477,8 +477,8 @@ func (s CRDBPGSuite) Test_TimeTZ_Snapshot_And_CDC() {
 }
 
 // NUL bytes in strings (PG text can't hold U+0000, so the snapshot's COPY failed with 22021 and retried
-// forever; via CDC the raw table's JSONB refused \u0000). PeerDB strips them on the way into PG: a
-// deliberate behavioral difference, the value is not identical to the source.
+// forever; via CDC the raw table's JSONB refused \u0000). With PEERDB_PG_STRIP_NUL_BYTES, PeerDB strips them on the
+// way into PG: the value is then not identical to the source.
 func (s CRDBPGSuite) Test_Nul_Bytes_Stripped() {
 	t := s.t
 	srcTable := "nul_strip"
@@ -490,6 +490,7 @@ func (s CRDBPGSuite) Test_Nul_Bytes_Stripped() {
 	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES `+fmt.Sprintf(values, 1), srcFull)))
 
 	flowConnConfig := s.startMirror(srcTable)
+	flowConnConfig.Env = map[string]string{"PEERDB_PG_STRIP_NUL_BYTES": "true"}
 	tc := NewTemporalClient(t)
 	env := ExecutePeerflow(t, tc, flowConnConfig)
 	SetupCDCFlowStatusQuery(t, env, flowConnConfig)

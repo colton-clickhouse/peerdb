@@ -96,11 +96,15 @@ func syncRecordsCore[Items model.Items](
 
 	numRecords := int64(0)
 	tableNameRowsMapping := utils.InitialiseTableRowsMap(req.TableMappings)
+	stripNulBytes, err := internal.PeerDBPgStripNulBytes(ctx, req.Env)
+	if err != nil {
+		return nil, err
+	}
 	jsonOpts := model.ToJSONOptions{
 		UnnestColumns:  nil,
 		HStoreAsJSON:   false,
 		GeometryAsEWKT: req.Version >= shared.InternalVersion_PgGeoKeepSRID,
-		StripNulBytes:  true,
+		StripNulBytes:  stripNulBytes,
 	}
 	streamReadFunc := func() ([]any, error) {
 		for record := range req.Records.GetRecords() {

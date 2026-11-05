@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
+	"github.com/PeerDB-io/peerdb/flow/internal"
 	"github.com/PeerDB-io/peerdb/flow/model"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared"
@@ -30,10 +31,15 @@ func (c *PostgresConnector) SyncQRepRecords(
 	partition *protos.QRepPartition,
 	stream *model.QRecordStream,
 ) (int64, shared.QRepWarnings, error) {
+	stripNulBytes, err := internal.PeerDBPgStripNulBytes(ctx, config.Env)
+	if err != nil {
+		return 0, nil, err
+	}
 	return syncQRepRecords(c, ctx, config, partition, RecordStreamSink{
 		QRecordStream:   stream,
 		DestinationType: protos.DBType_POSTGRES,
 		Version:         config.Version,
+		StripNulBytes:   stripNulBytes,
 	})
 }
 
