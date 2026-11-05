@@ -2294,6 +2294,30 @@ func TestNormalizeGapDue(t *testing.T) {
 	require.False(t, kept, "a flow not logged for two gaps is forgotten")
 }
 
+// A value pgx can't encode for the target column fails COPY with the server's 57014, like a statement timeout: only
+// the first needs the user.
+func TestPostgresCopyEncodeErrorNeedsTheUser(t *testing.T) {
+	// as the snapshot's COPY into the default integer column returns it
+	err := fmt.Errorf("failed to sync records: failed to copy records into destination table: %w", &pgconn.PgError{
+		Severity: "ERROR", Code: pgerrcode.QueryCanceled,
+		Message: "COPY from stdin failed: unable to encode 0xee6b2800 into binary format for int4 (OID 23): " +
+			"4000000000 is greater than maximum value for int4",
+	})
+	errorClass, errInfo := GetErrorClass(t.Context(), err)
+	assert.Equal(t, ErrorNotifyInvalidDestinationTableDefinition, errorClass)
+	assert.Equal(t, NotifyUser, errorClass.ErrorAction())
+	assert.Equal(t, ErrorInfo{Source: ErrorSourcePostgres, Code: pgerrcode.QueryCanceled}, errInfo)
+
+	for _, message := range []string{
+		"canceling statement due to statement timeout", "canceling statement due to user request",
+		"COPY from stdin failed: context canceled",
+	} {
+		errorClass, _ := GetErrorClass(t.Context(), fmt.Errorf("failed to copy records into destination table: %w",
+			&pgconn.PgError{Severity: "ERROR", Code: pgerrcode.QueryCanceled, Message: message}))
+		assert.Equal(t, ErrorNotifyConnectivity, errorClass, message)
+	}
+}
+
 func TestPostgresNormalizeErrorsNeedingTheUser(t *testing.T) {
 	t.Parallel()
 
