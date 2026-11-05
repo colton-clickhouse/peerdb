@@ -340,8 +340,8 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage) (types.QV
 		}
 		return types.QValueInt64{Val: v}, nil
 	case types.QValueKindUInt32:
-		// oid columns; changefeed JSON renders them as plain numbers
-		v, err := strconv.ParseUint(string(raw), 10, 32)
+		// oid columns; changefeed JSON renders them as quoted strings ("1")
+		v, err := strconv.ParseUint(jsonNumberText(raw), 10, 32)
 		if err != nil {
 			return nil, err
 		}
@@ -506,7 +506,8 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage) (types.QV
 			if isJSONNull(el) {
 				return 0, nil
 			}
-			return strconv.ParseInt(string(el), 10, 64)
+			// OID[] maps here too, and its elements are quoted strings
+			return strconv.ParseInt(jsonNumberText(el), 10, 64)
 		})
 		if err != nil {
 			return nil, err
@@ -637,6 +638,14 @@ func changefeedArray[T any](raw json.RawMessage, conv func(json.RawMessage) (T, 
 		out = append(out, v)
 	}
 	return out, nil
+}
+
+// jsonNumberText returns a JSON number's text, unquoting it if it was emitted as a JSON string.
+func jsonNumberText(raw json.RawMessage) string {
+	if s, err := jsonString(raw); err == nil {
+		return s
+	}
+	return string(raw)
 }
 
 func parseChangefeedFloat(raw json.RawMessage) (float64, error) {
