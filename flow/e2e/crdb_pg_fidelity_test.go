@@ -68,7 +68,8 @@ func (s CRDBPGSuite) Test_Type_Fidelity_Snapshot_And_CDC() {
 		{"c_dec_inf", `c_dec_inf::text = 'Infinity'`, `c_dec_inf::text`},
 		{"c_dec_big", `c_dec_big::text = '12345678901234567890.123456789012345678'`, `c_dec_big::text`},
 		{"c_interval", `c_interval::text::interval::text = '1 year 2 mons 3 days 04:05:06.789'`, `c_interval::text`},
-		{"c_time24", `c_time24::text = '24:00:00'`, `c_time24::text`},
+		// TIME '24:00:00' is clamped into the day on every destination (documented in the connector's README)
+		{"c_time24", `c_time24::text = '23:59:59.999999'`, `c_time24::text`},
 		{"c_jsonb", `c_jsonb::jsonb::text = '{"a": [1, null], "b": 1}'`, `c_jsonb::text`},
 		// a top-level JSONB null is SQL NULL on both paths, deliberately: changefeed JSON writes both as null (known
 		// limitation, to revisit if it's a problem in practice)
@@ -138,7 +139,9 @@ func (s CRDBPGSuite) Test_Types_That_Block_Snapshot() {
 		{"date_inf", "DATE", "'infinity'"}, {"ts_inf", "TIMESTAMPTZ", "'infinity'"},
 		{"geom", "GEOMETRY", "'SRID=3857;POINT(1 2)'"}, {"bytes_empty", "BYTES", "''::BYTES"},
 		{"mood", schema + ".mood2", "'sad'"}, {"bit", "BIT(4)", "B'1010'"}, {"inet", "INET", "'192.168.1.0/24'"},
-		{"interval_arr", "INTERVAL[]", "ARRAY['1 day'::INTERVAL]"}, {"str_nul", "STRING", `e'a\x00b'`},
+		{"interval_arr", "INTERVAL[]", "ARRAY['1 day'::INTERVAL]"},
+		// not a string with a NUL byte: Postgres refuses it, and without PEERDB_PG_STRIP_NUL_BYTES the snapshot fails
+		// on it by design (Test_Nul_Bytes_Stripped covers the opt-in)
 	}
 	tables := make([]string, 0, 2*len(cases))
 	for _, c := range cases {
