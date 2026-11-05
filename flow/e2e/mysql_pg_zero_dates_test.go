@@ -183,8 +183,8 @@ func (s MySQLPGSuite) incrementalQRep(name string) (WorkflowRun, string) {
 }
 
 // Incremental QRep with a partial-zero minimum: the first cycle used to read the table as one partition that
-// every later cycle took as already synced, so rows inserted after it never replicated. The minimum is floored to
-// a real date instead, and later rows arrive.
+// every later cycle took as already synced, so rows inserted after it never replicated. The minimum is rounded
+// down to a real date instead, and later rows arrive.
 func (s MySQLPGSuite) Test_Partial_Zero_Watermark_Incremental_QRep() {
 	t := s.t
 	name := "qrep_partial_zero_min"
@@ -231,4 +231,54 @@ func (s MySQLPGSuite) Test_Zero_Year_Watermark_Refused_For_Incremental_QRep() {
 	})
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
+}
+
+// A zero date, or one with a zero part, arrives as the epoch, so in a key column distinct source rows would
+// merge (Postgres: a unique violation in the snapshot, then merged rows in CDC; ClickHouse: silent dedup). The
+// snapshot and CDC both refuse it, naming the column.
+func (s MySQLPGSuite) Test_Zero_Date_Key_Refused() {
+	t := s.t
+	catalogPool, err := internal.GetCatalogConnectionPoolFromEnv(t.Context())
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name     string
+		snapshot bool
+	}{{"zero_date_key_snapshot", true}, {"zero_date_key_cdc", false}} {
+		srcFull := AttachSchema(s, tc.name)
+		require.NoError(t, s.source.Exec(t.Context(), `SET SESSION sql_mode = ''`))
+		require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+			`CREATE TABLE %s (k DATE PRIMARY KEY, v INT)`, srcFull)))
+		require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+			`INSERT INTO %s VALUES ('2024-05-10', 1)`, srcFull)))
+		if tc.snapshot {
+			require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+				`INSERT INTO %s VALUES ('2025-03-00', 2)`, srcFull)))
+		}
+		connectionGen := FlowConnectionGenerationConfig{
+			FlowJobName:   AddSuffix(s, tc.name),
+			TableMappings: TableMappings(s, tc.name, tc.name),
+			Destination:   s.Peer().Name,
+		}
+		flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
+		flowConnConfig.DoInitialSnapshot = true
+		env := ExecutePeerflow(t, NewTemporalClient(t), flowConnConfig)
+		if !tc.snapshot { // a failing snapshot never reaches RUNNING
+			SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+			EnvWaitFor(t, env, 3*time.Minute, "initial load", func() bool {
+				return s.destInt(`SELECT count(*) FROM `+s.DestinationTable(tc.name)) == 1
+			})
+			EnvNoError(t, env, s.source.Exec(t.Context(), `SET SESSION sql_mode = ''`))
+			EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(
+				`INSERT INTO %s VALUES ('2025-03-00', 2)`, srcFull)))
+		}
+		EnvWaitFor(t, env, 3*time.Minute, "error naming the key column "+tc.name, func() bool {
+			count, err := GetLogCount(t.Context(), catalogPool, flowConnConfig.FlowJobName, "error",
+				"primary key column k of")
+			return err == nil && count > 0
+		})
+		require.Zero(t, s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE k = '1970-01-01'`,
+			s.DestinationTable(tc.name))), "a zero-date key must not arrive as the epoch")
+		env.Cancel(t.Context())
+		RequireEnvCanceled(t, env)
+	}
 }
