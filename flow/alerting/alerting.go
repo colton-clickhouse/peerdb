@@ -27,6 +27,8 @@ type Alerter struct {
 	otelManager *otel_metrics.OtelManager
 	// normalizeGapLogged is when each flow last logged its normalize gap, to log it once per alerting gap
 	normalizeGapLogged sync.Map
+	// noProgressLogged is when each flow last logged that it makes no progress, to log it once per alerting gap
+	noProgressLogged sync.Map
 }
 
 type AlertSenderConfig struct {
@@ -300,20 +302,101 @@ func (a *Alerter) AlertIfTooLongSinceLastNormalize(ctx context.Context, alertKey
 	}
 }
 
-// normalizeGapDue reports whether a flow's normalize-gap warning is due: once per gap. It forgets flows not
-// logged for two gaps (dropped mirrors). Per worker process, so a restart or another worker may log it again.
+// normalizeGapDue reports whether a flow's normalize-gap warning is due: once per gap (logDue).
 func (a *Alerter) normalizeGapDue(flowName string, gap time.Duration, now time.Time) bool {
-	if last, ok := a.normalizeGapLogged.Load(flowName); ok && now.Sub(last.(time.Time)) < gap {
+	return logDue(&a.normalizeGapLogged, flowName, gap, now)
+}
+
+// logDue reports whether a flow's warning kept in logged is due: once per gap. It forgets flows not logged for two
+// gaps (dropped mirrors). Per worker process, so a restart or another worker may log it again.
+func logDue(logged *sync.Map, flowName string, gap time.Duration, now time.Time) bool {
+	if last, ok := logged.Load(flowName); ok && now.Sub(last.(time.Time)) < gap {
 		return false
 	}
-	a.normalizeGapLogged.Store(flowName, now)
-	a.normalizeGapLogged.Range(func(k, v any) bool {
+	logged.Store(flowName, now)
+	logged.Range(func(k, v any) bool {
 		if now.Sub(v.(time.Time)) >= 2*gap {
-			a.normalizeGapLogged.Delete(k)
+			logged.Delete(k)
 		}
 		return true
 	})
 	return true
+}
+
+// noProgressDue reports whether a flow that last made progress at lastProgress has gone without it for longer than
+// threshold (0: never)
+func noProgressDue(threshold time.Duration, lastProgress time.Time, now time.Time) bool {
+	return threshold > 0 && now.Sub(lastProgress) > threshold
+}
+
+// alertIfNoProgress warns in the mirror's log and alerts, once per alerting gap, when an error that needs the user
+// was just recorded for a flow that has made no progress for longer than PEERDB_STALLED_ALERT_THRESHOLD_MINUTES.
+// The error alone decides: one such error after a long run of transient ones alerts, and there's no exact "failing
+// since" (the error log has the history).
+func (a *Alerter) alertIfNoProgress(ctx context.Context, flowName string, errClass ErrorClass, err error) {
+	logger := internal.LoggerFromCtx(ctx)
+	// snapshot partitions report their errors under their own clone_ flow; progress and the alert are the mirror's
+	if metadata := internal.GetFlowMetadata(ctx); metadata != nil && metadata.FlowName != "" {
+		flowName = metadata.FlowName
+	}
+	thresholdMinutes, confErr := internal.PeerDBStalledAlertThresholdMinutes(ctx, nil)
+	if confErr != nil {
+		logger.Warn("failed to get the no-progress alert threshold from catalog", slog.Any("error", confErr))
+		return
+	}
+	threshold := time.Duration(thresholdMinutes) * time.Minute
+	if threshold == 0 {
+		return
+	}
+	lastProgress, progressErr := internal.FlowLastProgress(ctx, a.CatalogPool, flowName)
+	if progressErr != nil {
+		if !errors.Is(progressErr, pgx.ErrNoRows) {
+			logger.Warn("failed to check the mirror's progress", slog.Any("error", progressErr))
+		}
+		return
+	}
+	now := time.Now()
+	if !noProgressDue(threshold, lastProgress, now) {
+		return
+	}
+	gap, gapErr := internal.PeerDBAlertingGapMinutesAsDuration(ctx, nil)
+	if gapErr != nil || gap == 0 {
+		gap = 15 * time.Minute
+	}
+	if !logDue(&a.noProgressLogged, flowName, gap, now) {
+		return
+	}
+
+	firstLine, _, _ := strings.Cut(err.Error(), "\n")
+	if len(firstLine) > 500 {
+		firstLine = strings.ToValidUTF8(firstLine[:500], "") + "…"
+	}
+	message := fmt.Sprintf("Mirror %s has made no progress since %s (more than %d minutes) and keeps failing with "+
+		"errors that need a fix (%s): %s", flowName, lastProgress.UTC().Format(time.RFC3339), thresholdMinutes,
+		errClass.String(), firstLine)
+	logger.Warn(message, slog.String("flowName", flowName))
+	if logErr := InsertFlowLog(ctx, a.CatalogPool, flowName, message, FlowErrorTypeWarn); logErr != nil {
+		logger.Warn("failed to insert flow warning", slog.Any("error", logErr))
+	}
+
+	alertSenderConfigs, sendersErr := a.registerSendersFromPool(ctx)
+	if sendersErr != nil {
+		logger.Warn("failed to set alert senders", slog.Any("error", sendersErr))
+		return
+	}
+	deploymentUIDPrefix := ""
+	if internal.PeerDBDeploymentUID() != "" {
+		deploymentUIDPrefix = fmt.Sprintf("[%s] - ", internal.PeerDBDeploymentUID())
+	}
+	alertKey := fmt.Sprintf("%s No progress with errors that need a fix for PeerDB mirror %s", deploymentUIDPrefix, flowName)
+	alertMessage := deploymentUIDPrefix + message + " — please check the mirror's errors in the UI."
+	for _, alertSenderConfig := range alertSenderConfigs {
+		if len(alertSenderConfig.AlertForMirrors) == 0 || slices.Contains(alertSenderConfig.AlertForMirrors, flowName) {
+			if a.checkAndAddAlertToCatalog(ctx, alertSenderConfig.Id, alertKey, alertMessage) {
+				a.alertToProvider(ctx, alertSenderConfig, alertKey, alertMessage)
+			}
+		}
+	}
 }
 
 func (a *Alerter) alertToProvider(ctx context.Context, alertSenderConfig AlertSenderConfig, alertKey string, alertMessage string) {
@@ -405,6 +488,9 @@ func (a *Alerter) recordFlowErrorInternal(
 	// 2. Insert log to flow_errors table
 	if err := InsertFlowLog(ctx, a.CatalogPool, flowName, errMessage, errorType); err != nil {
 		logger.Error("failed to insert flow error", slog.Any("error", err))
+	}
+	if errorType == FlowErrorTypeError && errClass.ErrorAction() == NotifyUser {
+		a.alertIfNoProgress(ctx, flowName, errClass, err)
 	}
 
 	// 3. Record error metrics

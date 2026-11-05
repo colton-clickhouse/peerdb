@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/PeerDB-io/peerdb/flow/generated/protos"
 	"github.com/PeerDB-io/peerdb/flow/internal"
 )
 
@@ -55,5 +56,17 @@ func (s MySQLPGSuite) Test_No_Progress_With_User_Actionable_Error_Warns() {
 	RequireEnvCanceled(t, env)
 }
 
-// checkNoProgressStatus: added with the mirror status fields
-func (s MySQLPGSuite) checkNoProgressStatus(string) {}
+// checkNoProgressStatus: the mirror status shows the mirror RUNNING, with no progress for over a minute and the
+// failing normalize as its last error
+func (s MySQLPGSuite) checkNoProgressStatus(flowName string) {
+	t := s.t
+	client, err := NewApiClient()
+	require.NoError(t, err)
+	res, err := client.MirrorStatus(t.Context(), &protos.MirrorStatusRequest{FlowJobName: flowName})
+	require.NoError(t, err)
+	require.Equal(t, protos.FlowStatus_STATUS_RUNNING, res.CurrentFlowState)
+	require.NotNil(t, res.LastProgressAt)
+	require.Greater(t, time.Since(res.LastProgressAt.AsTime()), time.Minute)
+	require.NotNil(t, res.LastError)
+	require.Contains(t, res.LastError.Message, "error executing normalize statement for table")
+}

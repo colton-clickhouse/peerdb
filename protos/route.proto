@@ -367,6 +367,16 @@ message MirrorStatusResponse {
   }
   peerdb_flow.FlowStatus current_flow_state = 5;
   google.protobuf.Timestamp created_at = 7;
+  // when the mirror last made progress: its newest normalized CDC batch or finished QRep partition (its initial
+  // snapshot's included), else its creation
+  google.protobuf.Timestamp last_progress_at = 8;
+  // the mirror's newest error log, if it has one
+  MirrorLastError last_error = 9;
+}
+
+message MirrorLastError {
+  string message = 1;
+  google.protobuf.Timestamp timestamp = 2;
 }
 
 message InitialLoadSummaryRequest { string parent_mirror_name = 1; }
