@@ -343,3 +343,25 @@ func TestCheckZeroDateKey(t *testing.T) {
 	require.NoError(t, checkZeroDateKey(time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC), ts, keys, "db.t", gate))
 	require.NoError(t, checkZeroDateKey("2025-03-00", key, keys, "db.t", gate-1), "older mirrors unchanged")
 }
+
+// TINYINT(1) reads as an integer only with an integer destination_type (Postgres or ClickHouse type names)
+func TestTinyInt1Kind(t *testing.T) {
+	for _, tc := range []struct {
+		columnType, destinationType string
+		want                        types.QValueKind
+	}{
+		{"tinyint(1)", "", types.QValueKindBoolean},
+		{"tinyint(1)", "boolean", types.QValueKindBoolean},
+		{"tinyint(1)", "smallint", types.QValueKindInt8},
+		{"tinyint(1)", "Int8", types.QValueKindInt8},
+		{"tinyint(1)", "Nullable(Int16)", types.QValueKindInt8},
+		{"tinyint(1) unsigned", "UInt8", types.QValueKindUInt8},
+		{"tinyint(1)", "text", types.QValueKindBoolean},
+	} {
+		qkind, err := QkindFromMysqlColumnType(tc.columnType, true, shared.InternalVersion_Latest)
+		require.NoError(t, err)
+		require.Equal(t, tc.want, tinyInt1Kind(qkind, tc.columnType, tc.destinationType), "%s %s", tc.columnType, tc.destinationType)
+	}
+	// other columns keep their kind
+	require.Equal(t, types.QValueKindInt32, tinyInt1Kind(types.QValueKindInt32, "int", "smallint"))
+}

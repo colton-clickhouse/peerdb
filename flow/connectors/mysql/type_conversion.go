@@ -2,6 +2,7 @@ package connmysql
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
@@ -114,4 +115,21 @@ func shouldReportColumnTypeChange(schemaKind, wireKind types.QValueKind, flavor 
 		return false
 	}
 	return true
+}
+
+// integerTypeRegex matches the integer types of the destinations' type names, as a column setting's destination_type:
+// Postgres smallint, integer, bigint, int2/4/8, ClickHouse Int8 to UInt256, Nullable or not
+var integerTypeRegex = regexp.MustCompile(`(?i)^(nullable\()?(u?int(2|4|8|16|32|64|128|256)?|smallint|integer|bigint)\)?$`)
+
+// tinyInt1Kind reads a TINYINT(1) column, which PeerDB reads as a boolean (MySQL's BOOLEAN), as an integer when its
+// column setting picks an integer destination_type: applications often keep small integers in TINYINT(1), and a
+// boolean can't give them back (2, 127 and -5 all read as true).
+func tinyInt1Kind(qkind types.QValueKind, columnType string, destinationType string) types.QValueKind {
+	if qkind != types.QValueKindBoolean || !integerTypeRegex.MatchString(destinationType) {
+		return qkind
+	}
+	if strings.Contains(strings.ToLower(columnType), "unsigned") {
+		return types.QValueKindUInt8
+	}
+	return types.QValueKindInt8
 }
