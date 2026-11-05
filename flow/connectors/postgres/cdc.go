@@ -71,6 +71,7 @@ type PostgresCDCSource struct {
 	handleInheritanceForNonPartitionedTables bool
 	originMetadataAsDestinationColumn        bool
 	internalVersion                          uint32
+	destinationType                          protos.DBType
 	warnedTypeChanges                        sync.Map
 }
 
@@ -89,6 +90,8 @@ type PostgresCDCConfig struct {
 	SourceSchemaAsDestinationColumn          bool
 	OriginMetaAsDestinationColumn            bool
 	InternalVersion                          uint32
+	// DestinationType is the mirror's destination, for values only some destinations store (array infinity)
+	DestinationType protos.DBType
 }
 
 const clockOffsetTTL = time.Hour
@@ -186,6 +189,7 @@ func (c *PostgresConnector) NewPostgresCDCSource(ctx context.Context, cdcConfig 
 		handleInheritanceForNonPartitionedTables: cdcConfig.HandleInheritanceForNonPartitionedTables,
 		originMetadataAsDestinationColumn:        cdcConfig.OriginMetaAsDestinationColumn,
 		internalVersion:                          cdcConfig.InternalVersion,
+		destinationType:                          cdcConfig.DestinationType,
 	}, nil
 }
 
@@ -314,7 +318,7 @@ func (qProcessor) Process(
 		if err != nil {
 			p.logger.Error("error decoding text column data", slog.Any("error", err),
 				slog.String("columnName", col.Name), slog.Uint64("dataType", uint64(col.DataType)))
-			return fmt.Errorf("error decoding text data for column %s: %w", col.Name, err)
+			return fmt.Errorf("error decoding text data for column %s: %w", col.Name, withArrayColumn(err, col.Name))
 		}
 		items.AddColumn(col.Name, data)
 	case 'b': // binary
@@ -322,7 +326,7 @@ func (qProcessor) Process(
 			tuple.Data, col.DataType, col.TypeModifier, pgtype.BinaryFormatCode, customTypeMapping, p.internalVersion,
 		)
 		if err != nil {
-			return fmt.Errorf("error decoding binary data for column %s: %w", col.Name, err)
+			return fmt.Errorf("error decoding binary data for column %s: %w", col.Name, withArrayColumn(err, col.Name))
 		}
 		items.AddColumn(col.Name, data)
 	default:
@@ -419,7 +423,7 @@ func (p *PostgresCDCSource) decodeColumnData(
 					parsedData = json.RawMessage("null")
 				}
 			}
-			return p.parseFieldFromPostgresOID(dataType, typmod, true, protos.DBType_DBTYPE_UNKNOWN,
+			return p.parseFieldFromPostgresOID(dataType, typmod, true, p.destinationType,
 				parsedData, customTypeMapping, p.internalVersion)
 		}
 		return types.QValueNull(types.QValueKindJSON), nil
@@ -459,7 +463,7 @@ func (p *PostgresCDCSource) decodeColumnData(
 			}
 			parsedData = arr
 		}
-		return p.parseFieldFromPostgresOID(dataType, typmod, true, protos.DBType_DBTYPE_UNKNOWN,
+		return p.parseFieldFromPostgresOID(dataType, typmod, true, p.destinationType,
 			parsedData, customTypeMapping, p.internalVersion)
 	} else if dt, ok := p.typeMap.TypeForOID(dataType); ok {
 		dtOid := dt.OID
@@ -488,10 +492,10 @@ func (p *PostgresCDCSource) decodeColumnData(
 			}
 			return nil, err
 		}
-		return p.parseFieldFromPostgresOID(dataType, typmod, true, protos.DBType_DBTYPE_UNKNOWN,
+		return p.parseFieldFromPostgresOID(dataType, typmod, true, p.destinationType,
 			parsedData, customTypeMapping, p.internalVersion)
 	} else if dataType == pgtype.TimetzOID { // ugly TIMETZ workaround for CDC decoding.
-		return p.parseFieldFromPostgresOID(dataType, typmod, true, protos.DBType_DBTYPE_UNKNOWN,
+		return p.parseFieldFromPostgresOID(dataType, typmod, true, p.destinationType,
 			string(data), customTypeMapping, p.internalVersion)
 	} else if typeData, ok := customTypeMapping[dataType]; ok {
 		customQKind := CustomTypeToQKind(typeData, version)
