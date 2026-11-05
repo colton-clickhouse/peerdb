@@ -100,14 +100,13 @@ func syncRecordsCore[Items model.Items](
 	if err != nil {
 		return nil, err
 	}
-	nonFiniteFloats := req.Version >= shared.InternalVersion_PgSpecialValues
 	jsonOpts := model.ToJSONOptions{
 		UnnestColumns:     nil,
 		HStoreAsJSON:      false,
 		GeometryAsEWKT:    req.Version >= shared.InternalVersion_PgGeoKeepSRID,
 		StripNulBytes:     stripNulBytes,
 		ArrayNullElements: true,
-		NonFiniteFloats:   nonFiniteFloats,
+		NonFiniteFloats:   true,
 	}
 	streamReadFunc := func() ([]any, error) {
 		for record := range req.Records.GetRecords() {

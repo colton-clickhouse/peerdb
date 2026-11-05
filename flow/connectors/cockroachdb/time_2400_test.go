@@ -34,7 +34,7 @@ func TestTime2400(t *testing.T) {
 }
 
 func TestNewPgValues(t *testing.T) {
-	require.Equal(t, pgValues{specialValues: true},
-		newPgValues(shared.InternalVersion_PgSpecialValues, protos.DBType_POSTGRES))
+	// Postgres destinations keep NaN and infinity on every version
+	require.Equal(t, pgValues{specialValues: true}, newPgValues(0, protos.DBType_POSTGRES))
 	require.Equal(t, pgValues{}, newPgValues(shared.InternalVersion_Latest, protos.DBType_CLICKHOUSE))
 }

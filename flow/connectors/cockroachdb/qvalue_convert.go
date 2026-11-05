@@ -155,14 +155,14 @@ func crdbOIDToQValueKind(oid uint32) types.QValueKind {
 // pgValues are the conversions a Postgres destination gets from the mirror's internal version: values other
 // destinations can't hold, so they keep the older fallbacks. The snapshot and changefeed paths share them.
 type pgValues struct {
-	// specialValues marks NaN and infinity values (InternalVersion_PgSpecialValues)
+	// specialValues marks NaN and infinity values
 	specialValues bool
 }
 
 func newPgValues(version uint32, dstType protos.DBType) pgValues {
 	pg := dstType == protos.DBType_POSTGRES
 	return pgValues{
-		specialValues: pg && version >= shared.InternalVersion_PgSpecialValues,
+		specialValues: pg,
 	}
 }
 
