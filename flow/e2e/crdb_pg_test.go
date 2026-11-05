@@ -485,3 +485,34 @@ func (s CRDBPGSuite) Test_TimeTZ_Snapshot_And_CDC() {
 		t.Errorf("%d timetz mismatches on the destination:\n  %s", len(bad), strings.Join(bad, "\n  "))
 	}
 }
+
+// NUL bytes in strings (PG text can't hold U+0000, so the snapshot's COPY failed with 22021 and retried
+// forever; via CDC the raw table's JSONB refused \u0000). PeerDB strips them on the way into PG: a
+// deliberate behavioral difference, the value is not identical to the source.
+func (s CRDBPGSuite) Test_Nul_Bytes_Stripped() {
+	t := s.t
+	srcTable := "nul_strip"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT8 PRIMARY KEY, s STRING, sa STRING[])`, srcFull)))
+	values := `(%[1]d, e'a\x00b', ARRAY[e'\x00x', 'y']), (%[1]d + 1, 'plain', ARRAY['p'])`
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES `+fmt.Sprintf(values, 1), srcFull)))
+
+	flowConnConfig := s.startMirror(srcTable)
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 3*time.Minute, "snapshot rows", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 2
+	})
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES `+fmt.Sprintf(values, 11), srcFull)))
+	EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`UPDATE %s SET s = e'\x00\x00c' WHERE id = 2`, srcFull)))
+	EnvWaitFor(t, env, 3*time.Minute, "cdc rows", func() bool {
+		ok, _ := s.destBool(fmt.Sprintf(`SELECT string_agg(id || ':' || s || ':' || sa::text, ' ' ORDER BY id)
+			= '1:ab:{x,y} 2:c:{p} 11:ab:{x,y} 12:plain:{p}' FROM %s`, dstFull))
+		return ok
+	})
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+}

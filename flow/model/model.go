@@ -182,7 +182,8 @@ type NormalizeQueryCDCRequest struct {
 type ToJSONOptions struct {
 	UnnestColumns        map[string]struct{}
 	HStoreAsJSON         bool
-	ClearValuesOverBytes int // 0 means preserve values
+	ClearValuesOverBytes int  // 0 means preserve values
+	StripNulBytes        bool // drop U+0000 from strings (PG destinations can't store it)
 }
 
 func NewToJSONOptions(unnestCols []string, hstoreAsJSON bool) ToJSONOptions {
