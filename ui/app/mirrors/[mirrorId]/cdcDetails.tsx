@@ -5,7 +5,7 @@ import PeerButton from '@/components/PeerComponent';
 import TimeLabel from '@/components/TimeComponent';
 import { FlowStatus } from '@/grpc_generated/flow';
 import { dBTypeFromJSON } from '@/grpc_generated/peers';
-import { CDCMirrorStatus } from '@/grpc_generated/route';
+import { CDCMirrorStatus, MirrorLastError } from '@/grpc_generated/route';
 import { Label } from '@/lib/Label';
 import { ProgressCircle } from '@/lib/ProgressCircle';
 import Link from 'next/link';
@@ -31,14 +31,23 @@ const DetailsRow = styled.div<{ $responsive?: boolean }>`
 type props = {
   mirrorConfig: CDCMirrorStatus;
   createdAt?: Date;
+  lastProgressAt?: Date;
+  lastError?: MirrorLastError;
   mirrorStatus: FlowStatus;
 };
 
 export default function CdcDetails({
   createdAt,
+  lastProgressAt,
+  lastError,
   mirrorConfig,
   mirrorStatus,
 }: props) {
+  // failing since its last progress: the newest error is newer than the newest normalized batch
+  const failingSinceProgress =
+    lastProgressAt !== undefined &&
+    lastError?.timestamp !== undefined &&
+    lastError.timestamp > lastProgressAt;
   const [syncInterval, setSyncInterval] = useState<number>();
 
   const tablesSynced = mirrorConfig.config?.tableMappings;
@@ -71,6 +80,13 @@ export default function CdcDetails({
                 <Label>{FormatStatus(mirrorStatus)}</Label>
               </Link>
             </div>
+            {failingSinceProgress && (
+              <Label variant='footnote' colorSet='destructive'>
+                No progress since {lastProgressAt!.toLocaleString()}; last error
+                at {lastError!.timestamp!.toLocaleString()}. The mirror&apos;s
+                errors name the cause.
+              </Label>
+            )}
           </div>
           <div>
             <div>
