@@ -56,6 +56,37 @@ func (s MySQLPGSuite) Test_No_Progress_With_User_Actionable_Error_Warns() {
 	RequireEnvCanceled(t, env)
 }
 
+// A snapshot that can't write a value into its default target column (an INT UNSIGNED above 2^31 into integer,
+// which pgx can't encode for COPY) fails with an error only the user can fix: the mirror, still in its snapshot,
+// warns once it has made no progress for PEERDB_STALLED_ALERT_THRESHOLD_MINUTES, naming that class. The errors are
+// the snapshot partitions' (their own clone_ flows); the warning is the mirror's.
+func (s MySQLPGSuite) Test_No_Progress_In_Snapshot_With_Unencodable_Value_Warns() {
+	t := s.t
+	srcTable := "no_progress_snapshot"
+	srcFull := AttachSchema(s, srcTable)
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY, u INT UNSIGNED)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 4000000000)`, srcFull)))
+	SetDynamicSetting(t, "PEERDB_STALLED_ALERT_THRESHOLD_MINUTES", "1")
+
+	connectionGen := FlowConnectionGenerationConfig{
+		FlowJobName:   AddSuffix(s, srcTable),
+		TableMappings: TableMappings(s, srcTable, srcTable),
+		Destination:   s.Peer().Name,
+	}
+	flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
+	flowConnConfig.DoInitialSnapshot = true
+	env := ExecutePeerflow(t, NewTemporalClient(t), flowConnConfig)
+	catalogPool, err := internal.GetCatalogConnectionPoolFromEnv(t.Context())
+	require.NoError(t, err)
+	EnvWaitFor(t, env, 6*time.Minute, "a no-progress warning naming a destination table definition error", func() bool {
+		count, err := GetLogCount(t.Context(), catalogPool, flowConnConfig.FlowJobName, "warn",
+			"errors that need a fix (NOTIFY_INVALID_DESTINATION_TABLE_DEFINITION)")
+		return err == nil && count > 0
+	})
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+}
+
 // checkNoProgressStatus: the mirror status shows the mirror RUNNING, with no progress for over a minute and the
 // failing normalize as its last error
 func (s MySQLPGSuite) checkNoProgressStatus(flowName string) {
