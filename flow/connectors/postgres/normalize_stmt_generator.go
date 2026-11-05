@@ -32,6 +32,10 @@ type normalizeStmtGenerator struct {
 	supportsMerge bool
 	// destination table -> column -> the target column's type without modifiers, read per batch
 	targetColumnTypes map[string]map[string]string
+	// per generated MERGE: quoted column -> the select alias telling whether a change carries it, and the literal
+	// default an insert without it takes (columns with a literal default)
+	presentAs map[string]string
+	fillValue map[string]string
 }
 
 func (n *normalizeStmtGenerator) columnTypeToPg(
@@ -230,6 +234,10 @@ func (n *normalizeStmtGenerator) generateMergeStatement(
 	selectExprs := make([]string, 0, columnCount)
 	recordDefs := make([]string, 0, columnCount)
 	useJsonbToRecord := normalizedTableSchema.System == protos.TypeSystem_PG
+	// columns with a literal default (added mid-stream with ADD COLUMN ... DEFAULT): a change synced before the
+	// column existed doesn't carry it, so an insert takes the default and an update keeps the row's value, as on
+	// the source, instead of writing NULL
+	n.presentAs, n.fillValue = map[string]string{}, map[string]string{}
 	for i, column := range normalizedTableSchema.Columns {
 		quotedCol := common.QuoteIdentifier(column.Name)
 		stringCol := utils.QuoteLiteral(column.Name)
@@ -255,6 +263,11 @@ func (n *normalizeStmtGenerator) generateMergeStatement(
 			genericColumnType := column.Type
 			expr := n.generateExpr(normalizedTableSchema, genericColumnType, stringCol, pgType)
 			selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", expr, quotedCol))
+			if fill, ok := literalDefault(column, pgType); ok {
+				alias := fmt.Sprintf(`"_peerdb_has_%d"`, i)
+				selectExprs = append(selectExprs, fmt.Sprintf("(_peerdb_data ? %s) AS %s", stringCol, alias))
+				n.presentAs[quotedCol], n.fillValue[quotedCol] = alias, fill
+			}
 		}
 
 		if slices.Contains(normalizedTableSchema.PrimaryKeyColumns, column.Name) {
@@ -267,7 +280,12 @@ func (n *normalizeStmtGenerator) generateMergeStatement(
 	selectExprsSQL := strings.Join(selectExprs, ",")
 	insertValuesSQLArray := make([]string, 0, columnCount+2)
 	for _, quotedCol := range quotedColumnNames {
-		insertValuesSQLArray = append(insertValuesSQLArray, "src."+quotedCol)
+		if alias, ok := n.presentAs[quotedCol]; ok {
+			insertValuesSQLArray = append(insertValuesSQLArray,
+				fmt.Sprintf("CASE WHEN src.%s THEN src.%s ELSE %s END", alias, quotedCol, n.fillValue[quotedCol]))
+		} else {
+			insertValuesSQLArray = append(insertValuesSQLArray, "src."+quotedCol)
+		}
 	}
 
 	updateStatementsforToastCols := n.generateUpdateStatements(quotedColumnNames, unchangedToastColumns)
@@ -356,7 +374,12 @@ func (n *normalizeStmtGenerator) generateUpdateStatements(quotedCols []string, u
 		otherCols := shared.ArrayMinus(quotedCols, unchangedColsArray)
 		tmpArray := make([]string, 0, len(otherCols))
 		for _, colName := range otherCols {
-			tmpArray = append(tmpArray, fmt.Sprintf("%s=src.%s", colName, colName))
+			if alias, ok := n.presentAs[colName]; ok {
+				tmpArray = append(tmpArray, fmt.Sprintf("%s=CASE WHEN src.%s THEN src.%s ELSE dst.%s END",
+					colName, alias, colName, colName))
+			} else {
+				tmpArray = append(tmpArray, fmt.Sprintf("%s=src.%s", colName, colName))
+			}
 		}
 		// set the synced at column to the current timestamp
 		if n.peerdbCols.SyncedAtColName != "" {
@@ -387,4 +410,17 @@ func (n *normalizeStmtGenerator) generateUpdateStatements(quotedCols []string, u
 		}
 	}
 	return updateStmts
+}
+
+// literalDefault is a Q-system column's default as a Postgres literal, if it has one that isn't a function of the
+// time (one evaluated at normalize would be a wrong value, not the source's)
+func literalDefault(column *protos.FieldDescription, pgType string) (string, bool) {
+	if column.DefaultExpr == nil {
+		return "", false
+	}
+	expr, ok := pgDefaultExpr(*column.DefaultExpr, types.QValueKind(column.Type), pgType)
+	if !ok || strings.Contains(strings.ToUpper(expr), "CURRENT_") || strings.Contains(strings.ToUpper(expr), "NOW(") {
+		return "", false
+	}
+	return expr, true
 }
