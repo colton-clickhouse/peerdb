@@ -12,12 +12,11 @@ import (
 )
 
 // newHoldTestState is a pull that started from cursor at now - elapsed, has records and is past its deadline.
-func newHoldTestState(cursor crdbHLC, hold bool, elapsed time.Duration) *changefeedPullState {
+func newHoldTestState(cursor crdbHLC, elapsed time.Duration) *changefeedPullState {
 	state := newProcessRowTestState()
 	now := time.Now()
 	state.cursor, state.startCursor = cursor, cursor
 	state.pullStart = now.Add(-elapsed)
-	state.holdForResolved = hold
 	state.resolvedInterval = changefeedResolvedInterval
 	state.recordCount = 1
 	state.batchDeadline = now.Add(-time.Minute)
@@ -28,7 +27,7 @@ func TestHoldBatchUntilCursorAdvances(t *testing.T) {
 	cursor := crdbHLC{WallNanos: time.Now().Add(-time.Hour).UnixNano()}
 	now := time.Now()
 
-	held := newHoldTestState(cursor, true, 10*time.Minute)
+	held := newHoldTestState(cursor, 10*time.Minute)
 	require.NotEmpty(t, held.batchCutReason(now), "past the deadline")
 	require.True(t, held.holdingForResolved(now), "kept open: the cursor hasn't advanced")
 	require.Equal(t, changefeedCatchUpStallWindow, held.watchdogWindow())
@@ -40,9 +39,8 @@ func TestHoldBatchUntilCursorAdvances(t *testing.T) {
 	held.cursor = crdbHLC{WallNanos: cursor.WallNanos + 1}
 	require.False(t, held.holdingForResolved(now))
 
-	// older mirrors, and a hold that has lasted changefeedCatchUpMaxDuration, end at the deadline
-	require.False(t, newHoldTestState(cursor, false, 10*time.Minute).holdingForResolved(now))
-	require.False(t, newHoldTestState(cursor, true, changefeedCatchUpMaxDuration+time.Second).holdingForResolved(now))
+	// a hold that has lasted changefeedCatchUpMaxDuration ends at the deadline
+	require.False(t, newHoldTestState(cursor, changefeedCatchUpMaxDuration+time.Second).holdingForResolved(now))
 }
 
 func TestHoldBatchEndsOnAdvancingResolved(t *testing.T) {
@@ -50,7 +48,7 @@ func TestHoldBatchEndsOnAdvancingResolved(t *testing.T) {
 	om, _ := newMetricsTestOtelManager(t)
 	c := &CockroachDBConnector{logger: log.NewStructuredLogger(slog.Default())}
 	base := time.Now().Add(-time.Hour).UnixNano()
-	state := newHoldTestState(crdbHLC{WallNanos: base}, true, 10*time.Minute)
+	state := newHoldTestState(crdbHLC{WallNanos: base}, 10*time.Minute)
 	state.recordCount = 0
 	state.graceDeadline = time.Now().Add(-time.Second)
 
@@ -82,7 +80,7 @@ func TestHoldBatchWithOnlyBufferedRecordsStaysOpen(t *testing.T) {
 	om, _ := newMetricsTestOtelManager(t)
 	c := &CockroachDBConnector{logger: log.NewStructuredLogger(slog.Default())}
 	base := time.Now().Add(-time.Hour).UnixNano()
-	state := newHoldTestState(crdbHLC{WallNanos: base}, true, 10*time.Minute)
+	state := newHoldTestState(crdbHLC{WallNanos: base}, 10*time.Minute)
 	state.recordCount = 0
 
 	row := &changefeedEnvelope{

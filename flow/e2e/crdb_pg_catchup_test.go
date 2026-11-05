@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
-	"github.com/PeerDB-io/peerdb/flow/shared"
 )
 
 // catchUpRows is the size of the transaction the catch-up tests commit: large enough that the changefeed needs
@@ -21,7 +20,7 @@ const catchUpRows = 200_000
 // mirror looked healthy: batches kept landing, but nothing after the cursor ever arrived.
 func (s CRDBPGSuite) Test_Large_Transaction_Catches_Up() {
 	t := s.t
-	srcTable, dstFull, flowConnConfig, env := s.catchUpMirror("catch_up", shared.InternalVersion_Latest)
+	srcTable, dstFull, flowConnConfig, env := s.catchUpMirror("catch_up")
 
 	EnvWaitFor(t, env, 5*time.Minute, "the large transaction arrives", func() bool {
 		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == catchUpRows+1
@@ -40,31 +39,9 @@ func (s CRDBPGSuite) Test_Large_Transaction_Catches_Up() {
 	RequireEnvCanceled(t, env)
 }
 
-// Mirrors created before InternalVersion_CockroachHoldBatchForResolved keep ending batches at the deadline, so the
-// transaction replays from the same cursor batch after batch.
-func (s CRDBPGSuite) Test_Large_Transaction_Old_Version_Replays() {
-	t := s.t
-	_, dstFull, flowConnConfig, env := s.catchUpMirror("catch_up_old", shared.InternalVersion_CockroachHoldBatchForResolved-1)
-
-	jobs := fmt.Sprintf(`SELECT %%s FROM _peerdb_internal.peerdb_mirror_jobs WHERE mirror_job_name = '%s'`,
-		flowConnConfig.FlowJobName)
-	EnvWaitFor(t, env, 2*time.Minute, "a batch of the transaction", func() bool {
-		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) > 1
-	})
-	cursor, batch := s.destInt(fmt.Sprintf(jobs, "lsn_offset")), s.destInt(fmt.Sprintf(jobs, "sync_batch_id"))
-	EnvWaitFor(t, env, 3*time.Minute, "10 more batches", func() bool {
-		return s.destInt(fmt.Sprintf(jobs, "sync_batch_id")) >= batch+10
-	})
-	require.Equal(t, cursor, s.destInt(fmt.Sprintf(jobs, "lsn_offset")), "the cursor is frozen")
-	require.Less(t, s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)), int64(catchUpRows+1))
-
-	env.Cancel(t.Context())
-	RequireEnvCanceled(t, env)
-}
-
 // catchUpMirror starts a mirror with a 1 s sync interval and 1000-row batches on a one-row table, waits for the
 // snapshot, then commits catchUpRows rows in one transaction.
-func (s CRDBPGSuite) catchUpMirror(srcTable string, version uint32) (string, string, *protos.FlowConnectionConfigs, WorkflowRun) {
+func (s CRDBPGSuite) catchUpMirror(srcTable string) (string, string, *protos.FlowConnectionConfigs, WorkflowRun) {
 	t := s.t
 	srcFull := AttachSchema(s, srcTable)
 	dstFull := s.DestinationTable(srcTable)
@@ -75,7 +52,6 @@ func (s CRDBPGSuite) catchUpMirror(srcTable string, version uint32) (string, str
 	flowConnConfig := s.startMirror(srcTable)
 	flowConnConfig.IdleTimeoutSeconds = 1
 	flowConnConfig.MaxBatchSize = 1000
-	flowConnConfig.Env = map[string]string{"PEERDB_FORCE_INTERNAL_VERSION": fmt.Sprint(version)}
 	tc := NewTemporalClient(t)
 	env := ExecutePeerflow(t, tc, flowConnConfig)
 	SetupCDCFlowStatusQuery(t, env, flowConnConfig)

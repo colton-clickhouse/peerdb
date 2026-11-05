@@ -31,7 +31,7 @@ const changefeedSlotName = "changefeed"
 
 const resolvedLagWarnThreshold = time.Hour
 
-// A batch whose cursor hasn't advanced yet stays open past its sync interval and batch size (holdForResolved) for at
+// A batch whose cursor hasn't advanced yet stays open past its sync interval and batch size (holdingForResolved) for at
 // most changefeedCatchUpMaxDuration, and while it does the stream may stay silent for changefeedCatchUpStallWindow
 // before the session counts as stalled (a catch-up scan can go quiet over ranges without changes). Past either, the
 // batch ends without a covering resolved timestamp as before.
@@ -137,7 +137,6 @@ type changefeedPullState struct {
 	cursor           crdbHLC
 	startCursor      crdbHLC // the cursor the pull started from
 	pullStart        time.Time
-	holdForResolved  bool      // InternalVersion_CockroachHoldBatchForResolved
 	holdLoggedAt     time.Time // when the hold was last logged, every changefeedHoldLogInterval
 	resolvedInterval time.Duration
 	recordCount      uint32
@@ -254,7 +253,7 @@ func (state *changefeedPullState) watchdogWindow() time.Duration {
 // and replays the same rows, now with a larger backlog behind them: forever. Kept open, the batch ends on
 // that resolved timestamp, which covers everything emitted so far. The buffer's size limit still bounds memory.
 func (state *changefeedPullState) holdingForResolved(now time.Time) bool {
-	return state.holdForResolved && !state.cursor.After(state.startCursor) &&
+	return !state.cursor.After(state.startCursor) &&
 		now.Before(state.pullStart.Add(changefeedCatchUpMaxDuration))
 }
 
@@ -301,7 +300,6 @@ func (c *CockroachDBConnector) PullRecords(
 		cursor:           cursor,
 		startCursor:      cursor,
 		pullStart:        time.Now(),
-		holdForResolved:  req.InternalVersion >= shared.InternalVersion_CockroachHoldBatchForResolved,
 		resolvedInterval: changefeedResolvedInterval,
 	}
 	for source, target := range req.TableNameMapping {
@@ -396,12 +394,6 @@ func (c *CockroachDBConnector) PullRecords(
 			// watchdog fired without records: reconnect and keep waiting
 			silentReconnects++
 			delay := silentReconnectDelay(silentReconnects)
-			if len(state.buffer) > 0 {
-				// the reconnect replays the buffered changes from the cursor
-				c.logger.Warn("[cockroachdb] changefeed silent past the stall window with changes buffered; reconnecting",
-					slog.String("cursor", state.cursor.String()), slog.Int("bufferedRecords", len(state.buffer)),
-					slog.Duration("stallWindow", state.watchdogWindow()), slog.Duration("backoff", delay))
-			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -462,8 +454,9 @@ func (c *CockroachDBConnector) PullRecords(
 }
 
 // silentReconnectDelay is the wait before the n-th consecutive watchdog reconnect without progress. Past a batch's
-// deadlines the watchdog window shrinks to a second, so without it a stream that stays silent would reconnect (and
-// replay the buffer) about once a second for as long as it lasts. The first reconnect is immediate; the count resets
+// deadlines the watchdog window shrinks to a second, and a batch only ends on a message (batchCutReason), so without it
+// a stream that sends nothing (resolved timestamps stalled) would create a changefeed, and replay the buffer, about
+// once a second for as long as it lasts. The first reconnect is immediate; the count resets
 // on progress.
 func silentReconnectDelay(n uint32) time.Duration {
 	if n <= 1 {
