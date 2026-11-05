@@ -191,6 +191,7 @@ type ToJSONOptions struct {
 	NoNumericInfinity    bool                // write numeric +-Infinity as null (WithoutNumericInfinity), for Postgres before 14
 	NotNullColumns       map[string]struct{} // with NoNumericInfinity: columns that get 0 instead of null
 	PgIntervals          bool                // write intervals as Postgres interval text instead of PeerDB's interval JSON
+	PgBCDates            bool                // write years before 1 AD as Postgres's "YYYY-MM-DD BC" instead of Go's astronomical -YYYY
 }
 
 func NewToJSONOptions(unnestCols []string, hstoreAsJSON bool) ToJSONOptions {
