@@ -48,6 +48,10 @@ const (
 	// Postgres/MySQL: wrap non-object JSON values (scalars, arrays, JSON null) as {"_value": ...} when
 	// PEERDB_CLICKHOUSE_ENABLE_JSON is on, since ClickHouse JSON only accepts objects at the top level
 	InternalVersion_WrapNonObjectJSON
+	// MySQL, every destination: dates with any zero part (a zero month or day, i.e. partial zero dates, or a
+	// zero year) replicated like zero dates (the epoch). Older mirrors roll a zero month or day forward to 01,
+	// inventing a real date.
+	InternalVersion_MySQLZeroDatePartsAsZero
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1

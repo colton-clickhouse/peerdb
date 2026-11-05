@@ -25,6 +25,17 @@ func (s MySQLPGSuite) Test_Partial_Zero_Dates_As_Zero_Dates() {
 	}
 }
 
+// Mirrors created before InternalVersion_MySQLZeroDatePartsAsZero keep rolling a zero month or day forward,
+// so an existing mirror's values don't change mid-stream. (No zero-year rows: those fail older mirrors.)
+func (s MySQLPGSuite) Test_Partial_Zero_Dates_Old_Version_Rolled_Forward() {
+	got := s.zeroDateRows("partial_zero_dates_old", shared.InternalVersion_MySQLZeroDatePartsAsZero-1, false)
+	rolled := "2024-01-15 | 2024-02-01 12:00:00 | 2024-01-01 01:02:03.000004"
+	for _, id := range []int{1, 3, 4} {
+		require.Equal(s.t, rolled, got[id], "id %d: old-version mirror", id)
+	}
+	require.Equal(s.t, "1970-01-01 | 1970-01-01 00:00:00 | 1970-01-01 00:00:00", got[2], "zero dates")
+}
+
 // zeroDateRows replicates zero, partial zero (and, with zeroYears, zero-year) dates through the snapshot and
 // CDC with a mirror at version, and returns each row's destination values as "date | datetime | datetime6".
 func (s MySQLPGSuite) zeroDateRows(srcTable string, version uint32, zeroYears bool) map[int]string {
