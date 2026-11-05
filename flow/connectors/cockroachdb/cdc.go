@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -269,6 +270,9 @@ func (c *CockroachDBConnector) PullRecords(
 		}
 	}
 	state.finishIndexing()
+	if err := c.loadSourceKeys(ctx, state); err != nil {
+		return err
+	}
 	slices.SortFunc(state.tables, func(a, b *common.QualifiedTable) int {
 		return strings.Compare(a.String(), b.String())
 	})
@@ -832,4 +836,81 @@ func (c *CockroachDBConnector) emitSchemaDelta(
 			slog.String("table", source), slog.Any("delta", delta))
 	}
 	return nil
+}
+
+// loadSourceKeys gives each table's cached schema its source primary key in key order, when that differs from the
+// destination's (virtual key columns): deletes without a row image are rebuilt from the changefeed key, which
+// follows the source key. Read before the changefeed starts, as the session's connection is busy afterwards.
+func (c *CockroachDBConnector) loadSourceKeys(ctx context.Context, state *changefeedPullState) error {
+	if len(state.schemas) == 0 {
+		return nil
+	}
+	namespaces := make([]string, 0, len(state.schemas))
+	tables := make([]string, 0, len(state.schemas))
+	sources := make(map[[2]string]string, len(state.schemas))
+	for source := range state.schemas {
+		parsed, err := common.ParseTableIdentifier(source)
+		if err != nil {
+			return fmt.Errorf("invalid source table %s: %w", source, err)
+		}
+		namespaces = append(namespaces, parsed.Namespace)
+		tables = append(tables, parsed.Table)
+		sources[[2]string{parsed.Namespace, parsed.Table}] = source
+	}
+	rows, err := c.conn.Query(ctx, `
+		SELECT k.table_schema, k.table_name, k.column_name
+		FROM information_schema.key_column_usage k
+		JOIN information_schema.table_constraints tc
+			ON tc.constraint_schema = k.constraint_schema AND tc.constraint_name = k.constraint_name
+			AND tc.table_schema = k.table_schema AND tc.table_name = k.table_name
+		JOIN unnest($1::STRING[], $2::STRING[]) AS t (table_schema, table_name)
+			ON t.table_schema = k.table_schema AND t.table_name = k.table_name
+		WHERE tc.constraint_type = 'PRIMARY KEY'
+		ORDER BY k.table_schema, k.table_name, k.ordinal_position
+	`, namespaces, tables)
+	if err != nil {
+		return fmt.Errorf("failed to read source primary keys: %w", err)
+	}
+	keys := make(map[string][]string, len(state.schemas))
+	var namespace, table, column string
+	if _, err := pgx.ForEachRow(rows, []any{&namespace, &table, &column}, func() error {
+		if source, ok := sources[[2]string{namespace, table}]; ok {
+			keys[source] = append(keys[source], column)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to read source primary keys: %w", err)
+	}
+	for source, key := range keys {
+		schema := state.schemas[source]
+		if err := checkSourceKey(source, key, schema); err != nil {
+			return err
+		}
+		if !slices.Equal(key, schema.primaryKeys) {
+			schema.sourceKey = key
+		}
+	}
+	return nil
+}
+
+// checkSourceKey fails with PRIMARY_KEY_CHANGED unless the source's primary key, without its virtual columns, is the
+// destination's key, in the same order. A changed key (a column added or removed, or the columns reordered) leaves
+// the destination keyed on columns that no longer identify a source row: upserts can merge rows, and deletes without a
+// row image are decoded from the changefeed key, whose layout follows the new key. Virtual key columns (a hash-sharded
+// key's shard column) aren't replicated, so they are the key columns the mirror's schema doesn't have.
+func checkSourceKey(source string, key []string, schema *changefeedTableSchema) error {
+	replicated := make([]string, 0, len(key))
+	for _, col := range key {
+		_, known := schema.fields[col]
+		_, excluded := schema.ignored[col]
+		if known || excluded || slices.Contains(schema.primaryKeys, col) {
+			replicated = append(replicated, col)
+		}
+	}
+	if slices.Equal(replicated, schema.primaryKeys) {
+		return nil
+	}
+	return exceptions.NewCockroachChangefeedIrrecoverableError("PRIMARY_KEY_CHANGED",
+		fmt.Errorf("the primary key of %s is now %v, but the destination is keyed on %v: the table's primary key"+
+			" changed since the mirror read its schema; resync the mirror", source, key, schema.primaryKeys))
 }
