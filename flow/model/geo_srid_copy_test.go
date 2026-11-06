@@ -27,4 +27,17 @@ func TestCopyGeoSRIDs(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, tc.want, hex.EncodeToString(wkb), "%s keep=%v", tc.wkt, tc.keep)
 	}
+
+	src := &QRecordCopyFromSource{pgGeoSRIDs: true}
+	// a source that keeps the SRID next to plain WKT passes it as the fallback; a prefix wins over it
+	wkb, err := src.geoWkb("POINT(1 2)", 4326)
+	require.NoError(t, err)
+	require.Equal(t, point4326, hex.EncodeToString(wkb))
+	wkb, err = src.geoWkb("SRID=4326;POINT(1 2)", 3857)
+	require.NoError(t, err)
+	require.Equal(t, point4326, hex.EncodeToString(wkb))
+	for _, wkt := range []string{"SRID=-1;POINT(1 2)", "SRID=x;POINT(1 2)", "SRID=4294967296;POINT(1 2)"} {
+		_, err := src.geoWkb(wkt, 0)
+		require.Error(t, err, wkt)
+	}
 }
