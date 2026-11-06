@@ -638,6 +638,35 @@ func GetErrorClass(ctx context.Context, err error) (ErrorClass, ErrorInfo) {
 		}
 	}
 
+	// a Postgres destination table that can't take the data: normalize retries won't help. Only errors of a Postgres
+	// destination's normalize statements, not other Postgres errors during normalize (the catalog, a ClickHouse
+	// mirror's metadata).
+	if _, ok := errors.AsType[*exceptions.PostgresNormalizeTableError](err); ok && pgErr != nil {
+		switch pgErr.Code {
+		case pgerrcode.UndefinedColumn:
+			return ErrorNotifyDestinationModified, pgErrorInfo
+		case pgerrcode.NumericValueOutOfRange, pgerrcode.DatatypeMismatch, pgerrcode.StringDataRightTruncationDataException,
+			pgerrcode.DatetimeFieldOverflow:
+			// a value the target column's type can't hold (too long for varchar(n), out of range)
+			return ErrorNotifyInvalidDestinationTableDefinition, pgErrorInfo
+		case pgerrcode.InvalidTextRepresentation:
+			if !strings.Contains(pgErr.Message, "enum") { // invalid enum values have their own class below
+				return ErrorNotifyInvalidDestinationTableDefinition, pgErrorInfo
+			}
+		case pgerrcode.NotNullViolation, pgerrcode.ForeignKeyViolation:
+			// a NOT NULL or foreign key on the target the data doesn't satisfy
+			return ErrorNotifyConstraintViolation, pgErrorInfo
+		}
+	}
+
+	// a value pgx can't encode for the target column's type (e.g. an INT UNSIGNED above 2^31 into integer): COPY
+	// aborts with the encode error as its CopyFail message, which the server reports as 57014 "COPY from stdin
+	// failed: ...". Retries won't help. A statement timeout or cancel is 57014 too, but "canceling statement due to ...".
+	if pgErr != nil && pgErr.Code == pgerrcode.QueryCanceled &&
+		strings.HasPrefix(pgErr.Message, "COPY from stdin failed: unable to encode ") {
+		return ErrorNotifyInvalidDestinationTableDefinition, pgErrorInfo
+	}
+
 	// Consolidated PostgreSQL error handling
 	if pgErr != nil {
 		switch pgErr.Code {
