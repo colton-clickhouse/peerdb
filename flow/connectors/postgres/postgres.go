@@ -104,6 +104,27 @@ func prepareCloudSQLPostgresConfig(
 	return pgConfig, dialer, nil
 }
 
+// setTextOutputSettings best-effort pins the session settings that change values in text form (COPY, ::text,
+// to_json), whatever the role or database sets:
+//   - extra_float_digits = 3, so floats are exact: 0 or less rounds them to 15 (double precision) or 6 (real)
+//     significant digits;
+//   - IntervalStyle = postgres, which reads back as written: with sql_standard, '-1 day -02:03:04' prints as
+//     '-1 2:03:04', which reads back as '-1 day +02:03:04';
+//   - xmloption = content, so XML content fragments are accepted where a destination defaults to document.
+//
+// SETs rather than startup parameters, because connection poolers such as pgbouncer refuse startup parameters
+// they don't track ("unsupported startup parameter") unless they're in ignore_startup_parameters.
+func setTextOutputSettings(ctx context.Context, conn *pgx.Conn, logger log.Logger) {
+	for _, set := range []string{
+		"SET extra_float_digits = 3", "SET IntervalStyle = 'postgres'", "SET xmloption = content",
+	} {
+		if _, err := conn.Exec(ctx, set); err != nil {
+			logger.Warn("failed to pin a session setting, values in text form may change", slog.String("setting", set),
+				slog.Any("error", err))
+		}
+	}
+}
+
 func newPostgresConnector(
 	ctx context.Context, env map[string]string, pgConfig *protos.PostgresConfig, destinationType protos.DBType,
 ) (*PostgresConnector, error) {
@@ -131,9 +152,7 @@ func newPostgresConnector(
 	connConfig.Config.RuntimeParams["idle_in_transaction_session_timeout"] = "0"
 	connConfig.Config.RuntimeParams["statement_timeout"] = "0"
 	connConfig.Config.RuntimeParams["DateStyle"] = "ISO, DMY"
-	connConfig.Config.RuntimeParams["IntervalStyle"] = "postgres"
-	connConfig.Config.RuntimeParams["extra_float_digits"] = "3"
-	connConfig.Config.RuntimeParams["xmloption"] = "content"
+	// IntervalStyle, extra_float_digits and xmloption: SET after connecting (setTextOutputSettings)
 	// Required for QueryExecModeSimpleProtocol, which is set in some places while querying;
 	// pgx refuses simple protocol when the server reports standard_conforming_strings=off.
 	connConfig.Config.RuntimeParams["standard_conforming_strings"] = "on"
@@ -174,6 +193,7 @@ func newPostgresConnector(
 		return nil, fmt.Errorf("failed to create connection: %w", err)
 	}
 	setIdleSessionTimeout(ctx, conn, logger)
+	setTextOutputSettings(ctx, conn, logger)
 
 	metadataSchema := "_peerdb_internal"
 	if pgConfig.MetadataSchema != nil {
