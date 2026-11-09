@@ -40,4 +40,13 @@ func TestValidateMirrorDestinationRefusesExcludedKeyColumns(t *testing.T) {
 	var excluded *exceptions.ExcludedKeyColumnsError
 	require.ErrorAs(t, err, &excluded)
 	require.Equal(t, []string{"b"}, excluded.Columns)
+	require.False(t, excluded.WholeKey)
+	require.Contains(t, err.Error(), "matched by the rest of the key")
+
+	// the only key column: nothing left to match on, and not reported as a table without a key
+	cfg.TableMappings[0].Exclude = []string{"id"}
+	err = c.ValidateMirrorDestination(t.Context(), cfg, map[string]*protos.TableSchema{"s.t": {PrimaryKeyColumns: []string{"id"}}})
+	require.ErrorAs(t, err, &excluded)
+	require.True(t, excluded.WholeKey)
+	require.Contains(t, err.Error(), "the whole key")
 }

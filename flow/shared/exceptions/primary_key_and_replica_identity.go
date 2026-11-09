@@ -76,17 +76,22 @@ func (e *KeylessTablesError) Error() string {
 
 // ExcludedKeyColumnsError names primary key columns excluded from a mirror to a destination that applies changes by
 // primary key (Postgres): matching on the rest of the key, rows that differ only in the excluded columns would
-// overwrite or delete each other
+// overwrite or delete each other; with the whole key excluded, there is nothing to match on
 type ExcludedKeyColumnsError struct {
-	Table   string
-	Columns []string
+	Table    string
+	Columns  []string
+	WholeKey bool
 }
 
-func NewExcludedKeyColumnsError(table string, columns []string) error {
-	return &ExcludedKeyColumnsError{Table: table, Columns: columns}
+func NewExcludedKeyColumnsError(table string, columns []string, wholeKey bool) error {
+	return &ExcludedKeyColumnsError{Table: table, Columns: columns, WholeKey: wholeKey}
 }
 
 func (e *ExcludedKeyColumnsError) Error() string {
-	return fmt.Sprintf("primary key columns of %s can't be excluded from a CDC mirror to Postgres: %s; rows would "+
-		"be matched by the rest of the key and overwrite each other", e.Table, strings.Join(e.Columns, ", "))
+	consequence := "rows would be matched by the rest of the key and overwrite each other"
+	if e.WholeKey {
+		consequence = "that is the whole key, and changes are applied by primary key"
+	}
+	return fmt.Sprintf("primary key columns of %s can't be excluded from a CDC mirror to Postgres: %s; %s",
+		e.Table, strings.Join(e.Columns, ", "), consequence)
 }
