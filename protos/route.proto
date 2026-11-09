@@ -368,10 +368,13 @@ message MirrorStatusResponse {
   peerdb_flow.FlowStatus current_flow_state = 5;
   google.protobuf.Timestamp created_at = 7;
   // when the mirror last made progress: its newest normalized CDC batch or finished QRep partition (its initial
-  // snapshot's included), else its creation
+  // snapshot's included), else its creation. These three are set only with include_flow_info
   google.protobuf.Timestamp last_progress_at = 8;
-  // the mirror's newest error log, if it has one
+  // the newest error log of the mirror or its initial snapshot, if it has one
   MirrorLastError last_error = 9;
+  // it has logged errors since its last progress for longer than PEERDB_NO_PROGRESS_ALERT_THRESHOLD_MINUTES (the
+  // no-progress alert's rule, which also needs its latest error to be one that needs the user)
+  bool failing_without_progress = 10;
 }
 
 message MirrorLastError {

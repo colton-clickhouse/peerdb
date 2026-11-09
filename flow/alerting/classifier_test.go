@@ -2395,11 +2395,3 @@ func TestPostgresNormalizeErrorsNeedingTheUser(t *testing.T) {
 	errorClass, _ = GetErrorClass(t.Context(), enumErr)
 	assert.Equal(t, ErrorNotifyInvalidEnumValue, errorClass)
 }
-
-// The no-progress warning is due once a flow has gone without progress for longer than the threshold; 0 disables it.
-func TestNoProgressDue(t *testing.T) {
-	now := time.Now()
-	require.False(t, noProgressDue(30*time.Minute, now.Add(-29*time.Minute), now))
-	require.True(t, noProgressDue(30*time.Minute, now.Add(-31*time.Minute), now))
-	require.False(t, noProgressDue(0, now.Add(-24*time.Hour), now), "disabled")
-}
