@@ -26,6 +26,7 @@ func TestGenerateMergeStatement_TargetColumnTypes(t *testing.T) {
 			{Name: "c_dbl", Type: string(types.QValueKindFloat64), TypeModifier: -1},
 			{Name: "c_dec_text", Type: string(types.QValueKindNumeric), TypeModifier: -1},
 			{Name: "c_dec_scaled", Type: string(types.QValueKindNumeric), TypeModifier: datatypes.MakeNumericTypmod(12, 3)},
+			{Name: "c_code_domain", Type: string(types.QValueKindString), TypeModifier: -1},
 		},
 	}
 	gen := func(targetTypes map[string]map[string]string) string {
@@ -46,12 +47,13 @@ func TestGenerateMergeStatement_TargetColumnTypes(t *testing.T) {
 	stmt := gen(map[string]map[string]string{table: {
 		"id": "integer", "c_int": "bigint", "c_big": "numeric", "c_bytes": "bytea", "c_code": "bpchar",
 		"c_dec": "integer", "c_dbl": "bigint", "c_dec_text": "text", "c_dec_scaled": "text",
+		"c_code_domain": "character varying",
 	}})
 	for _, want := range []string{
 		`(_peerdb_data->>'id')::integer`,
 		`(_peerdb_data->>'c_int')::bigint AS "c_int"`,
 		`(_peerdb_data->>'c_big')::numeric AS "c_big"`,
-		`decode(_peerdb_data->>'c_bytes', 'base64')::bytea AS "c_bytes"`,
+		`decode(_peerdb_data->>'c_bytes', 'base64')::BYTEA AS "c_bytes"`,
 		`(_peerdb_data->>'c_text')::TEXT AS "c_text"`,
 		// char(n) as bpchar: casting to "character" would mean char(1) and truncate; a string target, so through
 		// PeerDB's type
@@ -61,8 +63,11 @@ func TestGenerateMergeStatement_TargetColumnTypes(t *testing.T) {
 		`(_peerdb_data->>'c_dbl')::DOUBLE PRECISION::bigint AS "c_dbl"`,
 		// string targets: through PeerDB's type, so the text is what assignment gave before
 		`(_peerdb_data->>'c_dec_text')::NUMERIC::text AS "c_dec_text"`,
-		// with the source's scale, as PeerDB's own numeric(12,3) column would hold it: 1234.500, not 1234.5
-		`(_peerdb_data->>'c_dec_scaled')::numeric(12,3)::text AS "c_dec_scaled"`,
+		// without the source's scale: the raw JSON holds 1234.5, as the snapshot COPY writes it into text
+		`(_peerdb_data->>'c_dec_scaled')::NUMERIC::text AS "c_dec_scaled"`,
+		// a domain over varchar(n) is read as its base type: cast to that, so assignment to the domain refuses
+		// an over-long value (a cast to the domain truncates it)
+		`(_peerdb_data->>'c_code_domain')::TEXT::character varying AS "c_code_domain"`,
 	} {
 		require.Contains(t, stmt, want)
 	}
@@ -100,9 +105,9 @@ func TestGenerateMergeStatement_CastRules(t *testing.T) {
 		{"c_json_varchar", string(types.QValueKindJSON), "character varying",
 			`(_peerdb_data->>'c_json_varchar')::JSON::character varying AS "c_json_varchar"`},
 		{"c_str_text", string(types.QValueKindString), "text", `(_peerdb_data->>'c_str_text')::text AS "c_str_text"`},
-		// into bytea: the text's bytes, not its backslash escapes; a UUID's 16 bytes
-		{"c_str_bytes", string(types.QValueKindString), "bytea", `convert_to(_peerdb_data->>'c_str_bytes', 'UTF8') AS "c_str_bytes"`},
-		{"c_uuid_bytes", string(types.QValueKindUUID), "bytea", `uuid_send((_peerdb_data->>'c_uuid_bytes')::uuid) AS "c_uuid_bytes"`},
+		// into bytea: PeerDB's type, as before (text::bytea would read backslash escapes; text into bytea fails)
+		{"c_str_bytes", string(types.QValueKindString), "bytea", `(_peerdb_data->>'c_str_bytes')::TEXT AS "c_str_bytes"`},
+		{"c_uuid_bytes", string(types.QValueKindUUID), "bytea", `(_peerdb_data->>'c_uuid_bytes')::UUID AS "c_uuid_bytes"`},
 	}
 	schema := &protos.TableSchema{System: protos.TypeSystem_Q, PrimaryKeyColumns: []string{"id"},
 		Columns: []*protos.FieldDescription{{Name: "id", Type: string(types.QValueKindInt32), TypeModifier: -1}}}
@@ -130,4 +135,27 @@ func TestGenerateMergeStatement_CastRules(t *testing.T) {
 	fallback := g.generateFallbackStatements(table, schema)
 	require.Contains(t, fallback[0], `(_peerdb_data->>'c_dec')::NUMERIC::integer AS "c_dec"`)
 	require.Contains(t, fallback[0], `(_peerdb_data->>'c_time')::interval AS "c_time"`)
+}
+
+// A string key into a bytea target keeps PeerDB's type in the value and in the PARTITION BY, as before: text has
+// no assignment cast to bytea, so normalize fails loudly instead of storing the text's backslash escapes.
+func TestGenerateMergeStatement_StringKeyIntoBytea(t *testing.T) {
+	const table = `"public"."t"`
+	schema := &protos.TableSchema{
+		System:            protos.TypeSystem_Q,
+		PrimaryKeyColumns: []string{"code"},
+		Columns:           []*protos.FieldDescription{{Name: "code", Type: string(types.QValueKindString), TypeModifier: -1}},
+	}
+	g := normalizeStmtGenerator{
+		rawTableName:       "_peerdb_raw_test",
+		tableSchemaMapping: map[string]*protos.TableSchema{table: schema},
+		peerdbCols:         &protos.PeerDBColumns{},
+		metadataSchema:     "_peerdb_internal",
+		supportsMerge:      true,
+		targetColumnTypes:  map[string]map[string]string{table: {"code": "bytea"}},
+	}
+	stmt := g.generateMergeStatement(table, schema, nil)
+	require.Contains(t, stmt, `PARTITION BY (_peerdb_data->>'code')::TEXT ORDER BY`)
+	require.Contains(t, stmt, `(_peerdb_data->>'code')::TEXT AS "code"`)
+	require.NotContains(t, stmt, "bytea")
 }

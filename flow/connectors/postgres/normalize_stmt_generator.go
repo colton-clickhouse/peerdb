@@ -56,20 +56,15 @@ func (n *normalizeStmtGenerator) columnTypeToPg(
 	case protos.TypeSystem_Q:
 		// cast to the target column's own type, so columns widened or pre-created by the user hold through
 		// CDC as they do for the snapshot COPY; the modifier is left to assignment (an explicit cast to
-		// varchar(n) or char(n) would truncate silently)
-		if targetType, ok := n.targetColumnTypes[dstTableName][column.Name]; ok {
-			pgType = targetType
-			kindType := qValueKindToPostgresType(column.Type)
-			if castThroughKindType(types.QValueKind(column.Type), targetType) && !strings.EqualFold(kindType, targetType) {
-				if column.Type == string(types.QValueKindNumeric) && column.TypeModifier != -1 {
-					// with its declared scale, as PeerDB's own numeric(p,s) column holds it (1234.500, not 1234.5)
-					precision, scale := common.ParseNumericTypmod(column.TypeModifier)
-					kindType = fmt.Sprintf("numeric(%d,%d)", precision, scale)
-				}
-				pgType = kindType + "::" + targetType
+		// varchar(n) or char(n) would truncate silently). bytea targets keep PeerDB's type, as before:
+		// text::bytea would read backslash escapes, and text has no assignment cast to bytea
+		pgType = qValueKindToPostgresType(column.Type)
+		if targetType, ok := n.targetColumnTypes[dstTableName][column.Name]; ok && targetType != "bytea" {
+			if castThroughKindType(types.QValueKind(column.Type), targetType) && !strings.EqualFold(pgType, targetType) {
+				pgType += "::" + targetType
+			} else {
+				pgType = targetType
 			}
-		} else {
-			pgType = qValueKindToPostgresType(column.Type)
 		}
 	case protos.TypeSystem_PG:
 		pgType = column.Type
@@ -135,14 +130,6 @@ func (n *normalizeStmtGenerator) generateExpr(
 			return fmt.Sprintf("ARRAY(SELECT JSON_ARRAY_ELEMENTS_TEXT((_peerdb_data->>%s)::JSON))::%s", stringCol, pgType)
 		} else if qkind == types.QValueKindBytes {
 			return fmt.Sprintf("decode(_peerdb_data->>%s, 'base64')::%s", stringCol, pgType)
-		} else if pgType == "bytea" {
-			// into a bytea target: text::bytea would read backslash escapes ('\x41' is the byte 'A')
-			switch qkind {
-			case types.QValueKindString, types.QValueKindEnum, types.QValueKindJSON:
-				return fmt.Sprintf("convert_to(_peerdb_data->>%s, 'UTF8')", stringCol)
-			case types.QValueKindUUID:
-				return fmt.Sprintf("uuid_send((_peerdb_data->>%s)::uuid)", stringCol)
-			}
 		}
 	}
 	return fmt.Sprintf("(_peerdb_data->>%s)::%s", stringCol, pgType)
