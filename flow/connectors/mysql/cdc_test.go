@@ -689,3 +689,53 @@ func TestPkeyChanged(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdateRowRecords(t *testing.T) {
+	keyMove := func() *model.UpdateRecord[model.RecordItems] {
+		oldItems, newItems := model.NewRecordItems(2), model.NewRecordItems(2)
+		oldItems.AddColumn("id", types.QValueInt32{Val: 1})
+		oldItems.AddColumn("v", types.QValueString{Val: "a"})
+		newItems.AddColumn("id", types.QValueInt32{Val: 101})
+		newItems.AddColumn("v", types.QValueString{Val: "a"})
+		return &model.UpdateRecord[model.RecordItems]{
+			OldItems: oldItems, NewItems: newItems, SourceTableName: "db.t", DestinationTableName: "t",
+		}
+	}
+	pkey := []string{"id"}
+
+	t.Run("not split: key change stays an update", func(t *testing.T) {
+		update := keyMove()
+		records, partial := updateRowRecords(update, pkey, false, true, nil)
+		require.Equal(t, []model.Record[model.RecordItems]{update}, records)
+		require.False(t, partial)
+	})
+
+	t.Run("split: key change becomes delete + insert", func(t *testing.T) {
+		records, partial := updateRowRecords(keyMove(), pkey, true, true, &types.QValueString{Val: "db"})
+		require.False(t, partial)
+		require.Len(t, records, 2)
+		del, ok := records[0].(*model.DeleteRecord[model.RecordItems])
+		require.True(t, ok)
+		require.Equal(t, types.QValueInt32{Val: 1}, del.Items.GetColumnValue("id"))
+		require.Equal(t, types.QValueString{Val: "db"}, del.Items.GetColumnValue("_peerdb_source_schema"))
+		ins, ok := records[1].(*model.InsertRecord[model.RecordItems])
+		require.True(t, ok)
+		require.Equal(t, types.QValueInt32{Val: 101}, ins.Items.GetColumnValue("id"))
+		require.Equal(t, types.QValueString{Val: "db"}, ins.Items.GetColumnValue("_peerdb_source_schema"))
+	})
+
+	t.Run("split: partial row image stays an update", func(t *testing.T) {
+		update := keyMove()
+		records, partial := updateRowRecords(update, pkey, true, false, nil)
+		require.Equal(t, []model.Record[model.RecordItems]{update}, records)
+		require.True(t, partial)
+	})
+
+	t.Run("split: unchanged key stays an update", func(t *testing.T) {
+		update := keyMove()
+		update.NewItems.AddColumn("id", types.QValueInt32{Val: 1})
+		records, partial := updateRowRecords(update, pkey, true, true, nil)
+		require.Equal(t, []model.Record[model.RecordItems]{update}, records)
+		require.False(t, partial)
+	})
+}
