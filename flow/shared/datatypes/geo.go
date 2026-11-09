@@ -43,3 +43,15 @@ func GeoToWKB(wkt string) ([]byte, error) {
 
 	return geometryObject.ToWKB(), nil
 }
+
+// GeoToEWKB converts WKT to EWKB carrying srid, or to WKB when srid is 0
+func GeoToEWKB(wkt string, srid int) ([]byte, error) {
+	geometryObject, geoErr := geom.NewGeomFromWKT(wkt)
+	if geoErr != nil {
+		return []byte{}, geoErr
+	}
+	if srid == 0 {
+		return geometryObject.ToWKB(), nil
+	}
+	return geometryObject.SetSRID(srid).ToEWKBWithSRID(), nil
+}
