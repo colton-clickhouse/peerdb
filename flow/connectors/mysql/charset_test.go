@@ -11,6 +11,7 @@ import (
 	"go.temporal.io/sdk/log"
 
 	"github.com/PeerDB-io/peerdb/flow/otel_metrics"
+	"github.com/PeerDB-io/peerdb/flow/shared"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
@@ -92,13 +93,13 @@ func TestQValueFromMysqlRowEvent_Transcodes(t *testing.T) {
 
 	// Without a decoder (utf8mb4 column) the bytes are reinterpreted verbatim - mojibake.
 	raw, err := QValueFromMysqlRowEvent(
-		ev, 0, nil, nil, types.QValueKindString, latin1, nil, logger, &coercionReported, false)
+		ev, 0, nil, nil, types.QValueKindString, latin1, nil, logger, &coercionReported, false, shared.InternalVersion_Latest)
 	require.NoError(t, err)
 	require.NotEqual(t, "café", raw.(types.QValueString).Val)
 
 	// With the latin1 decoder the value is correctly transcoded.
 	decoded, err := QValueFromMysqlRowEvent(
-		ev, 0, nil, nil, types.QValueKindString, latin1, mysqlCharsetEncodings["latin1"], logger, &coercionReported, false)
+		ev, 0, nil, nil, types.QValueKindString, latin1, mysqlCharsetEncodings["latin1"], logger, &coercionReported, false, shared.InternalVersion_Latest)
 	require.NoError(t, err)
 	require.Equal(t, "café", decoded.(types.QValueString).Val)
 }
@@ -113,7 +114,8 @@ func TestQValueFromMysqlRowEvent_TranscodesMariaDBJSON(t *testing.T) {
 	latin1 := []byte{'"', 0x63, 0x61, 0x66, 0xE9, '"'} // the JSON string "café" in latin1
 
 	decoded, err := QValueFromMysqlRowEvent(
-		ev, 0, nil, nil, types.QValueKindJSON, latin1, mysqlCharsetEncodings["latin1"], logger, &coercionReported, false)
+		ev, 0, nil, nil, types.QValueKindJSON, latin1, mysqlCharsetEncodings["latin1"], logger, &coercionReported, false,
+		shared.InternalVersion_Latest)
 	require.NoError(t, err)
 	require.Equal(t, `"café"`, decoded.(types.QValueJSON).Val)
 }

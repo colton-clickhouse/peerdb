@@ -56,6 +56,10 @@ const (
 	InternalVersion_MariaDBJSONColumns
 	// Postgres: json[]/jsonb[] land in Array(JSON) instead of String with PEERDB_CLICKHOUSE_ENABLE_JSON
 	InternalVersion_JSONArrayAsArrayJSON
+	// MySQL, every destination: dates with any zero part (a zero month or day, i.e. partial zero dates, or a
+	// zero year) replicated like zero dates (the epoch). Older mirrors roll a zero month or day forward to 01,
+	// inventing a real date.
+	InternalVersion_MySQLZeroDatePartsAsZero
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
