@@ -278,6 +278,10 @@ func (c *MySqlConnector) getTableSchemaForTable(
 	if err != nil {
 		return nil, err
 	}
+	destinationTypes := make(map[string]string, len(tm.Columns))
+	for _, setting := range tm.Columns {
+		destinationTypes[setting.SourceName] = setting.DestinationType
+	}
 
 	// CAST(... AS BINARY) forces a case-sensitive, collation-independent comparison on the join keys so it works with
 	// lower_case_table_names=0. The LEFT JOIN leaves seq_in_index NULL for non-primary-key columns.
@@ -346,6 +350,7 @@ func (c *MySqlConnector) getTableSchemaForTable(
 			return nil, err
 		}
 		qkind = mariaDBJSONKind(qkind, columnName, dataType, jsonColumns)
+		qkind = tinyInt1Kind(qkind, dataType, destinationTypes[columnName])
 
 		column := &protos.FieldDescription{
 			Name:         columnName,

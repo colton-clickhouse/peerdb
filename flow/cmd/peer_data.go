@@ -222,6 +222,9 @@ func (h *FlowRequestHandler) GetColumnsTypeConversion(
 	ctx context.Context,
 	req *protos.ColumnsTypeConversionRequest,
 ) (*protos.ColumnsTypeConversionResponse, APIError) {
+	if req.DestinationPeerType == protos.DBType_POSTGRES.String() {
+		return wrapErrorAsFailedPrecondition(connpostgres.GetColumnsTypeConversion())
+	}
 	return wrapErrorAsFailedPrecondition(connclickhouse.GetColumnsTypeConversion())
 }
 

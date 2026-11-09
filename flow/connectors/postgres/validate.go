@@ -294,6 +294,9 @@ func (c *PostgresConnector) ValidateMirrorDestination(
 	if err := longPeerDBNamesError(cfg); err != nil {
 		return err
 	}
+	if err := c.destinationTypesError(ctx, cfg, tableNameSchemaMapping); err != nil {
+		return err
+	}
 
 	if cfg.System == protos.TypeSystem_PG && cfg.Env["PEERDB_PG_AUTOMATED_SCHEMA_DUMP"] == "true" {
 		return nil // pg_dump will create the schema and tables on the destination

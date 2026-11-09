@@ -692,6 +692,10 @@ func generateCreateTableSQLForNormalizedTable(
 	tableSchema *protos.TableSchema,
 ) string {
 	createTableSQLArray := make([]string, 0, len(tableSchema.Columns)+2)
+	var destinationTypes map[string]string
+	if tableSchema.System == protos.TypeSystem_Q {
+		destinationTypes = columnDestinationTypes(config.TableMappings, dstSchemaTable)
+	}
 	for _, column := range tableSchema.Columns {
 		pgColumnType := column.Type
 
@@ -709,6 +713,10 @@ func generateCreateTableSQLForNormalizedTable(
 		if column.Type == "numeric" && column.TypeModifier != -1 {
 			precision, scale := common.ParseNumericTypmod(column.TypeModifier)
 			pgColumnType = fmt.Sprintf("numeric(%d,%d)", precision, scale)
+		}
+		// a column setting's type (validated at creation: destinationTypesError)
+		if destinationType, ok := destinationTypes[column.Name]; ok {
+			pgColumnType = destinationType
 		}
 
 		var notNull string
