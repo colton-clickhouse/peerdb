@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	e2e "github.com/PeerDB-io/peerdb/flow/e2e"
+	"github.com/PeerDB-io/peerdb/flow/internal"
 	"github.com/PeerDB-io/peerdb/flow/shared"
 )
 
@@ -108,4 +109,129 @@ func (s MySQLPGSuite) zeroDateRows(srcTable string, version uint32, zeroYears bo
 	env.Cancel(t.Context())
 	e2e.RequireEnvCanceled(t, env)
 	return got
+}
+
+// A DATE or DATETIME partition key's MIN/MAX became the partition bounds through the value conversion, so a
+// zero-part bound turned into the epoch: a partial-zero MAX put the end before the start, and a zero MIN dropped
+// every row before 1970. Every row must arrive, including zero-part values inside the range and next to a
+// partition boundary, and dates in year 0, which sort below every real date.
+func (s MySQLPGSuite) Test_Zero_Date_Partition_Bounds() {
+	s.zeroDatePartitions("zdp", shared.InternalVersion_Latest)
+}
+
+// Older mirrors (before InternalVersion_MySQLZeroDatePartsAsZero) partition the same way: only their values
+// differ, so they read every row too.
+func (s MySQLPGSuite) Test_Zero_Date_Partition_Bounds_Old_Version() {
+	s.zeroDatePartitions("zdp_old", shared.InternalVersion_MySQLZeroDatePartsAsZero-1)
+}
+
+func (s MySQLPGSuite) zeroDatePartitions(prefix string, version uint32) {
+	t := s.t
+	for _, tc := range []struct {
+		name, colType string
+		values        []string
+	}{
+		{"date_year0_min", "DATE", []string{"0000-00-00", "0000-05-10", "1960-01-01", "2024-05-10", "2025-00-15",
+			"2025-02-28", "2025-03-00", "2025-03-01", "2025-09-00"}},
+		{"date_partial_min", "DATE", []string{"2024-03-00", "2024-03-01", "2024-05-10", "2025-03-00", "2025-03-01",
+			"2025-12-00"}},
+		{"datetime6", "DATETIME(6)", []string{"0000-00-00 00:00:00", "1960-01-01 00:00:00", "2025-02-28 23:59:59.999999",
+			"2025-03-00 12:00:00", "2025-03-01 00:00:00", "2025-03-01 00:00:00.000001", "2025-04-00 00:00:00"}},
+		{"datetime_year0_only", "DATETIME", []string{"0000-05-10 10:00:00", "0000-00-00 00:00:00"}},
+	} {
+		name := prefix + "_" + tc.name
+		srcFull := e2e.AttachSchema(s, name)
+		require.NoError(t, s.source.Exec(t.Context(), `SET SESSION sql_mode = ''`))
+		require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+			`CREATE TABLE %s (id INT AUTO_INCREMENT PRIMARY KEY, k %s)`, srcFull, tc.colType)))
+		for _, v := range tc.values {
+			require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s (k) VALUES ('%s')`, srcFull, v)))
+		}
+		require.NoError(t, s.source.Exec(t.Context(), `ANALYZE TABLE `+srcFull))
+
+		connectionGen := e2e.FlowConnectionGenerationConfig{
+			FlowJobName:   e2e.AddSuffix(s, name),
+			TableMappings: e2e.TableMappings(s, name, name),
+			Destination:   s.Peer().Name,
+		}
+		flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
+		flowConnConfig.TableMappings[0].PartitionKey = "k"
+		flowConnConfig.DoInitialSnapshot = true
+		flowConnConfig.SnapshotNumRowsPerPartition = 2
+		flowConnConfig.Version = version
+		temporal := e2e.NewTemporalClient(t)
+		env := e2e.ExecutePeerflow(t, temporal, flowConnConfig)
+		e2e.SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+		e2e.EnvWaitFor(t, env, 3*time.Minute, "initial load "+name, func() bool {
+			return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, s.DestinationTable(name))) == int64(len(tc.values))
+		})
+		env.Cancel(t.Context())
+		e2e.RequireEnvCanceled(t, env)
+	}
+}
+
+// incrementalQRep starts a standalone QRep mirror on a DATETIME watermark k, cycling every 5 s
+func (s MySQLPGSuite) incrementalQRep(name string) (e2e.WorkflowRun, string) {
+	t := s.t
+	srcFull := e2e.AttachSchema(s, name)
+	qrepConfig := e2e.CreateQRepWorkflowConfig(t, e2e.AddSuffix(s, name), srcFull, s.DestinationTable(name),
+		fmt.Sprintf("SELECT * FROM %s WHERE k BETWEEN {{.start}} AND {{.end}}", srcFull),
+		s.Peer().Name, "", true, "", "")
+	qrepConfig.SourceName = s.Source().GeneratePeer(t).Name
+	qrepConfig.WatermarkColumn = "k"
+	qrepConfig.InitialCopyOnly = false
+	qrepConfig.WaitBetweenBatchesSeconds = 5
+	qrepConfig.NumRowsPerPartition = 2
+	return e2e.RunQRepFlowWorkflow(t, e2e.NewTemporalClient(t), qrepConfig), qrepConfig.FlowJobName
+}
+
+// Incremental QRep with a partial-zero minimum: the first cycle used to read the table as one partition that
+// every later cycle took as already synced, so rows inserted after it never replicated. The minimum is floored to
+// a real date instead, and later rows arrive.
+func (s MySQLPGSuite) Test_Partial_Zero_Watermark_Incremental_QRep() {
+	t := s.t
+	name := "qrep_partial_zero_min"
+	srcFull := e2e.AttachSchema(s, name)
+	require.NoError(t, s.source.Exec(t.Context(), `SET SESSION sql_mode = ''`))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+		`CREATE TABLE %s (id INT PRIMARY KEY, k DATETIME NOT NULL)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES
+		(1, '2024-03-00 10:00:00'), (2, '2024-03-01 00:00:00'), (3, '2024-06-15 08:00:00')`, srcFull)))
+	env, _ := s.incrementalQRep(name)
+	dst := s.DestinationTable(name)
+	// the destination table is created by the first cycle
+	count := func() int64 {
+		var n int64
+		if err := s.dest.Conn().QueryRow(t.Context(), `SELECT count(*) FROM `+dst).Scan(&n); err != nil {
+			return -1
+		}
+		return n
+	}
+	e2e.EnvWaitFor(t, env, 3*time.Minute, "first cycle", func() bool { return count() == 3 })
+	e2e.EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES
+		(4, '2025-01-01 00:00:00'), (5, '2025-02-00 12:00:00')`, srcFull)))
+	e2e.EnvWaitFor(t, env, 3*time.Minute, "rows inserted after the first cycle", func() bool { return count() == 5 })
+	env.Cancel(t.Context())
+	e2e.RequireEnvCanceled(t, env)
+}
+
+// Incremental QRep can't start a partition below year 1, where a zero year sorts: refused by name.
+func (s MySQLPGSuite) Test_Zero_Year_Watermark_Refused_For_Incremental_QRep() {
+	t := s.t
+	name := "qrep_zero_year_min"
+	srcFull := e2e.AttachSchema(s, name)
+	require.NoError(t, s.source.Exec(t.Context(), `SET SESSION sql_mode = ''`))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+		`CREATE TABLE %s (id INT PRIMARY KEY, k DATETIME NOT NULL)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES
+		(1, '0000-05-10 10:00:00'), (2, '2024-03-01 00:00:00')`, srcFull)))
+	env, flowName := s.incrementalQRep(name)
+	catalogPool, err := internal.GetCatalogConnectionPoolFromEnv(t.Context())
+	require.NoError(t, err)
+	e2e.EnvWaitFor(t, env, 3*time.Minute, "refusal naming the watermark column", func() bool {
+		count, err := e2e.GetLogCount(t.Context(), catalogPool, flowName, "error", "has dates in year 0")
+		return err == nil && count > 0
+	})
+	env.Cancel(t.Context())
+	e2e.RequireEnvCanceled(t, env)
 }
