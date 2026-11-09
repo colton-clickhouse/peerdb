@@ -235,6 +235,15 @@ func processTime(str string) (time.Duration, error) {
 	return val, nil
 }
 
+// nonNilBinary keeps an empty, non-NULL binary value from being a nil slice: sinks write nil as NULL
+// (pgx COPY, encoding/json). go-mysql hands out nil for empty values depending on buffer reuse.
+func nonNilBinary(b []byte) []byte {
+	if b == nil {
+		return []byte{}
+	}
+	return b
+}
+
 // padTrimmedBinary restores a fixed-width binary value
 func padTrimmedBinary(data []byte, width int) []byte {
 	if width <= len(data) {
@@ -363,7 +372,7 @@ func QValueFromMysqlFieldValue(
 		case types.QValueKindEnum:
 			return types.QValueEnum{Val: string(v)}, nil
 		case types.QValueKindBytes:
-			return types.QValueBytes{Val: slices.Clone(v)}, nil
+			return types.QValueBytes{Val: nonNilBinary(slices.Clone(v))}, nil
 		case types.QValueKindJSON:
 			// keep snapshot and cdc json representation consistent
 			doc := compactMySQLJSON(v)
@@ -595,7 +604,7 @@ func QValueFromMysqlRowEvent(
 	case []byte:
 		switch qkind {
 		case types.QValueKindBytes:
-			return types.QValueBytes{Val: val}, nil
+			return types.QValueBytes{Val: nonNilBinary(val)}, nil
 		case types.QValueKindString:
 			s, err := decodeMySQLBytes(enc, val)
 			if err != nil {
@@ -626,7 +635,7 @@ func QValueFromMysqlRowEvent(
 		switch qkind {
 		case types.QValueKindBytes:
 			b := padTrimmedBinary(shared.UnsafeFastStringToReadOnlyBytes(val), binaryColumnLength(mytype, ev.ColumnMeta[idx]))
-			return types.QValueBytes{Val: b}, nil
+			return types.QValueBytes{Val: nonNilBinary(b)}, nil
 		case types.QValueKindString:
 			s, err := decodeMySQLString(enc, val)
 			if err != nil {
