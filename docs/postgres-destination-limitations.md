@@ -66,9 +66,19 @@ the mirror and add them on the target as generated columns, or recompute them af
 
 `ADD COLUMN` is replicated, with the column nullable and PeerDB's default type for it.
 
-- **Existing rows** get the source's default, as on the source, when it's a literal (`DEFAULT 'x'`, `DEFAULT 5`).
-  The target column keeps no default (see above). A time default (`DEFAULT CURRENT_TIMESTAMP`) isn't carried: it
-  would fill the time of the replay, not the source's, so those rows hold NULL.
+- **Existing rows** hold NULL in the new column on the target, even when the source column has a `DEFAULT`: MySQL
+  fills the rows that predate the column without writing them to the binlog, so CDC never sees those values. Once
+  the `ADD COLUMN` has replicated (the column exists on the target), backfill them with one `UPDATE`:
+
+  ```sql
+  -- source: ALTER TABLE orders ADD COLUMN status VARCHAR(10) NOT NULL DEFAULT 'new';
+  UPDATE orders SET status = 'new' WHERE status IS NULL;
+  ```
+
+  Run it before CDC writes a real NULL into the column (a nullable column with a default can get one later), or
+  limit it to the rows that predate the `ALTER` (for example by key). For a time default (`CURRENT_TIMESTAMP`),
+  copy the values from the source by key instead: the source filled them at the `ALTER`'s time. The target
+  column gets no default (see above).
 - **Another type than PeerDB's** (an `INT UNSIGNED` that needs `bigint`, a `TIME` that needs `interval`): add the
   column on the target first, with that type. The replay keeps an existing column, and normalize casts to it.
 
@@ -95,9 +105,6 @@ Postgres destinations accept:
 | MySQL `TIME` | `time` (a time of day) | `interval` (MySQL's `TIME` is a duration: -838:59:59 to 838:59:59) |
 | CockroachDB `INTERVAL`, `INTERVAL[]` | `text` holding PeerDB's interval JSON | `interval`, `interval[]` (from the CockroachDB stack, below) |
 | MySQL `TINYINT(1)` | `boolean` | `smallint`, `integer`, `bigint`: read as an integer, so 2, 127 and -5 keep their values |
-| `FLOAT` (real) | `real` | `float8` |
-| text | `text` | `citext` (the extension must exist on the target) |
-| `JSON` | `json` | `jsonb` |
 
 The CockroachDB → Postgres fixes (stacked on these) add the `INTERVAL` choices to this list.
 
@@ -106,9 +113,14 @@ Unsigned integers get the signed type of the same size by default, which holds o
 9223372036854775807 fails the snapshot or normalize (out of range). `TINYINT UNSIGNED` and `MEDIUMINT UNSIGNED` fit
 their defaults (`smallint`, `integer`). Give the others a wider type where the values can exceed the signed range.
 
-Mirror validation (and table creation, also with `skip_validation`) refuses other choices, naming the column. A
-target table pre-created by the user is kept as it is; normalize casts to its columns' types, for any type the
-values cast to. Known limits of pre-created columns:
+Mirror validation (and table creation, also with `skip_validation`) refuses other choices, naming the column. The
+list holds only fixes for types that can't hold the source's values. Any other target type (`citext` for text,
+`jsonb` for `JSON`, `double precision` for `FLOAT`, a domain) is a choice for the user to make by pre-creating the
+target table: a pre-created table is kept as it is, and normalize casts to its columns' types, for any type the
+values cast to. Such a type can change the values or how they compare: `citext` compares case-insensitively, so key
+values that differ only in case collide on the target; `jsonb` doesn't keep the JSON's text (key order, whitespace,
+duplicate keys); a `FLOAT` in `double precision` can show more digits than MySQL's. Known limits of pre-created
+columns:
 
 - **`bytea`** takes binary source columns only: a string, enum, JSON or UUID value fails normalize (`column ... is of
   type bytea but expression is of type text`).
