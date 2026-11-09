@@ -6,9 +6,12 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 
+	"github.com/PeerDB-io/peerdb/flow/alerting"
 	"github.com/PeerDB-io/peerdb/flow/connectors/utils/monitoring"
 	"github.com/PeerDB-io/peerdb/flow/internal"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
@@ -64,3 +67,32 @@ func TestPendingNormalizeLag(t *testing.T) {
 	require.InDelta(t, 10*60*1e6, float64(l), 60*1e6, "lag of the mirror's own batch")
 }
 
+// The normalize-gap alert for batches waiting for normalize (non-Postgres sources) reaches the catalog's alerts,
+// with the text for waiting batches. The alert config only covers this flow and sends nowhere (no channels).
+func TestNormalizeGapAlertForPendingBatches(t *testing.T) {
+	ctx := t.Context()
+	pool, err := internal.GetCatalogConnectionPoolFromEnv(ctx)
+	require.NoError(t, err)
+	flow := "normalize_gap_" + strings.ToLower(common.RandomString(8))
+	var configID int64
+	require.NoError(t, pool.QueryRow(ctx, `INSERT INTO peerdb_stats.alerting_config(service_type, service_config, alert_for_mirrors)
+		VALUES ('slack', convert_to('{"auth_token":"","channel_ids":[]}', 'utf8'), ARRAY[$1]) RETURNING id`, flow).Scan(&configID))
+	t.Cleanup(func() {
+		ctx := context.Background()
+		_, _ = pool.Exec(ctx, `DELETE FROM peerdb_stats.alerts_v1 WHERE alert_config_id = $1`, configID)
+		_, _ = pool.Exec(ctx, `DELETE FROM peerdb_stats.alerting_config WHERE id = $1`, configID)
+	})
+	threshold, err := internal.PeerDBIntervalSinceLastNormalizeThresholdMinutes(ctx, nil)
+	require.NoError(t, err)
+	require.NotZero(t, threshold, "normalize-gap alert disabled")
+
+	alerting.NewAlerter(ctx, pool, nil).AlertIfTooLongSinceLastNormalize(ctx,
+		&alerting.AlertKeys{FlowName: flow, PendingBatches: true}, time.Duration(threshold+1)*time.Minute)
+	rows, err := pool.Query(ctx, `SELECT alert_message FROM peerdb_stats.alerts_v1 WHERE alert_config_id = $1`, configID)
+	require.NoError(t, err)
+	messages, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	require.Contains(t, messages[0], "has been waiting")
+	require.Contains(t, messages[0], flow)
+}

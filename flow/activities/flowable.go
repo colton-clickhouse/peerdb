@@ -1569,8 +1569,7 @@ func (a *FlowableActivity) RecordSlotSizes(ctx context.Context) error {
 			a.OtelManager.Metrics.NormalizeLagGauge.Record(ctx, lagMicroseconds, metric.WithAttributeSet(attribute.NewSet(
 				attribute.String(otel_metrics.FlowNameKey, flowName),
 			)))
-			if lag := time.Duration(lagMicroseconds) * time.Microsecond; normalizeGapThreshold > 0 &&
-				lag > time.Duration(normalizeGapThreshold)*time.Minute && !normalizeHeldByStatus(info.status) {
+			if lag := time.Duration(lagMicroseconds) * time.Microsecond; normalizeGapExceeded(info.status, lag, normalizeGapThreshold) {
 				a.alertIfNormalizeStalled(ctx, info, lag)
 			}
 		}
@@ -1580,15 +1579,19 @@ func (a *FlowableActivity) RecordSlotSizes(ctx context.Context) error {
 	return nil
 }
 
-// normalizeHeldByStatus reports whether a mirror's status keeps it from normalizing, so the batches waiting
-// for normalize are expected (a paused mirror) or already reported (a failed one)
-func normalizeHeldByStatus(status protos.FlowStatus) bool {
+// normalizeGapExceeded reports whether a mirror's oldest synced batch has waited for normalize longer than
+// thresholdMinutes (0 disables), unless its status keeps it from normalizing, so the waiting batches are expected
+// (a paused mirror) or already reported (a failed one)
+func normalizeGapExceeded(status protos.FlowStatus, lag time.Duration, thresholdMinutes uint32) bool {
+	if thresholdMinutes == 0 || lag <= time.Duration(thresholdMinutes)*time.Minute {
+		return false
+	}
 	switch status {
 	case protos.FlowStatus_STATUS_PAUSED, protos.FlowStatus_STATUS_PAUSING, protos.FlowStatus_STATUS_FAILED,
 		protos.FlowStatus_STATUS_TERMINATING, protos.FlowStatus_STATUS_TERMINATED, protos.FlowStatus_STATUS_COMPLETED:
-		return true
-	default:
 		return false
+	default:
+		return true
 	}
 }
 
