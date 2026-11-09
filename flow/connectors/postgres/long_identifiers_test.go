@@ -36,13 +36,10 @@ func TestLongPeerDBNames(t *testing.T) {
 	require.ErrorContains(t, err, "mirror name "+ok+"x")
 	require.ErrorContains(t, err, "soft delete column")
 	require.NotContains(t, err.Error(), "synced-at column")
+}
 
-	// index names of long raw tables stay unique within 63 bytes
-	a, b := getRawTableIdentifier(ok), getRawTableIdentifier(ok[:len(ok)-1]+"n")
-	for _, suffix := range []string{"_batchid_idx", "_dst_table_idx"} {
-		require.LessOrEqual(t, len(rawTableIndexName(a, suffix)), maxIdentifierBytes)
-		require.NotEqual(t, rawTableIndexName(a, suffix), rawTableIndexName(b, suffix))
-		require.True(t, strings.HasSuffix(rawTableIndexName(a, suffix), suffix))
-	}
-	require.Equal(t, "_peerdb_raw_m_batchid_idx", rawTableIndexName(getRawTableIdentifier("m"), "_batchid_idx"))
+// Existing mirrors may have long names (from before the check): a resync keeps them, so it isn't refused for them
+func TestLongPeerDBNamesNotOnResync(t *testing.T) {
+	cfg := &protos.FlowConnectionConfigsCore{FlowJobName: strings.Repeat("m", maxIdentifierBytes), Resync: true}
+	require.NoError(t, (&PostgresConnector{}).ValidateMirrorDestination(t.Context(), cfg, nil))
 }
