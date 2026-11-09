@@ -73,6 +73,37 @@ func TestQkindFromMysqlType_Bit(t *testing.T) {
 	}
 }
 
+// Empty, non-NULL binary values must not be a nil slice (sinks write nil as NULL); NULL stays NULL
+func TestQValueFromMysql_EmptyBinary(t *testing.T) {
+	ev := &replication.TableMapEvent{ColumnType: []byte{mysql.MYSQL_TYPE_VARCHAR}, ColumnMeta: []uint16{16}}
+	logger := log.NewStructuredLogger(nil)
+	var coercionReported bool
+	check := func(what string, qv types.QValue, err error) {
+		t.Helper()
+		require.NoError(t, err, what)
+		b := qv.(types.QValueBytes).Val
+		require.NotNil(t, b, what)
+		require.Empty(t, b, what)
+	}
+	// snapshot: go-mysql's buffer for an empty value is nil until the column has held a non-empty one
+	qv, err := QValueFromMysqlFieldValue(types.QValueKindBytes, mysql.MYSQL_TYPE_VAR_STRING,
+		mysql.NewFieldValue(mysql.FieldValueTypeString, 0, nil), false)
+	check("snapshot", qv, err)
+	// cdc: VARBINARY and CHARACTER SET binary strings arrive as string, BLOBs as []byte
+	qv, err = QValueFromMysqlRowEvent(ev, 0, nil, nil, types.QValueKindBytes, "", nil, logger, &coercionReported, false)
+	check("cdc string", qv, err)
+	qv, err = QValueFromMysqlRowEvent(ev, 0, nil, nil, types.QValueKindBytes, []byte(nil), nil, logger, &coercionReported, false)
+	check("cdc []byte", qv, err)
+
+	qv, err = QValueFromMysqlFieldValue(types.QValueKindBytes, mysql.MYSQL_TYPE_VAR_STRING,
+		mysql.NewFieldValue(mysql.FieldValueTypeNull, 0, nil), false)
+	require.NoError(t, err)
+	require.IsType(t, types.QValueNull(""), qv, "snapshot NULL")
+	qv, err = QValueFromMysqlRowEvent(ev, 0, nil, nil, types.QValueKindBytes, nil, nil, logger, &coercionReported, false)
+	require.NoError(t, err)
+	require.IsType(t, types.QValueNull(""), qv, "cdc NULL")
+}
+
 func TestQkindFromMysqlColumnType_Set(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
