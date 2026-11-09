@@ -148,7 +148,6 @@ func pullAndSyncCore[TPull connectors.CDCPullConnectorCore, TSync connectors.CDC
 		return nil, err
 	}
 
-	var destinationIsPostgres bool
 	syncBatchID, err := func() (int64, error) {
 		// when destination is PG, batch ID is stored on destination instead of catalog
 		dstPgConn, dstPgClose, err := connectors.GetPostgresConnectorByName(ctx, config.Env, a.CatalogPool, config.DestinationName)
@@ -158,7 +157,6 @@ func pullAndSyncCore[TPull connectors.CDCPullConnectorCore, TSync connectors.CDC
 			}
 			// else fallthrough to loading from catalog
 		} else {
-			destinationIsPostgres = true
 			defer dstPgClose(ctx)
 			return dstPgConn.GetLastSyncBatchID(ctx, flowName)
 		}
@@ -172,6 +170,12 @@ func pullAndSyncCore[TPull connectors.CDCPullConnectorCore, TSync connectors.CDC
 	}
 	syncBatchID += 1
 	batchSpan.SetAttributes(attribute.Int64(otel_metrics.BatchIdKey, syncBatchID))
+
+	// the MySQL reader splits primary key changes into delete + insert for Postgres destinations
+	dstType, err := connectors.LoadPeerType(ctx, a.CatalogPool, config.DestinationName)
+	if err != nil {
+		return nil, a.Alerter.LogFlowError(ctx, flowName, err)
+	}
 
 	startTime := time.Now()
 	syncState.Store(new("syncing"))
@@ -198,7 +202,7 @@ func pullAndSyncCore[TPull connectors.CDCPullConnectorCore, TSync connectors.CDC
 			Env:                         config.Env,
 			InternalVersion:             config.Version,
 			Flags:                       config.Flags,
-			SplitPrimaryKeyUpdates:      destinationIsPostgres,
+			SplitPrimaryKeyUpdates:      dstType == protos.DBType_POSTGRES,
 		})
 		if err != nil {
 			pullSpan.RecordError(err)
