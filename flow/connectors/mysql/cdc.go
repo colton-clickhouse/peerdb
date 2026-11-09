@@ -975,8 +975,11 @@ func (c *MySqlConnector) PullRecords(
 							if fd == nil {
 								continue
 							}
+							if err := checkZeroDateKey(val, fd, schema.PrimaryKeyColumns, sourceTableName, req.InternalVersion); err != nil {
+								return err
+							}
 							val, err := QValueFromMysqlRowEvent(ev.Table, idx, enumMap[idx], setMap[idx],
-								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, shouldWrapJSON(fd))
+								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, shouldWrapJSON(fd), req.InternalVersion)
 							if err != nil {
 								return err
 							}
@@ -1012,8 +1015,11 @@ func (c *MySqlConnector) PullRecords(
 							if fd == nil {
 								continue
 							}
+							if err := checkZeroDateKey(val, fd, schema.PrimaryKeyColumns, sourceTableName, req.InternalVersion); err != nil {
+								return err
+							}
 							val, err := QValueFromMysqlRowEvent(ev.Table, idx, enumMap[idx], setMap[idx],
-								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, shouldWrapJSON(fd))
+								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, shouldWrapJSON(fd), req.InternalVersion)
 							if err != nil {
 								return err
 							}
@@ -1026,8 +1032,11 @@ func (c *MySqlConnector) PullRecords(
 							if fd == nil {
 								continue
 							}
+							if err := checkZeroDateKey(val, fd, schema.PrimaryKeyColumns, sourceTableName, req.InternalVersion); err != nil {
+								return err
+							}
 							val, err := QValueFromMysqlRowEvent(ev.Table, idx, enumMap[idx], setMap[idx],
-								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, shouldWrapJSON(fd))
+								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, shouldWrapJSON(fd), req.InternalVersion)
 							if err != nil {
 								return err
 							}
@@ -1075,8 +1084,11 @@ func (c *MySqlConnector) PullRecords(
 							if fd == nil {
 								continue
 							}
+							if err := checkZeroDateKey(val, fd, schema.PrimaryKeyColumns, sourceTableName, req.InternalVersion); err != nil {
+								return err
+							}
 							val, err := QValueFromMysqlRowEvent(ev.Table, idx, enumMap[idx], setMap[idx],
-								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, shouldWrapJSON(fd))
+								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, shouldWrapJSON(fd), req.InternalVersion)
 							if err != nil {
 								return err
 							}
@@ -1552,6 +1564,33 @@ func updateRowRecords(
 			DestinationTableName: update.DestinationTableName,
 		},
 	}, false
+}
+
+// checkZeroDateKey refuses a zero date, or one with a zero part, in a primary key column: from
+// InternalVersion_MySQLZeroDatePartsAsZero on they all arrive as the epoch, so different keys would merge.
+func checkZeroDateKey(val any, fd *protos.FieldDescription, keyCols []string, table string, version uint32) error {
+	if version < shared.InternalVersion_MySQLZeroDatePartsAsZero {
+		return nil
+	}
+	kind := types.QValueKind(fd.Type)
+	if kind != types.QValueKindDate && kind != types.QValueKindTimestamp {
+		return nil
+	}
+	var zero string
+	switch v := val.(type) {
+	case string:
+		if isZeroDate(v, version) {
+			zero = v
+		}
+	case time.Time:
+		if v.Year() == 0 {
+			zero = v.Format("2006-01-02 15:04:05.999999")
+		}
+	}
+	if zero != "" && slices.Contains(keyCols, fd.Name) {
+		return exceptions.NewMySQLZeroDateKeyError(table, fd.Name, zero)
+	}
+	return nil
 }
 
 // pkeyChanged reports whether an update moved the row to another primary key. Values are compared as the

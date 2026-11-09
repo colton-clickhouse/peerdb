@@ -19,6 +19,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/otel_metrics"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
@@ -146,11 +147,11 @@ func (c *MySqlConnector) GetQRepPartitions(
 	}
 
 	partitionHelper := utils.NewPartitionHelper(c.logger)
-	val1, err := QValueFromMysqlFieldValue(watermarkQKind, watermarkMyType, rs.Values[0][0], false)
+	val1, err := QValueFromMysqlFieldValueForVersion(watermarkQKind, watermarkMyType, rs.Values[0][0], false, config.Version)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert partition minimum to qvalue: %w", err)
 	}
-	val2, err := QValueFromMysqlFieldValue(watermarkQKind, watermarkMyType, rs.Values[0][1], false)
+	val2, err := QValueFromMysqlFieldValueForVersion(watermarkQKind, watermarkMyType, rs.Values[0][1], false, config.Version)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert partition maximum to qvalue: %w", err)
 	}
@@ -320,8 +321,14 @@ func (c *MySqlConnector) PullQRepRecords(
 		record := make([]types.QValue, 0, len(row))
 		for idx, val := range row {
 			field := schema.Fields[idx]
-			qv, err := QValueFromMysqlFieldValue(field.Type, rs.Fields[idx].Type, val,
-				shouldWrapNonObjectJSON(field.Name, field.Type, config.Flags, config.Version, nativeJSONEnabled, config.Columns))
+			if rs.Fields[idx].Flag&mysql.PRI_KEY_FLAG != 0 && config.Version >= shared.InternalVersion_MySQLZeroDatePartsAsZero &&
+				(field.Type == types.QValueKindDate || field.Type == types.QValueKindTimestamp) &&
+				val.Type == mysql.FieldValueTypeString && isZeroDate(string(val.AsString()), config.Version) {
+				return exceptions.NewMySQLZeroDateKeyError(config.WatermarkTable, field.Name, string(val.AsString()))
+			}
+			qv, err := QValueFromMysqlFieldValueForVersion(field.Type, rs.Fields[idx].Type, val,
+				shouldWrapNonObjectJSON(field.Name, field.Type, config.Flags, config.Version, nativeJSONEnabled, config.Columns),
+				config.Version)
 			if err != nil {
 				return fmt.Errorf("could not convert mysql value for %s: %w", field.Name, err)
 			}
