@@ -317,7 +317,7 @@ func TestQValueFromMysql_PartialZeroDates(t *testing.T) {
 	require.Equal(t, time.Date(2024, 2, 1, 12, 0, 0, 0, time.UTC), cdc("2024-02-00 12:00:00", gate-1))
 }
 
-// TINYINT(1) reads as an integer only with an integer destination_type (Postgres or ClickHouse type names)
+// TINYINT(1) reads as an integer only with a Postgres integer destination_type, not with ClickHouse type names
 func TestTinyInt1Kind(t *testing.T) {
 	for _, tc := range []struct {
 		columnType, destinationType string
@@ -326,10 +326,16 @@ func TestTinyInt1Kind(t *testing.T) {
 		{"tinyint(1)", "", types.QValueKindBoolean},
 		{"tinyint(1)", "boolean", types.QValueKindBoolean},
 		{"tinyint(1)", "smallint", types.QValueKindInt8},
-		{"tinyint(1)", "Int8", types.QValueKindInt8},
-		{"tinyint(1)", "Nullable(Int16)", types.QValueKindInt8},
-		{"tinyint(1) unsigned", "UInt8", types.QValueKindUInt8},
+		{"tinyint(1)", "SMALLINT", types.QValueKindInt8},
+		{"tinyint(1)", "int2", types.QValueKindInt8},
+		{"tinyint(1)", "integer", types.QValueKindInt8},
+		{"tinyint(1) unsigned", "smallint", types.QValueKindUInt8},
 		{"tinyint(1)", "text", types.QValueKindBoolean},
+		// ClickHouse type names: those mirrors keep reading a boolean, as they were set up
+		{"tinyint(1)", "Int8", types.QValueKindBoolean},
+		{"tinyint(1)", "Nullable(Int16)", types.QValueKindBoolean},
+		{"tinyint(1) unsigned", "UInt8", types.QValueKindBoolean},
+		{"tinyint(1)", "Int16", types.QValueKindBoolean},
 	} {
 		qkind, err := QkindFromMysqlColumnType(tc.columnType, true, shared.InternalVersion_Latest)
 		require.NoError(t, err)
