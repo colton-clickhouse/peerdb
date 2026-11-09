@@ -93,6 +93,8 @@ func (h *FlowRequestHandler) MirrorStatus(
 		return nil, NewInternalApiError(err)
 	}
 
+	health := h.mirrorHealth(ctx, req.FlowJobName)
+
 	if req.IncludeFlowInfo {
 		if cdcFlow, err := h.isCDCFlow(ctx, req.FlowJobName); err != nil {
 			slog.ErrorContext(ctx, "unable to determine if mirror is cdc", slog.Any("error", err))
@@ -112,6 +114,8 @@ func (h *FlowRequestHandler) MirrorStatus(
 				},
 				CurrentFlowState: currState,
 				CreatedAt:        timestamppb.New(*createdAt),
+				LastProgressAt:   health.lastProgressAt,
+				LastError:        health.lastError,
 			}, nil
 		} else {
 			qrepStatus, err := h.qrepFlowStatus(ctx, req)
@@ -128,6 +132,8 @@ func (h *FlowRequestHandler) MirrorStatus(
 				},
 				CurrentFlowState: currState,
 				CreatedAt:        timestamppb.New(*createdAt),
+				LastProgressAt:   health.lastProgressAt,
+				LastError:        health.lastError,
 			}, nil
 		}
 	}
@@ -136,7 +142,31 @@ func (h *FlowRequestHandler) MirrorStatus(
 		FlowJobName:      req.FlowJobName,
 		CurrentFlowState: currState,
 		CreatedAt:        timestamppb.New(*createdAt),
+		LastProgressAt:   health.lastProgressAt,
+		LastError:        health.lastError,
 	}, nil
+}
+
+type mirrorHealth struct {
+	lastProgressAt *timestamppb.Timestamp
+	lastError      *protos.MirrorLastError
+}
+
+// mirrorHealth reads when the mirror last made progress and its newest error, best effort: the status is returned
+// without them if the catalog can't be read
+func (h *FlowRequestHandler) mirrorHealth(ctx context.Context, flowName string) mirrorHealth {
+	var health mirrorHealth
+	if lastProgress, err := internal.FlowLastProgress(ctx, h.pool, flowName); err != nil {
+		slog.WarnContext(ctx, "unable to read the mirror's last progress", slog.Any("error", err))
+	} else {
+		health.lastProgressAt = timestamppb.New(lastProgress)
+	}
+	if message, at, ok, err := internal.FlowLastError(ctx, h.pool, flowName); err != nil {
+		slog.WarnContext(ctx, "unable to read the mirror's last error", slog.Any("error", err))
+	} else if ok {
+		health.lastError = &protos.MirrorLastError{Message: message, Timestamp: timestamppb.New(at)}
+	}
+	return health
 }
 
 func (h *FlowRequestHandler) cdcFlowStatus(
