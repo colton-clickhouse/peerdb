@@ -17,20 +17,18 @@ import (
 // destinationTypeOverrides are the target column types a column setting's destination_type can pick on a Postgres
 // destination, per PeerDB type, instead of the type PeerDB creates (qValueKindToPostgresType). Each one holds every
 // value of the PeerDB type, takes the snapshot's binary COPY of it, and normalize casts to it (the target's own
-// types). Mostly for mappings that can't hold the source's range: unsigned integers, MySQL TIME as a duration.
+// types). Only for mappings that can't hold the source's range or meaning: wider integers for unsigned ones, MySQL
+// TIME as a duration, TINYINT(1) as an integer. Other target types are the user's to pre-create.
 var destinationTypeOverrides = map[types.QValueKind][]string{
-	types.QValueKindInt8:    {"smallint", "integer", "bigint", "numeric"},
-	types.QValueKindUInt8:   {"smallint", "integer", "bigint", "numeric"},
-	types.QValueKindInt16:   {"integer", "bigint", "numeric"},
-	types.QValueKindUInt16:  {"integer", "bigint", "numeric"},
-	types.QValueKindInt32:   {"bigint", "numeric"},
-	types.QValueKindUInt32:  {"bigint", "numeric"},
-	types.QValueKindInt64:   {"numeric"},
-	types.QValueKindUInt64:  {"numeric(20,0)", "numeric"},
-	types.QValueKindFloat32: {"float8"},
-	types.QValueKindTime:    {"interval"},
-	types.QValueKindString:  {"citext"},
-	types.QValueKindJSON:    {"jsonb"},
+	types.QValueKindInt8:   {"smallint", "integer", "bigint", "numeric"},
+	types.QValueKindUInt8:  {"smallint", "integer", "bigint", "numeric"},
+	types.QValueKindInt16:  {"integer", "bigint", "numeric"},
+	types.QValueKindUInt16: {"integer", "bigint", "numeric"},
+	types.QValueKindInt32:  {"bigint", "numeric"},
+	types.QValueKindUInt32: {"bigint", "numeric"},
+	types.QValueKindInt64:  {"numeric"},
+	types.QValueKindUInt64: {"numeric(20,0)", "numeric"},
+	types.QValueKindTime:   {"interval"},
 	// MySQL TINYINT(1) only, which the MySQL reader then reads as an integer instead of a boolean
 	types.QValueKindBoolean: {"smallint"},
 }
@@ -85,8 +83,8 @@ func destinationTypeProblem(system protos.TypeSystem, kind types.QValueKind, des
 }
 
 // destinationTypesError checks the column settings' destination_type of a mirror to Postgres (destinationTypeProblem),
-// and that the type is the destination's built-in one, or citext (an extension). Columns without a source schema
-// aren't checked against their type: table creation checks them again (checkDestinationTypes).
+// and that the type is the destination's built-in one. Columns without a source schema aren't checked against their
+// type: table creation checks them again (checkDestinationTypes).
 func (c *PostgresConnector) destinationTypesError(
 	ctx context.Context, cfg *protos.FlowConnectionConfigsCore, schemas map[string]*protos.TableSchema,
 ) error {
@@ -120,7 +118,7 @@ func (c *PostgresConnector) destinationTypesError(
 			// which needn't take the snapshot's COPY or normalize's cast.
 			var builtin *bool
 			if err := c.conn.QueryRow(ctx,
-				`SELECT typnamespace = 'pg_catalog'::regnamespace OR typname = 'citext' FROM pg_type WHERE oid = to_regtype($1)`,
+				`SELECT typnamespace = 'pg_catalog'::regnamespace FROM pg_type WHERE oid = to_regtype($1)`,
 				col.DestinationType,
 			).Scan(&builtin); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("failed to look up type %s on the destination: %w", col.DestinationType, err)
