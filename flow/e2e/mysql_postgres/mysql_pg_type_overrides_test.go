@@ -4,7 +4,6 @@ package mysql_postgres
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -114,14 +113,8 @@ func (s MySQLPGSuite) Test_Column_Type_Overrides_Refused() {
 	err = validate(&protos.ColumnSetting{SourceName: "d", DestinationType: "bigint"})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "isn't a destination_type for its type")
-	// citext is an extension: refused where it isn't installed, accepted where it is
-	var citext bool
-	require.NoError(t, s.dest.Conn().QueryRow(t.Context(), `SELECT to_regtype('citext') IS NOT NULL`).Scan(&citext))
+	// other types are the user's to pre-create, not a setting
 	err = validate(&protos.ColumnSetting{SourceName: "v", DestinationType: "citext"})
-	if citext {
-		require.NoError(t, err)
-	} else {
-		require.Error(t, err)
-		require.True(t, strings.Contains(err.Error(), "doesn't exist on the destination"), err.Error())
-	}
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "isn't a destination_type for its type")
 }
