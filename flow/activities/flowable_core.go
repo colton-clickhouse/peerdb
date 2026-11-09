@@ -148,6 +148,7 @@ func pullAndSyncCore[TPull connectors.CDCPullConnectorCore, TSync connectors.CDC
 		return nil, err
 	}
 
+	var destinationIsPostgres bool
 	syncBatchID, err := func() (int64, error) {
 		// when destination is PG, batch ID is stored on destination instead of catalog
 		dstPgConn, dstPgClose, err := connectors.GetPostgresConnectorByName(ctx, config.Env, a.CatalogPool, config.DestinationName)
@@ -157,6 +158,7 @@ func pullAndSyncCore[TPull connectors.CDCPullConnectorCore, TSync connectors.CDC
 			}
 			// else fallthrough to loading from catalog
 		} else {
+			destinationIsPostgres = true
 			defer dstPgClose(ctx)
 			return dstPgConn.GetLastSyncBatchID(ctx, flowName)
 		}
@@ -196,6 +198,7 @@ func pullAndSyncCore[TPull connectors.CDCPullConnectorCore, TSync connectors.CDC
 			Env:                         config.Env,
 			InternalVersion:             config.Version,
 			Flags:                       config.Flags,
+			SplitPrimaryKeyUpdates:      destinationIsPostgres,
 		})
 		if err != nil {
 			pullSpan.RecordError(err)
