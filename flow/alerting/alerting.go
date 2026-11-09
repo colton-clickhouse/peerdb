@@ -39,6 +39,9 @@ type AlertKeys struct {
 	FlowName string
 	PeerName string
 	SlotName string
+	// PendingBatches: the interval is how long synced batches have waited for normalize (non-Postgres sources),
+	// so an idle source can't explain it
+	PendingBatches bool
 }
 
 // doesn't take care of closing pool, needs to be done externally.
@@ -259,12 +262,10 @@ func (a *Alerter) AlertIfTooLongSinceLastNormalize(ctx context.Context, alertKey
 	}
 	// logged whether or not alert senders are configured, so a stalled normalize is never silent, but once per
 	// alerting gap like the alert: the check runs every minute
-	if logGap, err := internal.PeerDBAlertingGapMinutesAsDuration(ctx, nil); err == nil {
-		if last, ok := a.normalizeGapLogged.Load(alertKeys.FlowName); !ok || time.Since(last.(time.Time)) >= logGap {
-			a.normalizeGapLogged.Store(alertKeys.FlowName, time.Now())
-			internal.LoggerFromCtx(ctx).Warn("too long since last data normalize", slog.String("flowName", alertKeys.FlowName),
-				slog.Duration("intervalSinceLastNormalize", intervalSinceLastNormalize))
-		}
+	if logGap, err := internal.PeerDBAlertingGapMinutesAsDuration(ctx, nil); err == nil &&
+		a.normalizeGapDue(alertKeys.FlowName, logGap, time.Now()) {
+		internal.LoggerFromCtx(ctx).Warn("too long since last data normalize", slog.String("flowName", alertKeys.FlowName),
+			slog.Duration("intervalSinceLastNormalize", intervalSinceLastNormalize))
 	}
 	alertSenderConfigs, err := a.registerSendersFromPool(ctx)
 	if err != nil {
@@ -283,6 +284,11 @@ func (a *Alerter) AlertIfTooLongSinceLastNormalize(ctx context.Context, alertKey
 		` This could indicate an issue with the pipeline — please check the UI and logs to confirm.`+
 		` Alternatively, it might be that the source database is idle and not receiving new updates.`, deploymentUIDPrefix,
 		alertKeys.FlowName, intervalSinceLastNormalize)
+	if alertKeys.PendingBatches {
+		alertMessage = fmt.Sprintf("%sData read from the source for mirror `%s` has been waiting `%s` to be applied to "+
+			"the target. Normalize isn't keeping up or keeps failing — please check the mirror's errors in the UI and logs.",
+			deploymentUIDPrefix, alertKeys.FlowName, intervalSinceLastNormalize)
+	}
 
 	for _, alertSenderConfig := range alertSenderConfigs {
 		if len(alertSenderConfig.AlertForMirrors) == 0 ||
@@ -292,6 +298,22 @@ func (a *Alerter) AlertIfTooLongSinceLastNormalize(ctx context.Context, alertKey
 			}
 		}
 	}
+}
+
+// normalizeGapDue reports whether a flow's normalize-gap warning is due: once per gap. It forgets flows not
+// logged for two gaps (dropped mirrors). Per worker process, so a restart or another worker may log it again.
+func (a *Alerter) normalizeGapDue(flowName string, gap time.Duration, now time.Time) bool {
+	if last, ok := a.normalizeGapLogged.Load(flowName); ok && now.Sub(last.(time.Time)) < gap {
+		return false
+	}
+	a.normalizeGapLogged.Store(flowName, now)
+	a.normalizeGapLogged.Range(func(k, v any) bool {
+		if now.Sub(v.(time.Time)) >= 2*gap {
+			a.normalizeGapLogged.Delete(k)
+		}
+		return true
+	})
+	return true
 }
 
 func (a *Alerter) alertToProvider(ctx context.Context, alertSenderConfig AlertSenderConfig, alertKey string, alertMessage string) {
