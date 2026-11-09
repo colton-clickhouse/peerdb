@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -104,25 +105,38 @@ func prepareCloudSQLPostgresConfig(
 	return pgConfig, dialer, nil
 }
 
-// setTextOutputSettings best-effort pins the session settings that change values in text form (COPY, ::text,
-// to_json), whatever the role or database sets:
+// textOutputSettings pins the session settings that change values in text form (COPY, ::text, to_json, pgoutput),
+// whatever the role or database sets:
 //   - extra_float_digits = 3, so floats are exact: 0 or less rounds them to 15 (double precision) or 6 (real)
 //     significant digits;
 //   - IntervalStyle = postgres, which reads back as written: with sql_standard, '-1 day -02:03:04' prints as
 //     '-1 2:03:04', which reads back as '-1 day +02:03:04';
 //   - xmloption = content, so XML content fragments are accepted where a destination defaults to document.
-//
-// SETs rather than startup parameters, because connection poolers such as pgbouncer refuse startup parameters
-// they don't track ("unsupported startup parameter") unless they're in ignore_startup_parameters.
-func setTextOutputSettings(ctx context.Context, conn *pgx.Conn, logger log.Logger) {
-	for _, set := range []string{
-		"SET extra_float_digits = 3", "SET IntervalStyle = 'postgres'", "SET xmloption = content",
-	} {
+const textOutputSettings = "SET extra_float_digits = 3; SET IntervalStyle = 'postgres'; SET xmloption = content"
+
+// setTextOutputSettings runs textOutputSettings after connecting: SETs rather than startup parameters, because
+// connection poolers such as pgbouncer refuse startup parameters they don't track ("unsupported startup
+// parameter") unless they're in ignore_startup_parameters. A server that doesn't know a setting or doesn't support
+// SET (42704, 0A000) only gets a warning; as the SETs run in one implicit transaction, which that failure undoes,
+// they're then run one by one.
+func setTextOutputSettings(ctx context.Context, conn *pgx.Conn, logger log.Logger) error {
+	_, err := conn.Exec(ctx, textOutputSettings)
+	if err == nil {
+		return nil
+	}
+	if !shared.IsSQLStateError(err, pgerrcode.UndefinedObject, pgerrcode.FeatureNotSupported) {
+		return fmt.Errorf("failed to pin session settings for values in text form: %w", err)
+	}
+	for set := range strings.SplitSeq(textOutputSettings, "; ") {
 		if _, err := conn.Exec(ctx, set); err != nil {
+			if !shared.IsSQLStateError(err, pgerrcode.UndefinedObject, pgerrcode.FeatureNotSupported) {
+				return fmt.Errorf("failed to pin session settings for values in text form: %w", err)
+			}
 			logger.Warn("failed to pin a session setting, values in text form may change", slog.String("setting", set),
 				slog.Any("error", err))
 		}
 	}
+	return nil
 }
 
 func newPostgresConnector(
@@ -143,19 +157,10 @@ func newPostgresConnector(
 		flowName, _ = ctx.Value(shared.FlowNameKey).(string)
 	}
 	connectionString := internal.GetPGConnectionString(pgConfig, flowName)
-	connConfig, err := ParseConfig(connectionString, pgConfig)
+	connConfig, err := newConnConfig(connectionString, pgConfig)
 	if err != nil {
 		return nil, err
 	}
-
-	connConfig.Config.RuntimeParams["timezone"] = "UTC"
-	connConfig.Config.RuntimeParams["idle_in_transaction_session_timeout"] = "0"
-	connConfig.Config.RuntimeParams["statement_timeout"] = "0"
-	connConfig.Config.RuntimeParams["DateStyle"] = "ISO, DMY"
-	// IntervalStyle, extra_float_digits and xmloption: SET after connecting (setTextOutputSettings)
-	// Required for QueryExecModeSimpleProtocol, which is set in some places while querying;
-	// pgx refuses simple protocol when the server reports standard_conforming_strings=off.
-	connConfig.Config.RuntimeParams["standard_conforming_strings"] = "on"
 
 	tunnel, err := utils.NewSSHTunnel(ctx, pgConfig.SshConfig)
 	if err != nil {
@@ -193,7 +198,11 @@ func newPostgresConnector(
 		return nil, fmt.Errorf("failed to create connection: %w", err)
 	}
 	setIdleSessionTimeout(ctx, conn, logger)
-	setTextOutputSettings(ctx, conn, logger)
+	if err := setTextOutputSettings(ctx, conn, logger); err != nil {
+		conn.Close(context.Background())
+		tunnel.Close()
+		return nil, err
+	}
 
 	metadataSchema := "_peerdb_internal"
 	if pgConfig.MetadataSchema != nil {
@@ -239,6 +248,23 @@ func newPostgresConnector(
 	})
 
 	return connector, nil
+}
+
+// newConnConfig is the configuration of the connector's connection
+func newConnConfig(connectionString string, pgConfig *protos.PostgresConfig) (*pgx.ConnConfig, error) {
+	connConfig, err := ParseConfig(connectionString, pgConfig)
+	if err != nil {
+		return nil, err
+	}
+	connConfig.Config.RuntimeParams["timezone"] = "UTC"
+	connConfig.Config.RuntimeParams["idle_in_transaction_session_timeout"] = "0"
+	connConfig.Config.RuntimeParams["statement_timeout"] = "0"
+	connConfig.Config.RuntimeParams["DateStyle"] = "ISO, DMY"
+	// IntervalStyle, extra_float_digits and xmloption: SET after connecting (setTextOutputSettings)
+	// Required for QueryExecModeSimpleProtocol, which is set in some places while querying;
+	// pgx refuses simple protocol when the server reports standard_conforming_strings=off.
+	connConfig.Config.RuntimeParams["standard_conforming_strings"] = "on"
+	return connConfig, nil
 }
 
 func ParseConfig(connectionString string, pgConfig *protos.PostgresConfig) (*pgx.ConnConfig, error) {
