@@ -117,13 +117,15 @@ func shouldReportColumnTypeChange(schemaKind, wireKind types.QValueKind, flavor 
 	return true
 }
 
-// integerTypeRegex matches the integer types of the destinations' type names, as a column setting's destination_type:
-// Postgres smallint, integer, bigint, int2/4/8, ClickHouse Int8 to UInt256, Nullable or not
-var integerTypeRegex = regexp.MustCompile(`(?i)^(nullable\()?(u?int(2|4|8|16|32|64|128|256)?|smallint|integer|bigint)\)?$`)
+// integerTypeRegex matches Postgres integer type names, as a column setting's destination_type: smallint, integer,
+// bigint in any case, and int, int2, int4, int8 as Postgres spells them (lowercase), so that ClickHouse's Int8 and the
+// like don't match
+var integerTypeRegex = regexp.MustCompile(`^((?i:smallint|integer|bigint)|int[248]?)$`)
 
 // tinyInt1Kind reads a TINYINT(1) column, which PeerDB reads as a boolean (MySQL's BOOLEAN), as an integer when its
-// column setting picks an integer destination_type: applications often keep small integers in TINYINT(1), and a
-// boolean can't give them back (2, 127 and -5 all read as true).
+// column setting picks a Postgres integer destination_type: applications often keep small integers in TINYINT(1), and
+// a boolean can't give them back (2, 127 and -5 all read as true). ClickHouse type names don't match: ClickHouse
+// mirrors with an integer destination_type for TINYINT(1) were set up with a boolean and keep reading one.
 func tinyInt1Kind(qkind types.QValueKind, columnType string, destinationType string) types.QValueKind {
 	if qkind != types.QValueKindBoolean || !integerTypeRegex.MatchString(destinationType) {
 		return qkind
