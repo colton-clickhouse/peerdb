@@ -294,7 +294,8 @@ func (c *PostgresConnector) ValidateMirrorDestination(
 					}
 				}
 				if len(excludedKeys) > 0 {
-					return exceptions.NewExcludedKeyColumnsError(tableMapping.SourceTableIdentifier, excludedKeys)
+					return exceptions.NewExcludedKeyColumnsError(tableMapping.SourceTableIdentifier, excludedKeys,
+						len(excludedKeys) == len(schema.PrimaryKeyColumns))
 				}
 			}
 		}

@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/PeerDB-io/peerdb/flow/connectors"
+	connpostgres "github.com/PeerDB-io/peerdb/flow/connectors/postgres"
 	"github.com/PeerDB-io/peerdb/flow/connectors/utils/structured"
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
 	"github.com/PeerDB-io/peerdb/flow/internal"
@@ -185,6 +186,11 @@ func (h *FlowRequestHandler) validateCDCMirrorImpl(
 		if getTableSchemaError != nil {
 			return nil, NewFailedPreconditionApiError(fmt.Errorf("failed to get source table schema: %w", getTableSchemaError))
 		}
+		if _, isPostgres := dstConn.(*connpostgres.PostgresConnector); isPostgres {
+			if err := setSourcePrimaryKeys(ctx, srcConn, connectionConfigs, tableSchemaMap); err != nil {
+				return nil, NewFailedPreconditionApiError(fmt.Errorf("failed to get source table schema: %w", err))
+			}
+		}
 	}
 	if err := dstConn.ValidateMirrorDestination(ctx, connectionConfigs, tableSchemaMap); err != nil {
 		return nil, NewFailedPreconditionApiError(
@@ -192,6 +198,37 @@ func (h *FlowRequestHandler) validateCDCMirrorImpl(
 	}
 
 	return &protos.ValidateCDCMirrorResponse{}, nil
+}
+
+// setSourcePrimaryKeys gives the schemas of tables with excluded columns the primary key the source table has, for
+// Postgres to refuse excluded key columns: a MySQL source leaves excluded columns out of the key it reports.
+func setSourcePrimaryKeys(
+	ctx context.Context,
+	srcConn connectors.GetTableSchemaConnector,
+	cfg *protos.FlowConnectionConfigsCore,
+	schemas map[string]*protos.TableSchema,
+) error {
+	var withoutExclude []*protos.TableMapping
+	for _, tm := range cfg.TableMappings {
+		if len(tm.Exclude) > 0 {
+			tm = proto.CloneOf(tm)
+			tm.Exclude = nil
+			withoutExclude = append(withoutExclude, tm)
+		}
+	}
+	if len(withoutExclude) == 0 {
+		return nil
+	}
+	fullSchemas, err := srcConn.GetTableSchema(ctx, cfg.Env, cfg.Version, cfg.System, withoutExclude)
+	if err != nil {
+		return err
+	}
+	for name, fullSchema := range fullSchemas {
+		if schema, ok := schemas[name]; ok {
+			schema.PrimaryKeyColumns = fullSchema.PrimaryKeyColumns
+		}
+	}
+	return nil
 }
 
 // checkQRepTableConfig validates the per-table settings of a standalone QRep mirror, which replicates a
