@@ -20,6 +20,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/model"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 )
 
 // NeedsSetupMetadataTables returns true if the metadata tables need to be set up.
@@ -554,7 +555,7 @@ func (c *PostgresConnector) normalizeBatchError(err error, batchID int64, entry 
 		slog.String("destinationTableName", entry.tableName),
 		slog.Any("error", err),
 	)
-	return fmt.Errorf("error executing normalize statement for table %s: %w", entry.tableName, err)
+	return exceptions.NewPostgresNormalizeTableError(entry.tableName, err)
 }
 
 // CreateRawTable creates a raw table, implementing the Connector interface.
