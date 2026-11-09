@@ -741,8 +741,9 @@ func generateCreateTableSQLForNormalizedTable(
 			common.QuoteIdentifier(config.SyncedAtColName)+` TIMESTAMP DEFAULT CURRENT_TIMESTAMP`)
 	}
 
-	// add composite primary key to the table
-	if len(tableSchema.PrimaryKeyColumns) > 0 && !tableSchema.IsReplicaIdentityFull {
+	// add composite primary key to the table: the source's, also for REPLICA IDENTITY FULL tables. A keyless one is
+	// keyed on all its columns (getTableSchema), which needn't be unique, so it gets none.
+	if len(tableSchema.PrimaryKeyColumns) > 0 && !(tableSchema.IsReplicaIdentityFull && keyIsAllColumns(tableSchema)) {
 		primaryKeyColsQuoted := make([]string, 0, len(tableSchema.PrimaryKeyColumns))
 		for _, primaryKeyCol := range tableSchema.PrimaryKeyColumns {
 			primaryKeyColsQuoted = append(primaryKeyColsQuoted, common.QuoteIdentifier(primaryKeyCol))
@@ -752,6 +753,15 @@ func generateCreateTableSQLForNormalizedTable(
 	}
 
 	return fmt.Sprintf(createNormalizedTableSQL, dstSchemaTable.String(), strings.Join(createTableSQLArray, ",")), nil
+}
+
+// keyIsAllColumns says whether a table's key is all its columns (after exclusions), in table order: what a Postgres
+// source reports for a keyless REPLICA IDENTITY FULL table. A table whose primary key is all its columns in that
+// order, or becomes so when the other columns are excluded, looks the same, and is created without the key, as
+// before.
+func keyIsAllColumns(tableSchema *protos.TableSchema) bool {
+	return slices.EqualFunc(tableSchema.PrimaryKeyColumns, tableSchema.Columns,
+		func(key string, column *protos.FieldDescription) bool { return key == column.Name })
 }
 
 func (c *PostgresConnector) GetLastSyncBatchID(ctx context.Context, jobName string) (int64, error) {
