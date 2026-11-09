@@ -62,6 +62,19 @@ func TestLongIdentifiersErrorOnResync(t *testing.T) {
 	require.ErrorContains(t, longIdentifiersError(tables, nil, true), "tables dst."+a+", dst."+b)
 }
 
+// Postgres clips a long name at a character boundary: a 64-byte name ending in a two-byte character keeps 62 bytes,
+// so it collides with the 62-byte name
+func TestLongIdentifiersTruncateAtCharacter(t *testing.T) {
+	short := strings.Repeat("c", 62)
+	require.Equal(t, short, truncateIdentifier(short+"é"))
+	require.Equal(t, short+"x", truncateIdentifier(short+"xé"))
+	mapping := []*protos.TableMapping{{SourceTableIdentifier: "src.t", DestinationTableIdentifier: "dst.t"}}
+	schemas := map[string]*protos.TableSchema{
+		"src.t": {Columns: []*protos.FieldDescription{{Name: short}, {Name: short + "é"}}},
+	}
+	require.ErrorContains(t, longIdentifiersError(mapping, schemas, true), "columns dst.t."+short+", dst.t."+short+"é")
+}
+
 // Tables added to a running mirror get the key and identifier checks only: not the mirror name's (checked at
 // creation) nor the destination tables' (a re-added table's may hold rows; a zero connector has no connection)
 func TestValidateAddedTables(t *testing.T) {
