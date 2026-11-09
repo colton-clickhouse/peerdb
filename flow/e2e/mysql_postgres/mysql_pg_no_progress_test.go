@@ -14,9 +14,9 @@ import (
 )
 
 // A mirror that keeps failing with an error only the user can fix (here a column it writes was dropped from the
-// target, so normalize fails with 42703 until it's back) must say so once it has made no progress for
-// PEERDB_STALLED_ALERT_THRESHOLD_MINUTES: a warning in the mirror's log, and an alert to the configured alert
-// senders. Its status stays RUNNING.
+// target, so normalize fails with 42703 until it's back) must say so once it has been failing without progress for
+// PEERDB_NO_PROGRESS_ALERT_THRESHOLD_MINUTES: a warning in the mirror's log, and an alert to the configured alert
+// senders. Its status stays RUNNING, and says it's failing without progress until it makes progress again.
 func (s MySQLPGSuite) Test_No_Progress_With_User_Actionable_Error_Warns() {
 	t := s.t
 	srcTable := "no_progress"
@@ -24,7 +24,7 @@ func (s MySQLPGSuite) Test_No_Progress_With_User_Actionable_Error_Warns() {
 	dstFull := s.DestinationTable(srcTable)
 	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY, v VARCHAR(20))`, srcFull)))
 	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 'a')`, srcFull)))
-	e2e.SetDynamicSetting(t, "PEERDB_STALLED_ALERT_THRESHOLD_MINUTES", "1")
+	e2e.SetDynamicSetting(t, "PEERDB_NO_PROGRESS_ALERT_THRESHOLD_MINUTES", "1")
 
 	connectionGen := e2e.FlowConnectionGenerationConfig{
 		FlowJobName:   e2e.AddSuffix(s, srcTable),
@@ -55,21 +55,25 @@ func (s MySQLPGSuite) Test_No_Progress_With_User_Actionable_Error_Warns() {
 	e2e.EnvWaitFor(t, env, 8*time.Minute, "progress once the column is back", func() bool {
 		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id = 2 AND v = 'b'`, dstFull)) == 1
 	})
+	e2e.EnvWaitFor(t, env, time.Minute, "the status no longer failing without progress", func() bool {
+		return !s.mirrorStatus(flowConnConfig.FlowJobName).FailingWithoutProgress
+	})
 	env.Cancel(t.Context())
 	e2e.RequireEnvCanceled(t, env)
 }
 
 // A snapshot that can't write a value into its default target column (an INT UNSIGNED above 2^31 into integer,
 // which pgx can't encode for COPY) fails with an error only the user can fix: the mirror, still in its snapshot,
-// warns once it has made no progress for PEERDB_STALLED_ALERT_THRESHOLD_MINUTES, naming that class. The errors are
-// the snapshot partitions' (their own clone_ flows); the warning is the mirror's.
+// warns once it has been failing without progress for PEERDB_NO_PROGRESS_ALERT_THRESHOLD_MINUTES, naming that class.
+// The errors are the snapshot partitions' (their own clone_ flows); the warning, and the last error in the status,
+// are the mirror's.
 func (s MySQLPGSuite) Test_No_Progress_In_Snapshot_With_Unencodable_Value_Warns() {
 	t := s.t
 	srcTable := "no_progress_snapshot"
 	srcFull := e2e.AttachSchema(s, srcTable)
 	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY, u INT UNSIGNED)`, srcFull)))
 	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 4000000000)`, srcFull)))
-	e2e.SetDynamicSetting(t, "PEERDB_STALLED_ALERT_THRESHOLD_MINUTES", "1")
+	e2e.SetDynamicSetting(t, "PEERDB_NO_PROGRESS_ALERT_THRESHOLD_MINUTES", "1")
 
 	connectionGen := e2e.FlowConnectionGenerationConfig{
 		FlowJobName:   e2e.AddSuffix(s, srcTable),
@@ -86,21 +90,34 @@ func (s MySQLPGSuite) Test_No_Progress_In_Snapshot_With_Unencodable_Value_Warns(
 			"errors that need a fix (NOTIFY_INVALID_DESTINATION_TABLE_DEFINITION)")
 		return err == nil && count > 0
 	})
+	status := s.mirrorStatus(flowConnConfig.FlowJobName)
+	require.True(t, status.FailingWithoutProgress)
+	require.NotNil(t, status.LastError)
+	require.Contains(t, status.LastError.Message, "unable to encode")
 	env.Cancel(t.Context())
 	e2e.RequireEnvCanceled(t, env)
 }
 
-// checkNoProgressStatus: the mirror status shows the mirror RUNNING, with no progress for over a minute and the
-// failing normalize as its last error
+// checkNoProgressStatus: the mirror status shows the mirror RUNNING, failing without progress for over a minute, with
+// the failing normalize as its last error
 func (s MySQLPGSuite) checkNoProgressStatus(flowName string) {
 	t := s.t
-	client, err := e2e.NewApiClient()
-	require.NoError(t, err)
-	res, err := client.MirrorStatus(t.Context(), &protos.MirrorStatusRequest{FlowJobName: flowName})
-	require.NoError(t, err)
+	res := s.mirrorStatus(flowName)
 	require.Equal(t, protos.FlowStatus_STATUS_RUNNING, res.CurrentFlowState)
+	require.True(t, res.FailingWithoutProgress)
 	require.NotNil(t, res.LastProgressAt)
 	require.Greater(t, time.Since(res.LastProgressAt.AsTime()), time.Minute)
 	require.NotNil(t, res.LastError)
 	require.Contains(t, res.LastError.Message, "error executing normalize statement for table")
+}
+
+func (s MySQLPGSuite) mirrorStatus(flowName string) *protos.MirrorStatusResponse {
+	t := s.t
+	client, err := e2e.NewApiClient()
+	require.NoError(t, err)
+	res, err := client.MirrorStatus(t.Context(), &protos.MirrorStatusRequest{
+		FlowJobName: flowName, IncludeFlowInfo: true, ExcludeBatches: true,
+	})
+	require.NoError(t, err)
+	return res
 }

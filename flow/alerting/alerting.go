@@ -324,47 +324,41 @@ func logDue(logged *sync.Map, flowName string, gap time.Duration, now time.Time)
 	return true
 }
 
-// noProgressDue reports whether a flow that last made progress at lastProgress has gone without it for longer than
-// threshold (0: never)
-func noProgressDue(threshold time.Duration, lastProgress time.Time, now time.Time) bool {
-	return threshold > 0 && now.Sub(lastProgress) > threshold
-}
-
 // alertIfNoProgress warns in the mirror's log and alerts, once per alerting gap, when an error that needs the user
-// was just recorded for a flow that has made no progress for longer than PEERDB_STALLED_ALERT_THRESHOLD_MINUTES.
-// The error alone decides: one such error after a long run of transient ones alerts, and there's no exact "failing
-// since" (the error log has the history).
+// was just recorded for a flow that has been failing without progress for longer than
+// PEERDB_NO_PROGRESS_ALERT_THRESHOLD_MINUTES: it also logged an error that long ago, after its last progress, so an
+// idle or resumed mirror's first error doesn't alert. The errors in between can be of any class, and there's no exact
+// "failing since" (the error log has the history). Not covered: errors classified ErrorOther, failures not recorded
+// through the Alerter, and a mirror that goes FAILED before the threshold.
 func (a *Alerter) alertIfNoProgress(ctx context.Context, flowName string, errClass ErrorClass, err error) {
 	logger := internal.LoggerFromCtx(ctx)
 	// snapshot partitions report their errors under their own clone_ flow; progress and the alert are the mirror's
 	if metadata := internal.GetFlowMetadata(ctx); metadata != nil && metadata.FlowName != "" {
 		flowName = metadata.FlowName
 	}
-	thresholdMinutes, confErr := internal.PeerDBStalledAlertThresholdMinutes(ctx, nil)
+	thresholdMinutes, confErr := internal.PeerDBNoProgressAlertThresholdMinutes(ctx, nil)
 	if confErr != nil {
 		logger.Warn("failed to get the no-progress alert threshold from catalog", slog.Any("error", confErr))
 		return
 	}
-	threshold := time.Duration(thresholdMinutes) * time.Minute
-	if threshold == 0 {
+	if thresholdMinutes == 0 {
 		return
 	}
-	lastProgress, progressErr := internal.FlowLastProgress(ctx, a.CatalogPool, flowName)
+	progress, progressErr := internal.GetFlowProgress(ctx, a.CatalogPool, flowName, time.Duration(thresholdMinutes)*time.Minute)
 	if progressErr != nil {
 		if !errors.Is(progressErr, pgx.ErrNoRows) {
 			logger.Warn("failed to check the mirror's progress", slog.Any("error", progressErr))
 		}
 		return
 	}
-	now := time.Now()
-	if !noProgressDue(threshold, lastProgress, now) {
+	if !progress.FailingWithoutProgress {
 		return
 	}
 	gap, gapErr := internal.PeerDBAlertingGapMinutesAsDuration(ctx, nil)
 	if gapErr != nil || gap == 0 {
 		gap = 15 * time.Minute
 	}
-	if !logDue(&a.noProgressLogged, flowName, gap, now) {
+	if !logDue(&a.noProgressLogged, flowName, gap, time.Now()) {
 		return
 	}
 
@@ -372,9 +366,9 @@ func (a *Alerter) alertIfNoProgress(ctx context.Context, flowName string, errCla
 	if len(firstLine) > 500 {
 		firstLine = strings.ToValidUTF8(firstLine[:500], "") + "…"
 	}
-	message := fmt.Sprintf("Mirror %s has made no progress since %s (more than %d minutes) and keeps failing with "+
-		"errors that need a fix (%s): %s", flowName, lastProgress.UTC().Format(time.RFC3339), thresholdMinutes,
-		errClass.String(), firstLine)
+	message := fmt.Sprintf("Mirror %s has made no progress since %s (%d minutes ago) and keeps failing with "+
+		"errors that need a fix (%s): %s", flowName, progress.LastProgress.UTC().Format(time.RFC3339),
+		int64(progress.Since.Minutes()), errClass.String(), firstLine)
 	logger.Warn(message, slog.String("flowName", flowName))
 	if logErr := InsertFlowLog(ctx, a.CatalogPool, flowName, message, FlowErrorTypeWarn); logErr != nil {
 		logger.Warn("failed to insert flow warning", slog.Any("error", logErr))

@@ -417,10 +417,10 @@ var DynamicSettings = [...]*protos.DynamicSetting{
 		TargetForSetting: protos.DynconfTarget_ALL,
 	},
 	{
-		Name: "PEERDB_STALLED_ALERT_THRESHOLD_MINUTES",
-		Description: "Duration in minutes a mirror may keep failing with errors that need the user (a changed " +
-			"destination table, a missing slot or publication, unsupported data, a connection problem), without " +
-			"making progress, before it warns and alerts; 0 disables it",
+		Name: "PEERDB_NO_PROGRESS_ALERT_THRESHOLD_MINUTES",
+		Description: "Duration in minutes a mirror may keep failing with errors, without making progress, before an " +
+			"error that needs the user (a changed destination table, a missing slot or publication, unsupported data, " +
+			"a connection problem) warns and alerts; 0 disables it",
 		DefaultValue:     "30",
 		ValueType:        protos.DynconfValueType_UINT,
 		ApplyMode:        protos.DynconfApplyMode_APPLY_MODE_IMMEDIATE,
@@ -1086,9 +1086,9 @@ func PeerDBIntervalSinceLastNormalizeThresholdMinutes(ctx context.Context, env m
 	return dynamicConfUnsigned[uint32](ctx, env, "PEERDB_INTERVAL_SINCE_LAST_NORMALIZE_THRESHOLD_MINUTES")
 }
 
-// PEERDB_STALLED_ALERT_THRESHOLD_MINUTES, 0 disables the no-progress warning and alert
-func PeerDBStalledAlertThresholdMinutes(ctx context.Context, env map[string]string) (uint32, error) {
-	return dynamicConfUnsigned[uint32](ctx, env, "PEERDB_STALLED_ALERT_THRESHOLD_MINUTES")
+// PEERDB_NO_PROGRESS_ALERT_THRESHOLD_MINUTES, 0 disables the no-progress warning and alert
+func PeerDBNoProgressAlertThresholdMinutes(ctx context.Context, env map[string]string) (uint32, error) {
+	return dynamicConfUnsigned[uint32](ctx, env, "PEERDB_NO_PROGRESS_ALERT_THRESHOLD_MINUTES")
 }
 
 func PeerDBApplicationNamePerMirrorName(ctx context.Context, env map[string]string) (bool, error) {
