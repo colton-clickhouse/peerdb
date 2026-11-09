@@ -2,9 +2,12 @@ package connpostgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
@@ -32,7 +35,8 @@ var destinationTypeOverrides = map[types.QValueKind][]string{
 	types.QValueKindBoolean: {"smallint"},
 }
 
-// GetColumnsTypeConversion lists the destination_type choices for Postgres destinations, for the UI
+// GetColumnsTypeConversion lists the destination_type choices for Postgres destinations, for the API (the mirror
+// creation UI offers column types for ClickHouse destinations only)
 func GetColumnsTypeConversion() (*protos.ColumnsTypeConversionResponse, error) {
 	res := make([]*protos.ColumnsTypeConversion, 0, len(destinationTypeOverrides))
 	for qkind, destTypes := range destinationTypeOverrides {
@@ -60,10 +64,29 @@ func columnDestinationTypes(tableMappings []*protos.TableMapping, dstTable *comm
 	return nil
 }
 
-// destinationTypesError checks the column settings' destination_type of a mirror to Postgres: only on the Q type
-// system (the PG type system copies the source's types), only the choices in destinationTypeOverrides for the
-// column's PeerDB type, and the type must exist on the destination (citext is an extension). Columns without a
-// source schema (resync validation doesn't read it) aren't checked; they were when the table was added.
+// destinationTypeProblem says why destinationType can't be the type of a column of PeerDB type kind, or "" if it can:
+// only on the Q type system (the PG type system copies the source's types), only the choices in
+// destinationTypeOverrides for the column's type, and a boolean only as the MySQL reader leaves it: it reads TINYINT(1)
+// with an integer destination_type as an integer, so a boolean here is another source's (or TINYINT(1) read without the
+// destination's type), whose values can't be written to an integer column.
+func destinationTypeProblem(system protos.TypeSystem, kind types.QValueKind, destinationType string) string {
+	if system != protos.TypeSystem_Q {
+		return "destination_type needs the Q type system"
+	}
+	allowed := destinationTypeOverrides[kind]
+	if !slices.ContainsFunc(allowed, func(t string) bool { return strings.EqualFold(t, destinationType) }) {
+		return fmt.Sprintf("%s isn't a destination_type for its type %s (choices: %s)",
+			destinationType, kind, strings.Join(allowed, ", "))
+	}
+	if kind == types.QValueKindBoolean {
+		return "only MySQL TINYINT(1) columns can be read as integers"
+	}
+	return ""
+}
+
+// destinationTypesError checks the column settings' destination_type of a mirror to Postgres (destinationTypeProblem),
+// and that the type is the destination's built-in one, or citext (an extension). Columns without a source schema
+// aren't checked against their type: table creation checks them again (checkDestinationTypes).
 func (c *PostgresConnector) destinationTypesError(
 	ctx context.Context, cfg *protos.FlowConnectionConfigsCore, schemas map[string]*protos.TableSchema,
 ) error {
@@ -76,7 +99,7 @@ func (c *PostgresConnector) destinationTypesError(
 			}
 			name := tm.SourceTableIdentifier + "." + col.SourceName
 			if cfg.System != protos.TypeSystem_Q {
-				problems = append(problems, name+": destination_type needs the Q type system")
+				problems = append(problems, name+": "+destinationTypeProblem(cfg.System, "", col.DestinationType))
 				continue
 			}
 			if schema == nil {
@@ -87,30 +110,51 @@ func (c *PostgresConnector) destinationTypesError(
 				problems = append(problems, name+": no such column")
 				continue
 			}
-			kind := types.QValueKind(schema.Columns[idx].Type)
-			allowed := destinationTypeOverrides[kind]
-			if !slices.ContainsFunc(allowed, func(t string) bool { return strings.EqualFold(t, col.DestinationType) }) {
-				problems = append(problems, fmt.Sprintf("%s: %s isn't a destination_type for its type %s (choices: %s)",
-					name, col.DestinationType, kind, strings.Join(allowed, ", ")))
+			if problem := destinationTypeProblem(cfg.System, types.QValueKind(schema.Columns[idx].Type), col.DestinationType); problem != "" {
+				problems = append(problems, name+": "+problem)
 				continue
 			}
-			if kind == types.QValueKindBoolean {
-				// the MySQL reader reads TINYINT(1) with an integer destination_type as an integer, so a boolean here
-				// is another source's, whose values can't be written to an integer column
-				problems = append(problems, name+": only MySQL TINYINT(1) columns can be read as integers")
-				continue
-			}
-			var known bool
-			if err := c.conn.QueryRow(ctx, `SELECT to_regtype($1) IS NOT NULL`, col.DestinationType).Scan(&known); err != nil {
+			// CREATE TABLE names the type unqualified, so it resolves it with search_path, as to_regtype does here: on a
+			// connection of the same peer (same role and database, PeerDB doesn't set search_path). pg_catalog comes
+			// first unless search_path names it later, so this also refuses a type of the same name that comes first,
+			// which needn't take the snapshot's COPY or normalize's cast.
+			var builtin *bool
+			if err := c.conn.QueryRow(ctx,
+				`SELECT typnamespace = 'pg_catalog'::regnamespace OR typname = 'citext' FROM pg_type WHERE oid = to_regtype($1)`,
+				col.DestinationType,
+			).Scan(&builtin); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("failed to look up type %s on the destination: %w", col.DestinationType, err)
 			}
-			if !known {
+			if builtin == nil {
 				problems = append(problems, fmt.Sprintf("%s: type %s doesn't exist on the destination", name, col.DestinationType))
+			} else if !*builtin {
+				problems = append(problems, fmt.Sprintf("%s: type %s resolves to another schema's type than the built-in one",
+					name, col.DestinationType))
 			}
 		}
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("invalid column type settings for Postgres: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// checkDestinationTypes refuses, at table creation, a destination_type its column can't have (destinationTypeProblem):
+// validation is skipped with skip_validation, and a setting validation didn't see would otherwise create a table the
+// snapshot or normalize can't write to, or one that changes values.
+func checkDestinationTypes(
+	tableSchema *protos.TableSchema, destinationTypes map[string]string, dstTable *common.QualifiedTable,
+) error {
+	var problems []string
+	for _, column := range tableSchema.Columns {
+		if destinationType, ok := destinationTypes[column.Name]; ok {
+			if problem := destinationTypeProblem(tableSchema.System, types.QValueKind(column.Type), destinationType); problem != "" {
+				problems = append(problems, column.Name+": "+problem)
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("invalid column type settings for Postgres table %s: %s", dstTable, strings.Join(problems, "; "))
 	}
 	return nil
 }

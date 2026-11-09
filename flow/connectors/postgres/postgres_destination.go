@@ -568,7 +568,10 @@ func (c *PostgresConnector) SetupNormalizedTable(
 	}
 
 	// convert the column names and types to Postgres types
-	normalizedTableCreateSQL := generateCreateTableSQLForNormalizedTable(config, parsedNormalizedTable, tableSchema)
+	normalizedTableCreateSQL, err := generateCreateTableSQLForNormalizedTable(config, parsedNormalizedTable, tableSchema)
+	if err != nil {
+		return false, err
+	}
 	_, err = c.execWithLoggingTx(ctx, normalizedTableCreateSQL, createNormalizedTablesTx)
 	if err != nil {
 		return false, fmt.Errorf("error while creating normalized table: %w", err)
