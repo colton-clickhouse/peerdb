@@ -7,6 +7,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
@@ -451,6 +452,19 @@ func keylessTablesError(names []string, schemas map[string]*protos.TableSchema) 
 // maxIdentifierBytes is Postgres's identifier limit (NAMEDATALEN - 1)
 const maxIdentifierBytes = 63
 
+// truncateIdentifier is s as Postgres keeps it: at most maxIdentifierBytes bytes, clipped at a character boundary
+// (pg_mbcliplen; UTF-8 assumed)
+func truncateIdentifier(s string) string {
+	if len(s) <= maxIdentifierBytes {
+		return s
+	}
+	n := maxIdentifierBytes
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
 // longIdentifiersError names the destination schemas, tables and columns longer than maxIdentifierBytes, or
 // is nil. Postgres truncates longer names silently, so the target's names would differ from the source's,
 // and two names sharing their first 63 bytes collide, which fails table setup for the whole mirror. With
@@ -458,13 +472,12 @@ const maxIdentifierBytes = 63
 func longIdentifiersError(
 	tableMappings []*protos.TableMapping, schemas map[string]*protos.TableSchema, onlyCollisions bool,
 ) error {
-	truncate := func(s string) string { return s[:min(len(s), maxIdentifierBytes)] }
 	var long []string
 	tables := make(map[string][]string) // truncated schema.table -> destination tables
 	for _, tableMapping := range tableMappings {
 		dst := tableMapping.DestinationTableIdentifier
 		namespace, table, _ := strings.Cut(dst, ".")
-		truncated := truncate(namespace) + "." + truncate(table)
+		truncated := truncateIdentifier(namespace) + "." + truncateIdentifier(table)
 		tables[truncated] = append(tables[truncated], dst)
 		if !onlyCollisions && (len(namespace) > maxIdentifierBytes || len(table) > maxIdentifierBytes) {
 			long = append(long, "table "+dst)
@@ -475,7 +488,7 @@ func longIdentifiersError(
 				if slices.Contains(tableMapping.Exclude, column.Name) {
 					continue
 				}
-				truncatedColumn := truncate(column.Name)
+				truncatedColumn := truncateIdentifier(column.Name)
 				columns[truncatedColumn] = append(columns[truncatedColumn], column.Name)
 				if !onlyCollisions && len(column.Name) > maxIdentifierBytes {
 					long = append(long, "column "+dst+"."+column.Name)
