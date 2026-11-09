@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +25,8 @@ import (
 type Alerter struct {
 	shared.CatalogPool
 	otelManager *otel_metrics.OtelManager
+	// normalizeGapLogged is when each flow last logged its normalize gap, to log it once per alerting gap
+	normalizeGapLogged sync.Map
 }
 
 type AlertSenderConfig struct {
@@ -254,9 +257,15 @@ func (a *Alerter) AlertIfTooLongSinceLastNormalize(ctx context.Context, alertKey
 	if intervalSinceLastNormalize <= time.Duration(intervalSinceLastNormalizeThreshold)*time.Minute {
 		return
 	}
-	// logged whether or not alert senders are configured, so a stalled normalize is never silent
-	internal.LoggerFromCtx(ctx).Warn("too long since last data normalize",
-		slog.String("flowName", alertKeys.FlowName), slog.Duration("intervalSinceLastNormalize", intervalSinceLastNormalize))
+	// logged whether or not alert senders are configured, so a stalled normalize is never silent, but once per
+	// alerting gap like the alert: the check runs every minute
+	if logGap, err := internal.PeerDBAlertingGapMinutesAsDuration(ctx, nil); err == nil {
+		if last, ok := a.normalizeGapLogged.Load(alertKeys.FlowName); !ok || time.Since(last.(time.Time)) >= logGap {
+			a.normalizeGapLogged.Store(alertKeys.FlowName, time.Now())
+			internal.LoggerFromCtx(ctx).Warn("too long since last data normalize", slog.String("flowName", alertKeys.FlowName),
+				slog.Duration("intervalSinceLastNormalize", intervalSinceLastNormalize))
+		}
+	}
 	alertSenderConfigs, err := a.registerSendersFromPool(ctx)
 	if err != nil {
 		internal.LoggerFromCtx(ctx).Warn("failed to set alert senders", slog.Any("error", err))
