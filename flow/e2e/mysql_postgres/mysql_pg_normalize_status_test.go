@@ -14,7 +14,7 @@ import (
 
 // A normalize failure must name the table whose statement failed. Normalize sends every table's statement
 // in one pgx batch; when one fails to prepare, the error was reported under the batch's first table. Here
-// the last of four tables (alphabetically) is broken on the target, so its MERGE can't prepare.
+// one of four tables is broken on the target, so its MERGE can't prepare.
 func (s MySQLPGSuite) Test_Normalize_Error_Names_Failing_Table() {
 	t := s.t
 	tables := []string{"nerr_a", "nerr_b", "nerr_c", "nerr_d"}
