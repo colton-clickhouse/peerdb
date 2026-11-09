@@ -20,10 +20,22 @@ the reader ignores.
 `ALTER TABLE ... ADD COLUMN` is replicated (see "Columns added mid-stream"). Other DDL is not: dropping, renaming or
 changing the type of a column, indexes, constraints.
 
-- **A column's type change** (`MODIFY COLUMN n VARCHAR(30)` on MySQL) keeps the mirror on the old type. Into
-  Postgres, the first value the old type can't read fails normalize with an error naming the table (invalid input
-  for the column's type), and the mirror alerts (see "Mirror health"); no value arrives changed. Into ClickHouse,
-  check the values: resync the table after a type change.
+- **A column's type change** (`MODIFY COLUMN n VARCHAR(30)` on MySQL) keeps the mirror on the old type: the
+  target column keeps its type, and CDC reads the new values as the old type (a resync reads the new one). The
+  reader logs a warning ("column type change detected, not propagating"). Depending on the change, values:
+  - **arrive changed, without an error:** a `DOUBLE` read as `FLOAT` is rounded to single precision; text read as
+    an integer becomes 0 when it isn't a number and is clamped to the old type's range when it's too large, and
+    read as `FLOAT`/`DOUBLE` becomes 0 when it isn't a number (a warning is logged once); `INT` to `INT UNSIGNED`
+    (or back), and the other sizes, wrap around (`4294967295` arrives as `-1`, `-1` as `4294967295`); text read as a `TINYINT(1)` boolean
+    is true only for `1`, `true`, `t`, `on` and `yes`, so `2` arrives as false;
+  - **fail CDC** when the reader can't read the new values as the old type at all: an `INT` widened to `BIGINT`
+    (an error naming the table and column), text read as a date or time that doesn't parse. The mirror retries and
+    alerts (see "Mirror health");
+  - **fail normalize** when the old type's values don't fit the target column (a pre-created column narrower than
+    the new values).
+
+  Check the source's DDL during a migration, and resync the table after a type change, into Postgres as into
+  ClickHouse.
 - **Other DDL:** apply it to the target yourself, or resync the table.
 
 ### Column defaults and identity columns
@@ -63,30 +75,50 @@ the mirror and add them on the target as generated columns, or recompute them af
 ## Type mapping
 
 PeerDB creates each column with a default type for the source's type. Where that can't hold the source's values,
-give the column another type with a column setting (`destination_type`), at mirror creation; the UI offers the
-choices per column. Postgres destinations accept:
+give the column another type with a column setting (`destination_type`). Column settings are set through the API
+for now (a `columns` entry of the table mapping, by `source_name`); the mirror creation UI offers column types
+for ClickHouse destinations only. They apply:
+
+- on the Q type system only (the PG type system copies a Postgres source's types);
+- where PeerDB creates the table: at mirror creation, for tables added to a mirror (with the added table's settings),
+  and when a resync recreates the tables. A table that exists keeps its columns: a setting can't be changed on a
+  running mirror's table (alter the target column yourself, normalize casts to it, or resync).
+
+Postgres destinations accept:
 
 | PeerDB type | Default | `destination_type` |
 |---|---|---|
-| `INT UNSIGNED`, `MEDIUMINT UNSIGNED` (UInt32) | `integer` | `bigint`, `numeric` |
+| `SMALLINT UNSIGNED` (UInt16) | `smallint` | `integer`, `bigint`, `numeric` |
+| `INT UNSIGNED` (UInt32) | `integer` | `bigint`, `numeric` |
 | `BIGINT UNSIGNED` (UInt64) | `bigint` | `numeric(20,0)`, `numeric` |
-| `SMALLINT UNSIGNED` (UInt16), other integers | per size | wider integers, `numeric` |
+| other integers | per size | wider integers, `numeric` |
 | MySQL `TIME` | `time` (a time of day) | `interval` (MySQL's `TIME` is a duration: -838:59:59 to 838:59:59) |
 | MySQL `TINYINT(1)` | `boolean` | `smallint`: read as an integer, so 2, 127 and -5 keep their values |
 | `FLOAT` (real) | `real` | `float8` |
 | text | `text` | `citext` (the extension must exist on the target) |
 | `JSON` | `json` | `jsonb` |
 
-Mirror validation refuses other choices, naming the column. A target table pre-created by the user is kept as it
-is; normalize casts to its columns' types, for any type the values cast to.
+Unsigned integers get the signed type of the same size by default, which holds only half their range: a
+`SMALLINT UNSIGNED` above 32767, an `INT UNSIGNED` above 2147483647 or a `BIGINT UNSIGNED` above
+9223372036854775807 fails the snapshot or normalize (out of range). `TINYINT UNSIGNED` and `MEDIUMINT UNSIGNED` fit
+their defaults (`smallint`, `integer`). Give the others a wider type where the values can exceed the signed range.
+
+Mirror validation (and table creation, also with `skip_validation`) refuses other choices, naming the column. A
+target table pre-created by the user is kept as it is; normalize casts to its columns' types, for any type the
+values cast to.
 
 Values PeerDB itself can't represent on Postgres:
 
 - **MySQL zero dates**, with a zero month, day or year (`0000-00-00`, `2024-00-15`, `0000-05-10`), arrive as
-  `1970-01-01`. A primary key holding one is refused, naming the column, since distinct keys would merge. Find them
-  before a migration, per `DATE`/`DATETIME`/`TIMESTAMP` column: `SELECT count(*) FROM t WHERE CAST(col AS CHAR)
-  LIKE '%-00%' OR CAST(col AS CHAR) LIKE '0000-%'`.
-- **PostGIS SRIDs above 999999** are refused (PostGIS would store another SRID).
+  `1970-01-01` in mirrors created at or after InternalVersion 10 (`InternalVersion_MySQLZeroDatePartsAsZero`).
+  Older mirrors keep their behaviour: `0000-00-00` arrives as `1970-01-01`, and a zero month or day as 01
+  (`2024-00-15` arrives as `2024-01-15`). Tables whose primary key holds zero dates replicate, but keys that differ
+  only in them (or from a real `1970-01-01`) become equal on the target: the snapshot fails with a duplicate key
+  error, and in CDC the rows merge into one. Find them before a migration, per `DATE`/`DATETIME`/`TIMESTAMP` column:
+  `SELECT count(*) FROM t WHERE CAST(col AS CHAR) LIKE '%-00%' OR CAST(col AS CHAR) LIKE '0000-%'`.
+- **Geometry SRIDs** are kept (MySQL geometries, and Postgres sources' PostGIS values in the snapshot) in mirrors
+  created at or after InternalVersion 11 (`InternalVersion_PgGeoKeepSRID`); there, SRIDs above 999999 are refused
+  (PostGIS would store another SRID). Older mirrors drop the SRID (0).
 
 ## Table and column names
 
@@ -103,7 +135,7 @@ other names need a manual check):
 SELECT f.destination_peer, left('_peerdb_raw_' || lower(regexp_replace(f.name, '[^a-zA-Z0-9_]+', '_', 'g')), 63)
     AS raw_table, array_agg(f.name ORDER BY f.name) AS mirrors
 FROM flows f JOIN peers p ON p.id = f.destination_peer
-WHERE p.type = 3 AND f.query_string IS NULL
+WHERE p.type = 3 AND coalesce(f.query_string, '') = ''
 GROUP BY 1, 2 HAVING count(*) > 1;
 ```
 
@@ -144,7 +176,7 @@ A fix in PeerDB is under discussion.
 
 A mirror that keeps failing with an error only the user can fix (a dropped target column, a missing publication or
 slot, unsupported data, a connection problem) stays Running and retries. Once it has made no progress for
-`PEERDB_STALLED_ALERT_THRESHOLD_MINUTES` (default 30, 0 disables), it logs a warning and alerts the configured
+`PEERDB_NO_PROGRESS_ALERT_THRESHOLD_MINUTES` (default 30, 0 disables), it logs a warning and alerts the configured
 alert senders, once per alerting gap (`PEERDB_ALERTING_GAP_MINUTES`). The mirror status reports when it last made
 progress and its last error.
 
@@ -153,8 +185,14 @@ progress and its last error.
 
 ## Session settings and connection poolers
 
-PeerDB pins the session settings that change values in text form (`extra_float_digits`, `IntervalStyle`, the time
-zone and date style), whatever the source role or database sets. On the replication connection they're startup
-parameters; on the others, `SET` after connecting, since pgbouncer refuses startup parameters it doesn't track.
-Behind pgbouncer in transaction pooling, a `SET` reaches only one server connection: use session pooling for
-PeerDB's peers.
+PeerDB pins the session settings that change values in text form, whatever the source role or database sets:
+
+- `extra_float_digits = 3`, `IntervalStyle = postgres` and `xmloption = content`: `SET` after connecting, on every
+  connection including replication, since pgbouncer refuses startup parameters it doesn't track. The `SET`s are
+  best-effort: where the server doesn't have or refuses one, PeerDB logs a warning and the connection goes on with
+  the server's setting.
+- the time zone (UTC) and `DateStyle` (`ISO, DMY`): startup parameters, which pgbouncer tracks.
+
+Behind pgbouncer in transaction pooling, a `SET` reaches only the server connection it ran on, and PeerDB's later
+statements can run on another one without it (PeerDB doesn't repeat them per transaction with `SET LOCAL`): use
+session pooling for PeerDB's peers.
