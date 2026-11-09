@@ -48,11 +48,11 @@ func (h *FlowRequestHandler) ValidateCDCMirror(
 		}
 	}
 	flowConnectionConfigsCore := proto_conversions.FlowConnectionConfigsToCore(req.ConnectionConfigs)
-	return h.validateCDCMirrorImpl(ctx, flowConnectionConfigsCore, false, !flowConnectionConfigsCore.Resync)
+	return h.validateCDCMirrorImpl(ctx, flowConnectionConfigsCore, false)
 }
 
 func (h *FlowRequestHandler) validateCDCMirrorImpl(
-	ctx context.Context, connectionConfigs *protos.FlowConnectionConfigsCore, idempotent bool, validateTableSettings bool,
+	ctx context.Context, connectionConfigs *protos.FlowConnectionConfigsCore, idempotent bool,
 ) (*protos.ValidateCDCMirrorResponse, APIError) {
 	ctx = context.WithValue(ctx, shared.FlowNameKey, connectionConfigs.FlowJobName)
 	underMaintenance, err := internal.PeerDBMaintenanceModeEnabled(ctx, nil)
@@ -178,18 +178,16 @@ func (h *FlowRequestHandler) validateCDCMirrorImpl(
 		}
 	}
 
-	var tableSchemaMap map[string]*protos.TableSchema
-	if validateTableSettings {
-		var getTableSchemaError error
-		tableSchemaMap, getTableSchemaError = srcConn.GetTableSchema(ctx, connectionConfigs.Env, connectionConfigs.Version,
-			connectionConfigs.System, connectionConfigs.TableMappings)
-		if getTableSchemaError != nil {
-			return nil, NewFailedPreconditionApiError(fmt.Errorf("failed to get source table schema: %w", getTableSchemaError))
-		}
-		if _, isPostgres := dstConn.(*connpostgres.PostgresConnector); isPostgres {
-			if err := setSourcePrimaryKeys(ctx, srcConn, connectionConfigs, tableSchemaMap); err != nil {
-				return nil, NewFailedPreconditionApiError(fmt.Errorf("failed to get source table schema: %w", err))
-			}
+	// resync reads the schema too: recreated tables are set up from the source's schema as new ones are, so the
+	// destination's checks of it (keys, identifier lengths, column settings) apply to them as well
+	tableSchemaMap, err := srcConn.GetTableSchema(ctx, connectionConfigs.Env, connectionConfigs.Version,
+		connectionConfigs.System, connectionConfigs.TableMappings)
+	if err != nil {
+		return nil, NewFailedPreconditionApiError(fmt.Errorf("failed to get source table schema: %w", err))
+	}
+	if _, isPostgres := dstConn.(*connpostgres.PostgresConnector); isPostgres {
+		if err := setSourcePrimaryKeys(ctx, srcConn, connectionConfigs, tableSchemaMap); err != nil {
+			return nil, NewFailedPreconditionApiError(fmt.Errorf("failed to get source table schema: %w", err))
 		}
 	}
 	if err := dstConn.ValidateMirrorDestination(ctx, connectionConfigs, tableSchemaMap); err != nil {
@@ -441,6 +439,52 @@ func (h *FlowRequestHandler) checkFlagsCompatibility(
 		if affected {
 			return NewFailedPreconditionApiError(errors.New(constraint.ErrorMessage))
 		}
+	}
+	return nil
+}
+
+// validateAdditionalTables runs the destination's mirror validation on tables being added to a running mirror,
+// as mirror creation does on its first tables. A table the destination can't take would otherwise fail the
+// table addition's setup on every retry, or reach normalize and stall the whole mirror.
+func (h *FlowRequestHandler) validateAdditionalTables(
+	ctx context.Context, flowJobName string, tables []*protos.TableMapping,
+) APIError {
+	cfg, err := h.getFlowConfigFromCatalog(ctx, flowJobName)
+	if err != nil {
+		return NewInternalApiError(fmt.Errorf("unable to get flow config: %w", err))
+	}
+	if cfg.GetSkipValidation() {
+		return nil
+	}
+	core := proto_conversions.FlowConnectionConfigsToCore(cfg)
+	core.TableMappings = tables
+	core.Resync = false
+
+	srcConn, srcClose, err := connectors.GetByNameAs[connectors.GetTableSchemaConnector](
+		ctx, core.Env, h.pool, core.SourceName)
+	if err != nil {
+		if errors.Is(err, errors.ErrUnsupported) {
+			return nil
+		}
+		return NewFailedPreconditionApiError(fmt.Errorf("failed to create source connector: %w", err))
+	}
+	defer srcClose(ctx)
+	dstConn, dstClose, err := connectors.GetByNameAs[connectors.MirrorDestinationValidationConnector](
+		ctx, core.Env, h.pool, core.DestinationName)
+	if err != nil {
+		if errors.Is(err, errors.ErrUnsupported) {
+			return nil
+		}
+		return NewFailedPreconditionApiError(fmt.Errorf("failed to create destination connector: %w", err))
+	}
+	defer dstClose(ctx)
+
+	tableSchemaMap, err := srcConn.GetTableSchema(ctx, core.Env, core.Version, core.System, tables)
+	if err != nil {
+		return NewFailedPreconditionApiError(fmt.Errorf("failed to get source table schema: %w", err))
+	}
+	if err := dstConn.ValidateMirrorDestination(ctx, core, tableSchemaMap); err != nil {
+		return NewFailedPreconditionApiError(fmt.Errorf("can't add the tables to mirror %s: %w", flowJobName, err))
 	}
 	return nil
 }
