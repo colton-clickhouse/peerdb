@@ -87,7 +87,7 @@ func TestQValueFromMysql_EmptyBinary(t *testing.T) {
 	}
 	// snapshot: go-mysql's buffer for an empty value is nil until the column has held a non-empty one
 	qv, err := QValueFromMysqlFieldValue(types.QValueKindBytes, mysql.MYSQL_TYPE_VAR_STRING,
-		mysql.NewFieldValue(mysql.FieldValueTypeString, 0, nil), false)
+		mysql.NewFieldValue(mysql.FieldValueTypeString, 0, nil), false, shared.InternalVersion_Latest)
 	check("snapshot", qv, err)
 	// cdc: VARBINARY and CHARACTER SET binary strings arrive as string, BLOBs as []byte
 	qv, err = QValueFromMysqlRowEvent(ev, 0, nil, nil, types.QValueKindBytes, "", nil, logger, &coercionReported, false,
@@ -98,7 +98,7 @@ func TestQValueFromMysql_EmptyBinary(t *testing.T) {
 	check("cdc []byte", qv, err)
 
 	qv, err = QValueFromMysqlFieldValue(types.QValueKindBytes, mysql.MYSQL_TYPE_VAR_STRING,
-		mysql.NewFieldValue(mysql.FieldValueTypeNull, 0, nil), false)
+		mysql.NewFieldValue(mysql.FieldValueTypeNull, 0, nil), false, shared.InternalVersion_Latest)
 	require.NoError(t, err)
 	require.IsType(t, types.QValueNull(""), qv, "snapshot NULL")
 	qv, err = QValueFromMysqlRowEvent(ev, 0, nil, nil, types.QValueKindBytes, nil, nil, logger, &coercionReported, false,
@@ -245,7 +245,7 @@ func TestQValueFromMysql_WrapNonObjectJSON(t *testing.T) {
 			}
 
 			fv := mysql.NewFieldValue(mysql.FieldValueTypeString, 0, []byte(tc.in))
-			got, err := QValueFromMysqlFieldValue(types.QValueKindJSON, mysql.MYSQL_TYPE_JSON, fv, wrap)
+			got, err := QValueFromMysqlFieldValue(types.QValueKindJSON, mysql.MYSQL_TYPE_JSON, fv, wrap, shared.InternalVersion_Latest)
 			require.NoError(t, err)
 			require.Equal(t, want, got.(types.QValueJSON).Val, "snapshot in=%q wrap=%v", tc.in, wrap)
 
@@ -290,7 +290,7 @@ func TestQValueFromMysql_PartialZeroDates(t *testing.T) {
 	var coercionReported bool
 	snapshot := func(s string, version uint32) time.Time {
 		t.Helper()
-		qv, err := QValueFromMysqlFieldValueForVersion(types.QValueKindDate, 0,
+		qv, err := QValueFromMysqlFieldValue(types.QValueKindDate, 0,
 			mysql.NewFieldValue(mysql.FieldValueTypeString, 0, []byte(s)), false, version)
 		require.NoError(t, err, s)
 		return qv.Value().(time.Time).UTC()

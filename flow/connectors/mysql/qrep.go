@@ -156,11 +156,11 @@ func (c *MySqlConnector) GetQRepPartitions(
 	}
 
 	partitionHelper := utils.NewPartitionHelper(c.logger)
-	val1, err := QValueFromMysqlFieldValueForVersion(watermarkQKind, watermarkMyType, rs.Values[0][0], false, config.Version)
+	val1, err := QValueFromMysqlFieldValue(watermarkQKind, watermarkMyType, rs.Values[0][0], false, config.Version)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert partition minimum to qvalue: %w", err)
 	}
-	val2, err := QValueFromMysqlFieldValueForVersion(watermarkQKind, watermarkMyType, rs.Values[0][1], false, config.Version)
+	val2, err := QValueFromMysqlFieldValue(watermarkQKind, watermarkMyType, rs.Values[0][1], false, config.Version)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert partition maximum to qvalue: %w", err)
 	}
@@ -383,7 +383,7 @@ func (c *MySqlConnector) PullQRepRecords(
 		record := make([]types.QValue, 0, len(row))
 		for idx, val := range row {
 			field := schema.Fields[idx]
-			qv, err := QValueFromMysqlFieldValueForVersion(field.Type, rs.Fields[idx].Type, val,
+			qv, err := QValueFromMysqlFieldValue(field.Type, rs.Fields[idx].Type, val,
 				shouldWrapNonObjectJSON(field.Name, field.Type, config.Flags, config.Version, nativeJSONEnabled, config.Columns),
 				config.Version)
 			if err != nil {
