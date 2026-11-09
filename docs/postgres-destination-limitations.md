@@ -114,7 +114,31 @@ follow-up.)
 
 CDC applies changes by primary key, so tables without one are refused at validation for CDC mirrors into Postgres,
 naming them, and so are mirrors that exclude a key column. Add a primary key on the source, or remove the table, or
-use a snapshot-only mirror.
+use a snapshot-only mirror. The exception is a Postgres source table with `REPLICA IDENTITY FULL` (below).
+
+### Keyless REPLICA IDENTITY FULL tables (Postgres sources)
+
+A Postgres table with no primary key and `REPLICA IDENTITY FULL` passes validation: PeerDB uses every column as
+its key. The target table gets no key, and normalize matches rows on every column, using the changed row's new
+values. That goes wrong in these cases:
+
+- **Identical rows inserted in the same CDC batch collapse into one.** The initial snapshot copies duplicates
+  correctly; the loss happens in CDC.
+- **An `UPDATE` leaves the old row** next to the new one.
+- **Deleting one of two identical rows removes both.**
+- **A row containing a NULL is never matched:** deleting it does nothing, and updating it leaves the old row.
+- **A `json` column fails normalize on every batch** (`could not identify an equality operator for type json`,
+  SQLSTATE 42883). The table stops updating while the mirror stays Running. After the no-progress threshold the
+  mirror warns and alerts (see "Mirror health"). A `jsonb` column fails differently: like any update, it leaves
+  the old row.
+
+Remedy: give the source table a key that CDC can use, then resync the table, so the target gets the key and loses
+the duplicate and stale rows:
+
+- a primary key; or
+- a unique index on `NOT NULL` columns, with `ALTER TABLE ... REPLICA IDENTITY USING INDEX <index>`.
+
+A fix in PeerDB is under discussion.
 
 ## Mirror health
 
