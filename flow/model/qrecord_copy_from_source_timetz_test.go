@@ -29,8 +29,8 @@ func TestTimetzBinaryWrapsIntoTheDay(t *testing.T) {
 }
 
 // pgx encodes a timetz by the target column: PG's binary timetz for timetz (an OID pgx doesn't know), the UTC time of
-// day for time, and its text for text and bytea. Before, the 12 bytes went to every column: a time column had no
-// encoding for them, and text or bytea columns took them raw.
+// day for time, and its text for text; bytea is refused. Before, the 12 bytes went to every column: a time column had
+// no encoding for them, and text or bytea columns took them raw.
 func TestPgTimeTZEncodesByTarget(t *testing.T) {
 	m := pgtype.NewMap()
 	v := pgTimeTZ{-4 * time.Hour} // 01:00+05
@@ -44,7 +44,8 @@ func TestPgTimeTZEncodesByTarget(t *testing.T) {
 		Valid: true}), encode(pgtype.TimeOID))
 	require.Equal(t, []byte("20:00:00+00"), encode(pgtype.TextOID))
 	require.Equal(t, []byte("20:00:00+00"), encode(pgtype.VarcharOID))
-	require.Equal(t, []byte("20:00:00.000000"), encode(pgtype.ByteaOID))
+	_, err := m.Encode(pgtype.ByteaOID, pgtype.BinaryFormatCode, v, nil)
+	require.ErrorContains(t, err, "bytea takes binary source columns only")
 }
 
 func encodeWith(t *testing.T, m *pgtype.Map, oid uint32, value any) []byte {

@@ -4,6 +4,7 @@ import (
 	"database/sql/driver"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -38,7 +39,8 @@ func timetzBinary(d time.Duration) []byte {
 // pgTimeTZ is a timetz for COPY. pgx picks the encoding by the target column. pgx has no timetz codec: a
 // pgtype.Time went out as an 8-byte time, which the server rejects for a timetz column (08P01 insufficient data left
 // in message), so a timetz column, whose OID pgx doesn't know, gets PG's binary timetz through Value. A pre-created
-// time column gets the UTC time of day, and a text or bytea column its text, as CDC writes them.
+// time column gets the UTC time of day, and a text column its text, as CDC writes them. A bytea column is refused, as
+// normalize refuses it: bytea takes binary source columns only.
 type pgTimeTZ struct {
 	d time.Duration
 }
@@ -62,10 +64,10 @@ func (v pgTimeTZ) TextValue() (pgtype.Text, error) {
 	return pgtype.Text{String: s + "+00", Valid: true}, nil
 }
 
-// BytesValue is the unpadded text of the UTC time of day ("4:30:00.000000"), as the raw value normalize writes into a
-// bytea column
+// BytesValue refuses a bytea column, which would otherwise take the 12 bytes of Value: bytea takes binary source
+// columns only, and normalize fails the same value in CDC
 func (v pgTimeTZ) BytesValue() ([]byte, error) {
-	return []byte(types.FormatExtendedTimeDuration(time.Duration(timetzMicros(v.d)) * time.Microsecond)), nil
+	return nil, errors.New("a TIMETZ value can't go into a bytea column: bytea takes binary source columns only")
 }
 
 func constructArray[T any](v []T) *pgtype.Array[T] {
