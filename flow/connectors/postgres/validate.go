@@ -308,12 +308,14 @@ func (c *PostgresConnector) ValidateMirrorDestination(
 	if err := longIdentifiersError(cfg.TableMappings, tableNameSchemaMapping); err != nil {
 		return err
 	}
-	if err := longPeerDBNamesError(cfg); err != nil {
-		return err
-	}
 
 	if cfg.Resync {
 		return nil // no need to validate schema for resync, as we will create or replace the tables
+	}
+
+	// at creation only: a resync keeps the mirror's name and raw table, so it mustn't refuse an existing mirror
+	if err := longPeerDBNamesError(cfg); err != nil {
+		return err
 	}
 
 	if cfg.System == protos.TypeSystem_PG && cfg.Env["PEERDB_PG_AUTOMATED_SCHEMA_DUMP"] == "true" {
