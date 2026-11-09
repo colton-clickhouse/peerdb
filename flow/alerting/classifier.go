@@ -1446,6 +1446,17 @@ func GetErrorClass(ctx context.Context, err error) (ErrorClass, ErrorInfo) {
 		}
 	}
 
+	if watermarkError, ok := errors.AsType[*exceptions.MySQLWatermarkNotRealDateError](err); ok {
+		return ErrorUnsupportedDatatype, ErrorInfo{
+			Source: ErrorSourceMySQL,
+			Code:   "WATERMARK_NOT_REAL_DATE",
+			AdditionalAttributes: map[AdditionalErrorAttributeKey]string{
+				ErrorAttributeKeyTable:  watermarkError.TableName,
+				ErrorAttributeKeyColumn: watermarkError.ColumnName,
+			},
+		}
+	}
+
 	if compressedColumnError, ok := errors.AsType[*exceptions.MySQLUnsupportedCompressedColumnError](err); ok {
 		return ErrorNotifyMySQLCompressedColumnUnsupported, ErrorInfo{
 			Source: ErrorSourceMySQL,

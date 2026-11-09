@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/google/uuid"
+	"go.temporal.io/sdk/log"
 
 	"github.com/PeerDB-io/peerdb/flow/connectors/utils"
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
@@ -20,6 +21,7 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/otel_metrics"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
@@ -146,6 +148,13 @@ func (c *MySqlConnector) GetQRepPartitions(
 		return nil, fmt.Errorf("failed to convert mysql type to qvaluekind: %w", err)
 	}
 
+	if watermarkQKind == types.QValueKindDate || watermarkQKind == types.QValueKindTimestamp {
+		minFV, maxFV := rs.Values[0][0], rs.Values[0][1]
+		if minFV.Type == mysql.FieldValueTypeString && maxFV.Type == mysql.FieldValueTypeString {
+			return temporalPartitions(c.logger, config, string(minFV.AsString()), string(maxFV.AsString()), numPartitions)
+		}
+	}
+
 	partitionHelper := utils.NewPartitionHelper(c.logger)
 	val1, err := QValueFromMysqlFieldValueForVersion(watermarkQKind, watermarkMyType, rs.Values[0][0], false, config.Version)
 	if err != nil {
@@ -154,14 +163,6 @@ func (c *MySqlConnector) GetQRepPartitions(
 	val2, err := QValueFromMysqlFieldValueForVersion(watermarkQKind, watermarkMyType, rs.Values[0][1], false, config.Version)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert partition maximum to qvalue: %w", err)
-	}
-
-	if watermarkQKind == types.QValueKindDate || watermarkQKind == types.QValueKindTimestamp {
-		minFV, maxFV := rs.Values[0][0], rs.Values[0][1]
-		if minFV.Type == mysql.FieldValueTypeString && maxFV.Type == mysql.FieldValueTypeString {
-			return c.temporalPartitions(ctx, config, last, parsedWatermarkTable,
-				string(minFV.AsString()), string(maxFV.AsString()), numPartitions)
-		}
 	}
 
 	start, startIsString := val1.Value().(string)
@@ -194,100 +195,49 @@ func (c *MySqlConnector) GetQRepPartitions(
 	return partitionHelper.GetPartitions(), nil
 }
 
-// temporalPartitions partitions a DATE/DATETIME watermark by bounds read as MySQL strings, not as converted values:
-// a zero date, and by version any zero part, converts to the epoch, so a MAX like '2025-03-00' ended the range
-// before its start and a zero MIN skipped every row before 1970.
-//   - A bound that isn't a real date (a zero month or day, or a day past its month's end under ALLOW_INVALID_DATES)
-//     sorts within its year, so the range starts at the day before its year and ends at the next year's first day.
-//   - Values with year 0 sort below every real date, which a timestamp range can't start at. A snapshot reads them
-//     in one extra partition, '0000-00-00' <= v < '0001-01-01', and range partitions the rest from the first real
-//     date. Incremental QRep can't: its next cycle would resume from that partition, so it refuses the table.
-//   - Resuming, the range starts after the last partition's end even if the bound is below it.
-//
-// Zero-part values inside the range stay in the partition MySQL sorts them into, since partitions are read as
-// v >= start AND v < next start (timestampRangeQuery).
-func (c *MySqlConnector) temporalPartitions(
-	ctx context.Context,
-	config *protos.QRepConfig,
-	last *protos.QRepPartition,
-	table *common.QualifiedTable,
-	minStr, maxStr string,
-	numPartitions int64,
+// temporalPartitions partitions a DATE/DATETIME watermark by its bounds as MySQL's text, not as converted values: a
+// zero date, and by version any zero part, converts to the epoch, so a MAX like '2025-03-00' ended the range before
+// its start and a zero MIN skipped every row before 1970. A bound that isn't a real date (a zero part, year 0, or a day
+// past its month's end under ALLOW_INVALID_DATES) has no timestamp a range could start or end at. A one-shot copy (a
+// CDC mirror's initial snapshot, or InitialCopyOnly QRep) reads the table as one partition then; incremental QRep
+// can't, since its next cycle resumes from the last partition's end, and a custom query's range placeholders can't be
+// filled in, so both are refused. Zero-part values between real bounds stay in the partition MySQL sorts them into,
+// since partitions are read as v >= start AND v < next start (timestampRangeQuery).
+func temporalPartitions(
+	logger log.Logger, config *protos.QRepConfig, minStr, maxStr string, numPartitions int64,
 ) ([]*protos.QRepPartition, error) {
-	var partitions []*protos.QRepPartition
-	if isZeroYear(minStr) {
-		if config.Query != "" || !config.InitialCopyOnly {
-			return nil, fmt.Errorf("watermark column %s of %s has dates in year 0 (minimum %q), which an incremental "+
-				"QRep partition can't start at; use another watermark column", config.WatermarkColumn, config.WatermarkTable, minStr)
-		}
-		partitions = append(partitions, &protos.QRepPartition{
-			PartitionId: uuid.NewString(),
-			Range: &protos.PartitionRange{Range: &protos.PartitionRange_StringRange{
-				StringRange: &protos.StringPartitionRange{Start: "0000-00-00 00:00:00", End: "0001-01-01 00:00:00"},
-			}},
-		})
-		rs, err := c.Execute(ctx, fmt.Sprintf("SELECT MIN(%[2]s) FROM %[1]s WHERE %[2]s >= '0001-01-01'",
-			table.MySQL(), common.QuoteMySQLIdentifier(config.WatermarkColumn)))
-		if err != nil {
-			return nil, fmt.Errorf("failed to query the first real date of %s: %w", config.WatermarkColumn, err)
-		}
-		realMin := rs.Values[0][0]
-		rs.Close()
-		minStr = ""
-		if realMin.Type == mysql.FieldValueTypeString {
-			minStr = string(realMin.AsString())
-		}
-	}
-	if minStr != "" {
-		start, err := mysqlDateTimeBound(minStr, false)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse partition minimum %q: %w", minStr, err)
-		}
-		if last != nil && last.Range != nil {
-			if r, ok := last.Range.Range.(*protos.PartitionRange_TimestampRange); ok {
-				if after := r.TimestampRange.End.AsTime().Add(time.Microsecond); start.Before(after) {
-					start = after
-				}
+	start, startOk := mysqlDateTime(minStr)
+	end, endOk := mysqlDateTime(maxStr)
+	if !startOk || !endOk {
+		if !config.InitialCopyOnly || config.Query != "" {
+			bound := minStr
+			if startOk {
+				bound = maxStr
 			}
+			return nil, exceptions.NewMySQLWatermarkNotRealDateError(config.WatermarkTable, config.WatermarkColumn, bound)
 		}
-		end, err := mysqlDateTimeBound(maxStr, true)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse partition maximum %q: %w", maxStr, err)
-		}
-		partitionHelper := utils.NewPartitionHelper(c.logger)
-		if err := partitionHelper.AddPartitionsWithRange(start, end, numPartitions); err != nil {
-			return nil, fmt.Errorf("failed to add partitions: %w", err)
-		}
-		partitions = append(partitions, partitionHelper.GetPartitions()...)
+		logger.Warn("watermark bound isn't a real date, reading the table as one partition",
+			slog.String("min", minStr), slog.String("max", maxStr))
+		return []*protos.QRepPartition{{PartitionId: uuid.NewString(), FullTablePartition: true}}, nil
+	}
+	partitionHelper := utils.NewPartitionHelper(logger)
+	if err := partitionHelper.AddPartitionsWithRange(start, end, numPartitions); err != nil {
+		return nil, fmt.Errorf("failed to add partitions: %w", err)
 	}
 	if config.AddNullPartition {
-		partitionHelper := utils.NewPartitionHelper(c.logger)
 		partitionHelper.AddNullPartition()
-		partitions = append(partitions, partitionHelper.GetPartitions()...)
 	}
-	return partitions, nil
+	return partitionHelper.GetPartitions(), nil
 }
 
-// mysqlDateTimeBound parses a MySQL DATE or DATETIME bound (year 1 or later). One that isn't a real date ('2025-03-00',
-// '2025-00-15', '2025-02-30') becomes its year's boundary on the outside: the day before the year as a minimum, the
-// next year's first day as a maximum.
-func mysqlDateTimeBound(s string, upper bool) (time.Time, error) {
+// mysqlDateTime parses a MySQL DATE or DATETIME string that is a real date, year 1 or later
+func mysqlDateTime(s string) (time.Time, bool) {
 	layout := "2006-01-02 15:04:05.999999"
 	if len(s) == len(time.DateOnly) {
 		layout = time.DateOnly
 	}
 	t, err := time.Parse(layout, s)
-	if err == nil {
-		return t, nil
-	}
-	year, yearErr := strconv.Atoi(s[:min(4, len(s))])
-	if yearErr != nil || year < 1 {
-		return time.Time{}, err
-	}
-	if upper {
-		return time.Date(year+1, 1, 1, 0, 0, 0, 0, time.UTC), nil
-	}
-	return time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1), nil
+	return t, err == nil && t.Year() >= 1
 }
 
 // timestampRangeQuery reads a timestamp partition as start <= v < end + 1µs instead of BETWEEN start AND end. The
@@ -296,11 +246,6 @@ func mysqlDateTimeBound(s string, upper bool) (time.Time, error) {
 func timestampRangeQuery(selectedColumns, table, column string, end time.Time) (string, string) {
 	return fmt.Sprintf("SELECT %[1]s FROM %[2]s WHERE %[3]s >= {{.start}} AND %[3]s < {{.end}}", selectedColumns, table, column),
 		"'" + end.Add(time.Microsecond).Format("2006-01-02 15:04:05.999999") + "'"
-}
-
-// isZeroYear reports a date in year 0, which sorts below every real date
-func isZeroYear(s string) bool {
-	return strings.HasPrefix(s, "0000")
 }
 
 func supportsRangePartition(qkind types.QValueKind) bool {

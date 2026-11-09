@@ -207,3 +207,21 @@ func (e *MySQLUnsupportedPartialRowEventError) Error() string {
 		"unsupported MariaDB PARTIAL_ROW_DATA_EVENT (type %d): fragmented oversized row events cannot be processed; a resync is required",
 		e.EventType)
 }
+
+// MySQLWatermarkNotRealDateError: a DATE/DATETIME watermark of an incremental or custom-query QRep has a bound that
+// isn't a real date (a zero part or year 0), which no partition range can start or end at.
+type MySQLWatermarkNotRealDateError struct {
+	TableName  string
+	ColumnName string
+	Value      string
+}
+
+func NewMySQLWatermarkNotRealDateError(table string, column string, value string) *MySQLWatermarkNotRealDateError {
+	return &MySQLWatermarkNotRealDateError{TableName: table, ColumnName: column, Value: value}
+}
+
+func (e *MySQLWatermarkNotRealDateError) Error() string {
+	return fmt.Sprintf("watermark column %s of %s has values that aren't real dates, such as %q, which incremental "+
+		"or custom-query QRep can't partition on; use a watermark column with real dates, or a full-table refresh "+
+		"(initial copy only)", e.ColumnName, e.TableName, e.Value)
+}
