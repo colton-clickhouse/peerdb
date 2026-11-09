@@ -61,3 +61,23 @@ func TestLongIdentifiersErrorOnResync(t *testing.T) {
 	}
 	require.ErrorContains(t, longIdentifiersError(tables, nil, true), "tables dst."+a+", dst."+b)
 }
+
+// Tables added to a running mirror get the key and identifier checks only: not the mirror name's (checked at
+// creation) nor the destination tables' (a re-added table's may hold rows; a zero connector has no connection)
+func TestValidateAddedTables(t *testing.T) {
+	cfg := &protos.FlowConnectionConfigsCore{
+		FlowJobName:       strings.Repeat("m", maxIdentifierBytes),
+		DoInitialSnapshot: true,
+		TableMappings:     []*protos.TableMapping{{SourceTableIdentifier: "src.t", DestinationTableIdentifier: "dst.t"}},
+	}
+	keyed := map[string]*protos.TableSchema{
+		"src.t": {Columns: []*protos.FieldDescription{{Name: "id"}}, PrimaryKeyColumns: []string{"id"}},
+	}
+	require.NoError(t, (&PostgresConnector{}).ValidateAddedTables(t.Context(), cfg, keyed))
+	keyless := map[string]*protos.TableSchema{"src.t": {Columns: []*protos.FieldDescription{{Name: "id"}}}}
+	require.ErrorContains(t, (&PostgresConnector{}).ValidateAddedTables(t.Context(), cfg, keyless), "src.t")
+	long := map[string]*protos.TableSchema{"src.t": {
+		Columns: []*protos.FieldDescription{{Name: "id"}, {Name: strings.Repeat("c", 64)}}, PrimaryKeyColumns: []string{"id"},
+	}}
+	require.ErrorContains(t, (&PostgresConnector{}).ValidateAddedTables(t.Context(), cfg, long), "column dst.t.")
+}

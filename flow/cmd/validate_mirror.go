@@ -173,7 +173,7 @@ func (h *FlowRequestHandler) validateCDCMirrorImpl(
 	defer dstClose(ctx)
 
 	// resync reads the schema too: recreated tables are set up from the source's schema as new ones are, so the
-	// destination's checks of it (keys, identifier lengths, column settings) apply to them as well
+	// destination's checks of it (Postgres: keys, identifier lengths) apply to them as well
 	tableSchemaMap, err := srcConn.GetTableSchema(ctx, connectionConfigs.Env, connectionConfigs.Version,
 		connectionConfigs.System, connectionConfigs.TableMappings)
 	if err != nil {
@@ -413,9 +413,10 @@ func (h *FlowRequestHandler) checkFlagsCompatibility(
 	return nil
 }
 
-// validateAdditionalTables runs the destination's mirror validation on tables being added to a running mirror,
-// as mirror creation does on its first tables. A table the destination can't take would otherwise fail the
-// table addition's setup on every retry, or reach normalize and stall the whole mirror.
+// validateAdditionalTables runs the destination's added-table checks on tables being added to a running mirror.
+// A table the destination can't take would otherwise fail the table addition's setup on every retry, or reach
+// normalize and stall the whole mirror. Only those checks, not the mirror validation of its creation: its
+// emptiness checks would refuse re-adding a removed table whose destination table holds its earlier rows.
 func (h *FlowRequestHandler) validateAdditionalTables(
 	ctx context.Context, flowJobName string, update *protos.CDCFlowConfigUpdate,
 ) APIError {
@@ -430,9 +431,7 @@ func (h *FlowRequestHandler) validateAdditionalTables(
 	core := proto_conversions.FlowConnectionConfigsToCore(cfg)
 	core.TableMappings = tables
 	core.Resync = false
-	// as the table addition runs them: snapshotted unless the update skips it, then replicated by the mirror's CDC
-	core.DoInitialSnapshot = !update.SkipInitialSnapshotForTableAdditions
-	core.InitialSnapshotOnly = false
+	core.InitialSnapshotOnly = false // the mirror's CDC replicates them
 	// with the settings of the same update applied
 	core.Env = maps.Clone(core.Env)
 	if core.Env == nil {
@@ -446,6 +445,15 @@ func (h *FlowRequestHandler) validateAdditionalTables(
 		return err
 	}
 
+	dstConn, dstClose, err := connectors.GetByNameAs[connectors.AddedTablesValidationConnector](
+		ctx, core.Env, h.pool, core.DestinationName)
+	if err != nil {
+		if errors.Is(err, errors.ErrUnsupported) {
+			return nil
+		}
+		return NewFailedPreconditionApiError(fmt.Errorf("failed to create destination connector: %w", err))
+	}
+	defer dstClose(ctx)
 	srcConn, srcClose, err := connectors.GetByNameAs[connectors.GetTableSchemaConnector](
 		ctx, core.Env, h.pool, core.SourceName)
 	if err != nil {
@@ -455,21 +463,12 @@ func (h *FlowRequestHandler) validateAdditionalTables(
 		return NewFailedPreconditionApiError(fmt.Errorf("failed to create source connector: %w", err))
 	}
 	defer srcClose(ctx)
-	dstConn, dstClose, err := connectors.GetByNameAs[connectors.MirrorDestinationValidationConnector](
-		ctx, core.Env, h.pool, core.DestinationName)
-	if err != nil {
-		if errors.Is(err, errors.ErrUnsupported) {
-			return nil
-		}
-		return NewFailedPreconditionApiError(fmt.Errorf("failed to create destination connector: %w", err))
-	}
-	defer dstClose(ctx)
 
 	tableSchemaMap, err := srcConn.GetTableSchema(ctx, core.Env, core.Version, core.System, tables)
 	if err != nil {
 		return NewFailedPreconditionApiError(fmt.Errorf("failed to get source table schema: %w", err))
 	}
-	if err := dstConn.ValidateMirrorDestination(ctx, core, tableSchemaMap); err != nil {
+	if err := dstConn.ValidateAddedTables(ctx, core, tableSchemaMap); err != nil {
 		return NewFailedPreconditionApiError(fmt.Errorf("can't add the tables to mirror %s: %w", flowJobName, err))
 	}
 	return nil
