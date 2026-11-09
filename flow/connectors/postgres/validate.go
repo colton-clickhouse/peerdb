@@ -400,7 +400,10 @@ func (c *PostgresConnector) ValidateAddedTables(
 	cfg *protos.FlowConnectionConfigsCore,
 	tableNameSchemaMapping map[string]*protos.TableSchema,
 ) error {
-	return validateTableKeysAndNames(cfg, tableNameSchemaMapping, false)
+	if err := validateTableKeysAndNames(cfg, tableNameSchemaMapping, false); err != nil {
+		return err
+	}
+	return c.destinationTypesError(ctx, cfg, tableNameSchemaMapping)
 }
 
 // validateTableKeysAndNames refuses tables whose changes normalize can't apply (keyless, or with an excluded key
