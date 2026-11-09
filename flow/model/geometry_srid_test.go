@@ -8,6 +8,7 @@ import (
 
 	geom "github.com/twpayne/go-geos"
 
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
@@ -56,6 +57,7 @@ func TestGeoSRIDAbovePostGISMaximum(t *testing.T) {
 	keep := NewQRecordCopyFromSource(nil, PgCopyOptions{GeoSRIDs: true})
 	_, err := keep.geoWkb("POINT(1 2)", 1<<31)
 	require.ErrorContains(t, err, "SRID 2147483648")
+	require.ErrorAs(t, err, new(*exceptions.PostGISSRIDOutOfRangeError), "classified as an unsupported value")
 	_, err = keep.geoWkb("POINT(1 2)", MaxPostGISSRID+1)
 	require.Error(t, err)
 	_, err = keep.geoWkb("SRID=-1;POINT(1 2)", 0)
@@ -66,4 +68,5 @@ func TestGeoSRIDAbovePostGISMaximum(t *testing.T) {
 	items.AddColumn("g", types.QValueGeometry{Val: "POINT(1 2)", SRID: 1 << 31})
 	_, err = items.ToJSONWithOptions(ToJSONOptions{GeometryAsEWKT: true})
 	require.ErrorContains(t, err, "column g")
+	require.ErrorAs(t, err, new(*exceptions.PostGISSRIDOutOfRangeError))
 }

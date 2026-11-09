@@ -123,3 +123,17 @@ func NewReplStateDesyncError(message string) *ReplStateDesyncError {
 func (e *ReplStateDesyncError) Error() string {
 	return e.Message
 }
+
+// PostGISSRIDOutOfRangeError is a geometry SRID above the largest one PostGIS stores, which it would change
+type PostGISSRIDOutOfRangeError struct {
+	SRID    uint32
+	MaxSRID uint32
+}
+
+func NewPostGISSRIDOutOfRangeError(srid uint32, maxSRID uint32) *PostGISSRIDOutOfRangeError {
+	return &PostGISSRIDOutOfRangeError{SRID: srid, MaxSRID: maxSRID}
+}
+
+func (e *PostGISSRIDOutOfRangeError) Error() string {
+	return fmt.Sprintf("SRID %d is above the largest SRID PostGIS stores (%d), which would change it", e.SRID, e.MaxSRID)
+}

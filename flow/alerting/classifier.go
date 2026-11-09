@@ -1583,6 +1583,13 @@ func GetErrorClass(ctx context.Context, err error) (ErrorClass, ErrorInfo) {
 		}
 	}
 
+	if _, ok := errors.AsType[*exceptions.PostGISSRIDOutOfRangeError](err); ok {
+		return ErrorUnsupportedDatatype, ErrorInfo{
+			Source: "typeConversion",
+			Code:   "UNSUPPORTED_GEOMETRY_SRID",
+		}
+	}
+
 	// mysql execute error is a generic error that can happen when interacting with mysql server;
 	// intentionally checked this after other more specific mysql errors above
 	if mysqlExecuteError, ok := errors.AsType[*exceptions.MySQLExecuteError](err); ok {
