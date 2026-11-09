@@ -2360,6 +2360,9 @@ func TestPostgresNormalizeErrorsNeedingTheUser(t *testing.T) {
 		// a NOT NULL or foreign key on the destination the data doesn't satisfy
 		{pgerrcode.NotNullViolation, "", ErrorNotifyConstraintViolation},
 		{pgerrcode.ForeignKeyViolation, "", ErrorNotifyConstraintViolation},
+		// a keyless REPLICA IDENTITY FULL table with a json column, matched on all its columns
+		{pgerrcode.UndefinedFunction, "could not identify an equality operator for type json",
+			ErrorNotifyInvalidDestinationTableDefinition},
 	} {
 		// as startNormalize returns them: the destination's error, wrapped by the connector and the activity
 		err := exceptions.NewNormalizationError(fmt.Errorf("failed to normalize records: %w",
@@ -2379,6 +2382,12 @@ func TestPostgresNormalizeErrorsNeedingTheUser(t *testing.T) {
 		&pgconn.PgError{Code: pgerrcode.UndefinedColumn}))
 	errorClass, _ := GetErrorClass(t.Context(), catalogErr)
 	assert.Equal(t, ErrorOther, errorClass)
+
+	// other missing functions in normalize keep their class
+	undefinedErr := exceptions.NewNormalizationError(exceptions.NewPostgresNormalizeTableError("public.t",
+		&pgconn.PgError{Code: pgerrcode.UndefinedFunction, Message: "function peerdb_missing(text) does not exist"}))
+	errorClass, _ = GetErrorClass(t.Context(), undefinedErr)
+	assert.NotEqual(t, ErrorNotifyInvalidDestinationTableDefinition, errorClass)
 
 	// an invalid enum value keeps its own class
 	enumErr := exceptions.NewNormalizationError(exceptions.NewPostgresNormalizeTableError("public.t",

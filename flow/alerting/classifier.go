@@ -653,6 +653,12 @@ func GetErrorClass(ctx context.Context, err error) (ErrorClass, ErrorInfo) {
 		case pgerrcode.NotNullViolation, pgerrcode.ForeignKeyViolation:
 			// a NOT NULL or foreign key on the target the data doesn't satisfy
 			return ErrorNotifyConstraintViolation, pgErrorInfo
+		case pgerrcode.UndefinedFunction:
+			// a keyless (REPLICA IDENTITY FULL) table is matched on all its columns, and a column type without equality
+			// (json, xml, point) can't be: every batch fails the same way. Other missing functions keep their class.
+			if strings.Contains(pgErr.Message, "could not identify an equality operator for type") {
+				return ErrorNotifyInvalidDestinationTableDefinition, pgErrorInfo
+			}
 		}
 	}
 
