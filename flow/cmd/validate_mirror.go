@@ -496,6 +496,9 @@ func (h *FlowRequestHandler) validateAdditionalTables(
 	if err != nil {
 		return NewFailedPreconditionApiError(fmt.Errorf("failed to get source table schema: %w", err))
 	}
+	if err := setSourcePrimaryKeys(ctx, srcConn, core, tableSchemaMap); err != nil {
+		return NewFailedPreconditionApiError(fmt.Errorf("failed to get source table schema: %w", err))
+	}
 	if err := dstConn.ValidateAddedTables(ctx, core, tableSchemaMap); err != nil {
 		return NewFailedPreconditionApiError(fmt.Errorf("can't add the tables to mirror %s: %w", flowJobName, err))
 	}

@@ -79,6 +79,22 @@ func (s MySQLPGSuite) Test_Add_Keyless_Table_Refused() {
 		e2e.AttachSchema(s, keyless))
 	require.Equal(t, protos.FlowStatus_STATUS_PAUSED, status(), "the refused update leaves the mirror paused")
 
+	// a MySQL source leaves excluded columns out of the key it reports: the table's own key is checked
+	compositeKey := "add_tbl_composite_key"
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+		`CREATE TABLE %s (a INT, b_part INT, v INT, PRIMARY KEY (a, b_part))`, e2e.AttachSchema(s, compositeKey))))
+	excluded := e2e.TableMappings(s, compositeKey, compositeKey)
+	excluded[0].Exclude = []string{"b_part"}
+	_, err = client.FlowStateChange(t.Context(), &protos.FlowStateChangeRequest{
+		FlowJobName:        cfg.FlowJobName,
+		RequestedFlowState: protos.FlowStatus_STATUS_RUNNING,
+		FlowConfigUpdate: &protos.FlowConfigUpdate{Update: &protos.FlowConfigUpdate_CdcFlowConfigUpdate{
+			CdcFlowConfigUpdate: &protos.CDCFlowConfigUpdate{AdditionalTables: excluded},
+		}},
+	})
+	require.ErrorContains(t, err, "primary key columns of "+e2e.AttachSchema(s, compositeKey)+
+		" can't be excluded from a CDC mirror to Postgres: b_part")
+
 	prefilled := "add_tbl_prefilled"
 	require.NoError(t, s.source.Exec(t.Context(),
 		fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY)`, e2e.AttachSchema(s, prefilled))))
