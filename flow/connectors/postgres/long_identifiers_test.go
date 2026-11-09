@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
 )
@@ -93,4 +94,9 @@ func TestValidateAddedTables(t *testing.T) {
 		Columns: []*protos.FieldDescription{{Name: "id"}, {Name: strings.Repeat("c", 64)}}, PrimaryKeyColumns: []string{"id"},
 	}}
 	require.ErrorContains(t, (&PostgresConnector{}).ValidateAddedTables(t.Context(), cfg, long), "column dst.t.")
+	// the added tables' column settings are checked too (this one is refused before any lookup on the destination)
+	withSetting := proto.CloneOf(cfg)
+	withSetting.TableMappings[0].Columns = []*protos.ColumnSetting{{SourceName: "id", DestinationType: "interval"}}
+	require.ErrorContains(t, (&PostgresConnector{}).ValidateAddedTables(t.Context(), withSetting, keyed),
+		"src.t.id: interval isn't a destination_type")
 }
