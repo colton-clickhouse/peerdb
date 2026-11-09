@@ -260,9 +260,10 @@ func (a *Alerter) AlertIfTooLongSinceLastNormalize(ctx context.Context, alertKey
 	if intervalSinceLastNormalize <= time.Duration(intervalSinceLastNormalizeThreshold)*time.Minute {
 		return
 	}
-	// logged whether or not alert senders are configured, so a stalled normalize is never silent, but once per
-	// alerting gap like the alert: the check runs every minute
-	if logGap, err := internal.PeerDBAlertingGapMinutesAsDuration(ctx, nil); err == nil &&
+	// batches waiting for normalize are logged whether or not alert senders are configured, so a stalled normalize
+	// is never silent, but once per alerting gap like the alert: the check runs every minute. Not the Postgres
+	// source's gap, which an idle source explains
+	if logGap, err := internal.PeerDBAlertingGapMinutesAsDuration(ctx, nil); err == nil && alertKeys.PendingBatches &&
 		a.normalizeGapDue(alertKeys.FlowName, logGap, time.Now()) {
 		internal.LoggerFromCtx(ctx).Warn("too long since last data normalize", slog.String("flowName", alertKeys.FlowName),
 			slog.Duration("intervalSinceLastNormalize", intervalSinceLastNormalize))
