@@ -285,6 +285,10 @@ func (c *PostgresConnector) ValidateMirrorDestination(
 	if err := validateTableKeysAndNames(cfg, tableNameSchemaMapping, cfg.Resync); err != nil {
 		return err
 	}
+	// and the recreated tables take the column settings' types as new ones do
+	if err := c.destinationTypesError(ctx, cfg, tableNameSchemaMapping); err != nil {
+		return err
+	}
 
 	if cfg.Resync {
 		return nil // no need to validate schema for resync, as we will create or replace the tables
@@ -292,9 +296,6 @@ func (c *PostgresConnector) ValidateMirrorDestination(
 
 	// at creation only: a resync keeps the mirror's name and raw table, so it mustn't refuse an existing mirror
 	if err := longPeerDBNamesError(cfg); err != nil {
-		return err
-	}
-	if err := c.destinationTypesError(ctx, cfg, tableNameSchemaMapping); err != nil {
 		return err
 	}
 

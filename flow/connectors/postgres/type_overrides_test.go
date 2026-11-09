@@ -27,13 +27,63 @@ func TestCreateTableDestinationTypes(t *testing.T) {
 			{SourceName: "u", DestinationType: "bigint"}, {SourceName: "d", DestinationType: "interval"},
 		}},
 	}}
-	sql := generateCreateTableSQLForNormalizedTable(config, &common.QualifiedTable{Namespace: "s", Table: "t"}, schema)
+	sql, err := generateCreateTableSQLForNormalizedTable(config, &common.QualifiedTable{Namespace: "s", Table: "t"}, schema)
+	require.NoError(t, err)
 	require.Contains(t, sql, `"u" bigint`)
 	require.Contains(t, sql, `"d" interval`)
 	require.Contains(t, sql, `"n" INTEGER`)
 
 	schema.System = protos.TypeSystem_PG
 	schema.Columns = []*protos.FieldDescription{{Name: "u", Type: "integer", TypeModifier: -1}}
-	sql = generateCreateTableSQLForNormalizedTable(config, &common.QualifiedTable{Namespace: "s", Table: "t"}, schema)
+	sql, err = generateCreateTableSQLForNormalizedTable(config, &common.QualifiedTable{Namespace: "s", Table: "t"}, schema)
+	require.NoError(t, err)
 	require.Contains(t, sql, `"u" integer`, "the PG type system keeps the source's types")
+}
+
+// Table creation refuses a destination_type its column can't have, as validation does: validation is skipped with
+// skip_validation, and a boolean column there wasn't read as an integer by the source.
+func TestCreateTableRefusesDestinationTypes(t *testing.T) {
+	schema := &protos.TableSchema{
+		System: protos.TypeSystem_Q,
+		Columns: []*protos.FieldDescription{
+			{Name: "id", Type: string(types.QValueKindInt64), TypeModifier: -1},
+			{Name: "b", Type: string(types.QValueKindBoolean), TypeModifier: -1},
+			{Name: "n", Type: string(types.QValueKindInt32), TypeModifier: -1},
+		},
+	}
+	config := &protos.SetupNormalizedTableBatchInput{TableMappings: []*protos.TableMapping{
+		{DestinationTableIdentifier: "s.t", Columns: []*protos.ColumnSetting{
+			{SourceName: "id", DestinationType: "bigint"},
+			{SourceName: "b", DestinationType: "smallint"},
+			{SourceName: "n", DestinationType: "BIGINT"},
+		}},
+	}}
+	_, err := generateCreateTableSQLForNormalizedTable(config, &common.QualifiedTable{Namespace: "s", Table: "t"}, schema)
+	require.ErrorContains(t, err, "id: bigint isn't a destination_type for its type int64 (choices: numeric)")
+	require.ErrorContains(t, err, "b: only MySQL TINYINT(1) columns can be read as integers")
+	require.NotContains(t, err.Error(), "n:", "a listed type in another case is accepted")
+}
+
+// A resync recreates the tables with the column settings' types, so it's validated against them too.
+func TestValidateDestinationTypesOnResync(t *testing.T) {
+	cfg := &protos.FlowConnectionConfigsCore{
+		FlowJobName: "m",
+		System:      protos.TypeSystem_Q,
+		Resync:      true,
+		TableMappings: []*protos.TableMapping{{
+			SourceTableIdentifier: "db.t", DestinationTableIdentifier: "s.t",
+			Columns: []*protos.ColumnSetting{{SourceName: "d", DestinationType: "bigint"}},
+		}},
+	}
+	schemas := map[string]*protos.TableSchema{"db.t": {
+		System:            protos.TypeSystem_Q,
+		PrimaryKeyColumns: []string{"id"},
+		Columns: []*protos.FieldDescription{
+			{Name: "id", Type: string(types.QValueKindInt32), TypeModifier: -1},
+			{Name: "d", Type: string(types.QValueKindTime), TypeModifier: -1},
+		},
+	}}
+	// refused before it reaches the destination
+	err := (&PostgresConnector{}).ValidateMirrorDestination(t.Context(), cfg, schemas)
+	require.ErrorContains(t, err, "db.t.d: bigint isn't a destination_type for its type time")
 }

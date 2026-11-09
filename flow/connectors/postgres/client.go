@@ -690,11 +690,14 @@ func generateCreateTableSQLForNormalizedTable(
 	config *protos.SetupNormalizedTableBatchInput,
 	dstSchemaTable *common.QualifiedTable,
 	tableSchema *protos.TableSchema,
-) string {
+) (string, error) {
 	createTableSQLArray := make([]string, 0, len(tableSchema.Columns)+2)
 	var destinationTypes map[string]string
 	if tableSchema.System == protos.TypeSystem_Q {
 		destinationTypes = columnDestinationTypes(config.TableMappings, dstSchemaTable)
+		if err := checkDestinationTypes(tableSchema, destinationTypes, dstSchemaTable); err != nil {
+			return "", err
+		}
 	}
 	for _, column := range tableSchema.Columns {
 		pgColumnType := column.Type
@@ -714,7 +717,7 @@ func generateCreateTableSQLForNormalizedTable(
 			precision, scale := common.ParseNumericTypmod(column.TypeModifier)
 			pgColumnType = fmt.Sprintf("numeric(%d,%d)", precision, scale)
 		}
-		// a column setting's type (validated at creation: destinationTypesError)
+		// a column setting's type (checked above, and by validation: destinationTypesError)
 		if destinationType, ok := destinationTypes[column.Name]; ok {
 			pgColumnType = destinationType
 		}
@@ -748,7 +751,7 @@ func generateCreateTableSQLForNormalizedTable(
 			strings.Join(primaryKeyColsQuoted, ",")))
 	}
 
-	return fmt.Sprintf(createNormalizedTableSQL, dstSchemaTable.String(), strings.Join(createTableSQLArray, ","))
+	return fmt.Sprintf(createNormalizedTableSQL, dstSchemaTable.String(), strings.Join(createTableSQLArray, ",")), nil
 }
 
 func (c *PostgresConnector) GetLastSyncBatchID(ctx context.Context, jobName string) (int64, error) {
