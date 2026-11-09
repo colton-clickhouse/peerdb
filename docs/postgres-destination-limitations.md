@@ -93,10 +93,13 @@ Postgres destinations accept:
 | `BIGINT UNSIGNED` (UInt64) | `bigint` | `numeric(20,0)`, `numeric` |
 | other integers | per size | wider integers, `numeric` |
 | MySQL `TIME` | `time` (a time of day) | `interval` (MySQL's `TIME` is a duration: -838:59:59 to 838:59:59) |
-| MySQL `TINYINT(1)` | `boolean` | `smallint`: read as an integer, so 2, 127 and -5 keep their values |
+| CockroachDB `INTERVAL`, `INTERVAL[]` | `text` holding PeerDB's interval JSON | `interval`, `interval[]` (from the CockroachDB stack, below) |
+| MySQL `TINYINT(1)` | `boolean` | `smallint`, `integer`, `bigint`: read as an integer, so 2, 127 and -5 keep their values |
 | `FLOAT` (real) | `real` | `float8` |
 | text | `text` | `citext` (the extension must exist on the target) |
 | `JSON` | `json` | `jsonb` |
+
+The CockroachDB → Postgres fixes (stacked on these) add the `INTERVAL` choices to this list.
 
 Unsigned integers get the signed type of the same size by default, which holds only half their range: a
 `SMALLINT UNSIGNED` above 32767, an `INT UNSIGNED` above 2147483647 or a `BIGINT UNSIGNED` above
