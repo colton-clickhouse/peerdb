@@ -4,11 +4,13 @@ package mysql_postgres
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	e2e "github.com/PeerDB-io/peerdb/flow/e2e"
+	"github.com/PeerDB-io/peerdb/flow/shared"
 )
 
 // MySQL geometry values carry an SRID (spatial reference system), which must arrive on Postgres (PostGIS)
@@ -40,6 +42,11 @@ func (s MySQLPGSuite) Test_Geometry_SRID_Kept() {
 	e2e.EnvWaitFor(t, env, 3*time.Minute, "initial load", func() bool {
 		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 3
 	})
+	// the snapshot keeps the SRID: row 2 as copied, before CDC changes it
+	var snapshotted string
+	e2e.EnvNoError(t, env, s.dest.Conn().QueryRow(t.Context(),
+		fmt.Sprintf(`SELECT ST_AsEWKT(g) FROM %s WHERE id = 2`, dstFull)).Scan(&snapshotted))
+	require.Equal(t, "SRID=4326;POINT(10 20)", snapshotted)
 	e2e.EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(
 		`INSERT INTO %s VALUES (4, ST_GeomFromText('POINT(30 40)', 4326, 'axis-order=long-lat'))`, srcFull)))
 	e2e.EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(
@@ -67,4 +74,38 @@ func (s MySQLPGSuite) Test_Geometry_SRID_Kept() {
 		3: "SRID=3857;POINT(1000 2000)",
 		4: "SRID=4326;POINT(30 40)",
 	}, got)
+}
+
+// Mirrors from before InternalVersion_PgGeoKeepSRID keep writing the snapshot without the SRID
+func (s MySQLPGSuite) Test_Geometry_SRID_Old_Version() {
+	t := s.t
+	srcTable := "geometry_srid_old"
+	srcFull, dstFull := e2e.AttachSchema(s, srcTable), s.DestinationTable(srcTable)
+	_, err := s.dest.Conn().Exec(t.Context(), "CREATE EXTENSION IF NOT EXISTS postgis")
+	require.NoError(t, err)
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY, g GEOMETRY)`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+		`INSERT INTO %s VALUES (1, ST_GeomFromText('POINT(10 20)', 4326, 'axis-order=long-lat'))`, srcFull)))
+	connectionGen := e2e.FlowConnectionGenerationConfig{
+		FlowJobName:   e2e.AddSuffix(s, srcTable),
+		TableMappings: e2e.TableMappings(s, srcTable, srcTable),
+		Destination:   s.Peer().Name,
+	}
+	flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
+	flowConnConfig.DoInitialSnapshot = true
+	version := shared.InternalVersion_PgGeoKeepSRID - 1
+	// mirror creation replaces Version with PEERDB_FORCE_INTERNAL_VERSION (default: latest)
+	flowConnConfig.Env = map[string]string{"PEERDB_FORCE_INTERNAL_VERSION": strconv.FormatUint(uint64(version), 10)}
+	flowConnConfig.Version = version
+	env := e2e.ExecutePeerflow(t, e2e.NewTemporalClient(t), flowConnConfig)
+	e2e.SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	e2e.EnvWaitFor(t, env, 3*time.Minute, "initial load", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 1
+	})
+	var snapshotted string
+	e2e.EnvNoError(t, env, s.dest.Conn().QueryRow(t.Context(),
+		fmt.Sprintf(`SELECT ST_AsEWKT(g) FROM %s WHERE id = 1`, dstFull)).Scan(&snapshotted))
+	env.Cancel(t.Context())
+	e2e.RequireEnvCanceled(t, env)
+	require.Equal(t, "POINT(10 20)", snapshotted, "an older mirror's snapshot has no SRID")
 }

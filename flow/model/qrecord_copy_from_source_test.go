@@ -21,7 +21,7 @@ func TestQRecordCopyFromSourceNilBytes(t *testing.T) {
 	}
 	stream.Close(nil)
 
-	src := NewQRecordCopyFromSource(stream)
+	src := NewQRecordCopyFromSource(stream, PgCopyOptions{})
 	require.True(t, src.Next())
 	values, err := src.Values()
 	require.NoError(t, err)

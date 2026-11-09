@@ -20,6 +20,7 @@ import (
 type RecordStreamSink struct {
 	*model.QRecordStream
 	DestinationType protos.DBType
+	Version         uint32 // the mirror's, for CopyInto
 }
 
 func (stream RecordStreamSink) ExecuteQueryWithTx(
@@ -116,7 +117,9 @@ func (stream RecordStreamSink) CopyInto(ctx context.Context, _ *PostgresConnecto
 	if err != nil {
 		return 0, err
 	}
-	return tx.CopyFrom(ctx, table, columnNames, model.NewQRecordCopyFromSource(stream.QRecordStream))
+	return tx.CopyFrom(ctx, table, columnNames, model.NewQRecordCopyFromSource(stream.QRecordStream, model.PgCopyOptions{
+		GeoSRIDs: stream.Version >= shared.InternalVersion_PgGeoKeepSRID,
+	}))
 }
 
 func (stream RecordStreamSink) GetColumnNames() ([]string, error) {
