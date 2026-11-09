@@ -20,7 +20,6 @@ import (
 	"github.com/PeerDB-io/peerdb/flow/otel_metrics"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared"
-	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
@@ -445,11 +444,6 @@ func (c *MySqlConnector) PullQRepRecords(
 		record := make([]types.QValue, 0, len(row))
 		for idx, val := range row {
 			field := schema.Fields[idx]
-			if rs.Fields[idx].Flag&mysql.PRI_KEY_FLAG != 0 && config.Version >= shared.InternalVersion_MySQLZeroDatePartsAsZero &&
-				(field.Type == types.QValueKindDate || field.Type == types.QValueKindTimestamp) &&
-				val.Type == mysql.FieldValueTypeString && isZeroDate(string(val.AsString()), config.Version) {
-				return exceptions.NewMySQLZeroDateKeyError(config.WatermarkTable, field.Name, string(val.AsString()))
-			}
 			qv, err := QValueFromMysqlFieldValueForVersion(field.Type, rs.Fields[idx].Type, val,
 				shouldWrapNonObjectJSON(field.Name, field.Type, config.Flags, config.Version, nativeJSONEnabled, config.Columns),
 				config.Version)
