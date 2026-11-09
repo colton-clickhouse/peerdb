@@ -280,35 +280,8 @@ func (c *PostgresConnector) ValidateMirrorDestination(
 	cfg *protos.FlowConnectionConfigsCore,
 	tableNameSchemaMapping map[string]*protos.TableSchema,
 ) error {
-	// before the resync shortcut: recreating the tables doesn't make a keyless one replicable. (A resync is
-	// validated without the source schema, so only a mirror's creation is checked, until resync validation
-	// reads it.)
-	if !cfg.InitialSnapshotOnly {
-		sourceTables := make([]string, 0, len(cfg.TableMappings))
-		for _, tableMapping := range cfg.TableMappings {
-			sourceTables = append(sourceTables, tableMapping.SourceTableIdentifier)
-			if schema, ok := tableNameSchemaMapping[tableMapping.SourceTableIdentifier]; ok {
-				var excludedKeys []string
-				for _, col := range schema.PrimaryKeyColumns {
-					if slices.Contains(tableMapping.Exclude, col) {
-						excludedKeys = append(excludedKeys, col)
-					}
-				}
-				if len(excludedKeys) > 0 {
-					return exceptions.NewExcludedKeyColumnsError(tableMapping.SourceTableIdentifier, excludedKeys,
-						len(excludedKeys) == len(schema.PrimaryKeyColumns))
-				}
-			}
-		}
-		if err := keylessTablesError(sourceTables, tableNameSchemaMapping); err != nil {
-			return fmt.Errorf("%w, or use an initial snapshot only mirror", err)
-		}
-	}
-
-	// also before the resync shortcut: recreated tables would get the same truncated names. A resync recovers a
-	// mirror that exists, so it's refused only for what would break the recreated tables: names that collide
-	// once truncated. A long name alone or a long mirror name is the mirror's as it runs.
-	if err := longIdentifiersError(cfg.TableMappings, tableNameSchemaMapping, cfg.Resync); err != nil {
+	// before the resync shortcut: recreated tables are set up from the source's schema as new ones are
+	if err := validateTableKeysAndNames(cfg, tableNameSchemaMapping, cfg.Resync); err != nil {
 		return err
 	}
 
@@ -414,11 +387,54 @@ func (c *PostgresConnector) ValidateMirrorDestination(
 	return nil
 }
 
+// ValidateAddedTables checks tables being added to a running mirror for what would fail their setup or stall
+// normalize: their keys and identifier lengths. Not the rest of ValidateMirrorDestination: a re-added table's
+// destination table may hold its earlier rows, and the mirror's own names were checked at its creation.
+func (c *PostgresConnector) ValidateAddedTables(
+	ctx context.Context,
+	cfg *protos.FlowConnectionConfigsCore,
+	tableNameSchemaMapping map[string]*protos.TableSchema,
+) error {
+	return validateTableKeysAndNames(cfg, tableNameSchemaMapping, false)
+}
+
+// validateTableKeysAndNames refuses tables whose changes normalize can't apply (keyless, or with an excluded key
+// column) unless the mirror is initial snapshot only, and destination names Postgres would truncate (with
+// onlyCollisions, a resync recovering a mirror that exists, only those colliding once truncated: a long name
+// alone is the mirror's as it runs)
+func validateTableKeysAndNames(
+	cfg *protos.FlowConnectionConfigsCore, tableNameSchemaMapping map[string]*protos.TableSchema, onlyCollisions bool,
+) error {
+	if !cfg.InitialSnapshotOnly {
+		sourceTables := make([]string, 0, len(cfg.TableMappings))
+		for _, tableMapping := range cfg.TableMappings {
+			sourceTables = append(sourceTables, tableMapping.SourceTableIdentifier)
+			if schema, ok := tableNameSchemaMapping[tableMapping.SourceTableIdentifier]; ok {
+				var excludedKeys []string
+				for _, col := range schema.PrimaryKeyColumns {
+					if slices.Contains(tableMapping.Exclude, col) {
+						excludedKeys = append(excludedKeys, col)
+					}
+				}
+				if len(excludedKeys) > 0 {
+					return exceptions.NewExcludedKeyColumnsError(tableMapping.SourceTableIdentifier, excludedKeys,
+						len(excludedKeys) == len(schema.PrimaryKeyColumns))
+				}
+			}
+		}
+		if err := keylessTablesError(sourceTables, tableNameSchemaMapping); err != nil {
+			return fmt.Errorf("%w, or use an initial snapshot only mirror", err)
+		}
+	}
+
+	return longIdentifiersError(cfg.TableMappings, tableNameSchemaMapping, onlyCollisions)
+}
+
 // keylessTablesError names the tables among names whose schema has no primary key columns. A name without a schema
-// isn't named (fails open): validation without the source schema (resync) has nothing to check. Their changes
-// can't be applied to Postgres: normalize matches rows by primary key, and as a batch normalizes all its tables
-// together, a keyless table's malformed MERGE would fail every table's. A Postgres source reports all columns as
-// the key of a REPLICA IDENTITY FULL table, so only tables with nothing to match on count.
+// isn't named (fails open). Their changes can't be applied to Postgres: normalize matches rows by primary key, and
+// as a batch normalizes all its tables together, a keyless table's malformed MERGE would fail every table's. A
+// Postgres source reports all columns as the key of a REPLICA IDENTITY FULL table, so only tables with nothing to
+// match on count.
 func keylessTablesError(names []string, schemas map[string]*protos.TableSchema) error {
 	var keyless []string
 	for _, name := range names {
@@ -448,7 +464,8 @@ func longIdentifiersError(
 	for _, tableMapping := range tableMappings {
 		dst := tableMapping.DestinationTableIdentifier
 		namespace, table, _ := strings.Cut(dst, ".")
-		tables[truncate(namespace)+"."+truncate(table)] = append(tables[truncate(namespace)+"."+truncate(table)], dst)
+		truncated := truncate(namespace) + "." + truncate(table)
+		tables[truncated] = append(tables[truncated], dst)
 		if !onlyCollisions && (len(namespace) > maxIdentifierBytes || len(table) > maxIdentifierBytes) {
 			long = append(long, "table "+dst)
 		}
@@ -458,7 +475,8 @@ func longIdentifiersError(
 				if slices.Contains(tableMapping.Exclude, column.Name) {
 					continue
 				}
-				columns[truncate(column.Name)] = append(columns[truncate(column.Name)], column.Name)
+				truncatedColumn := truncate(column.Name)
+				columns[truncatedColumn] = append(columns[truncatedColumn], column.Name)
 				if !onlyCollisions && len(column.Name) > maxIdentifierBytes {
 					long = append(long, "column "+dst+"."+column.Name)
 				}

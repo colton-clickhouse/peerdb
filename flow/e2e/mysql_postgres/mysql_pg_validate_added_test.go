@@ -39,7 +39,9 @@ func (s MySQLPGSuite) Test_Resync_Validation_Long_Identifiers() {
 	require.ErrorContains(t, validateResync(colliding), colA)
 }
 
-// Adding a keyless table to a paused mirror is refused, naming it, and the mirror stays paused
+// Adding a keyless table to a paused mirror is refused, naming it, and the mirror stays paused. Adding a table whose
+// destination table already holds rows (a removed table added back) is accepted, as it was before tables added to a
+// mirror were validated.
 func (s MySQLPGSuite) Test_Add_Keyless_Table_Refused() {
 	t := s.t
 	keyed, keyless := "add_tbl_keyed", "add_tbl_keyless"
@@ -76,6 +78,21 @@ func (s MySQLPGSuite) Test_Add_Keyless_Table_Refused() {
 	require.ErrorContains(t, err, "tables without a primary key can't be replicated with CDC to Postgres: "+
 		e2e.AttachSchema(s, keyless))
 	require.Equal(t, protos.FlowStatus_STATUS_PAUSED, status(), "the refused update leaves the mirror paused")
+
+	prefilled := "add_tbl_prefilled"
+	require.NoError(t, s.source.Exec(t.Context(),
+		fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY)`, e2e.AttachSchema(s, prefilled))))
+	_, err = s.dest.Conn().Exec(t.Context(), fmt.Sprintf(
+		`CREATE TABLE %[1]s (id INT PRIMARY KEY); INSERT INTO %[1]s VALUES (100)`, s.DestinationTable(prefilled)))
+	require.NoError(t, err)
+	_, err = client.FlowStateChange(t.Context(), &protos.FlowStateChangeRequest{
+		FlowJobName:        cfg.FlowJobName,
+		RequestedFlowState: protos.FlowStatus_STATUS_RUNNING,
+		FlowConfigUpdate: &protos.FlowConfigUpdate{Update: &protos.FlowConfigUpdate_CdcFlowConfigUpdate{
+			CdcFlowConfigUpdate: &protos.CDCFlowConfigUpdate{AdditionalTables: e2e.TableMappings(s, prefilled, prefilled)},
+		}},
+	})
+	require.NoError(t, err, "a table with rows on the destination can be added")
 	env.Cancel(t.Context())
 	e2e.RequireEnvCanceled(t, env)
 }
