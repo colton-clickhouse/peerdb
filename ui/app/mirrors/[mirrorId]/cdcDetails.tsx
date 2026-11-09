@@ -33,6 +33,7 @@ type props = {
   createdAt?: Date;
   lastProgressAt?: Date;
   lastError?: MirrorLastError;
+  failingWithoutProgress: boolean;
   mirrorStatus: FlowStatus;
 };
 
@@ -40,14 +41,17 @@ export default function CdcDetails({
   createdAt,
   lastProgressAt,
   lastError,
+  failingWithoutProgress,
   mirrorConfig,
   mirrorStatus,
 }: props) {
-  // failing since its last progress: the newest error is newer than the newest normalized batch
-  const failingSinceProgress =
+  // a running mirror that has been failing without progress for the no-progress
+  // alert's threshold (the status API applies the alert's rule)
+  const showNoProgress =
+    mirrorStatus === FlowStatus.STATUS_RUNNING &&
+    failingWithoutProgress &&
     lastProgressAt !== undefined &&
-    lastError?.timestamp !== undefined &&
-    lastError.timestamp > lastProgressAt;
+    lastError?.timestamp !== undefined;
   const [syncInterval, setSyncInterval] = useState<number>();
 
   const tablesSynced = mirrorConfig.config?.tableMappings;
@@ -80,11 +84,11 @@ export default function CdcDetails({
                 <Label>{FormatStatus(mirrorStatus)}</Label>
               </Link>
             </div>
-            {failingSinceProgress && (
+            {showNoProgress && (
               <Label variant='footnote' colorSet='destructive'>
-                No progress since {lastProgressAt!.toLocaleString()}; last error
-                at {lastError!.timestamp!.toLocaleString()}. The mirror&apos;s
-                errors name the cause.
+                No progress since {new Date(lastProgressAt!).toLocaleString()};
+                last error at {new Date(lastError!.timestamp!).toLocaleString()}
+                . The mirror&apos;s errors name the cause.
               </Label>
             )}
           </div>

@@ -66,6 +66,7 @@ export function CDCMirror({ status, syncStatusChild }: CDCMirrorStatusProps) {
           createdAt={status.createdAt}
           lastProgressAt={status.lastProgressAt}
           lastError={status.lastError}
+          failingWithoutProgress={status.failingWithoutProgress}
           mirrorConfig={status.cdcStatus!}
           mirrorStatus={status.currentFlowState}
         />
