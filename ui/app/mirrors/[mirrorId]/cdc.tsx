@@ -64,6 +64,8 @@ export function CDCMirror({ status, syncStatusChild }: CDCMirrorStatusProps) {
       <TabsContent className='TabsContent' value='0'>
         <CdcDetails
           createdAt={status.createdAt}
+          lastProgressAt={status.lastProgressAt}
+          lastError={status.lastError}
           mirrorConfig={status.cdcStatus!}
           mirrorStatus={status.currentFlowState}
         />
