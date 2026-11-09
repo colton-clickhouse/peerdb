@@ -292,14 +292,7 @@ func shouldWrapNonObjectJSON(
 	return qvalue.ShouldWrapNonObjectJSON(flags, version, nativeJSONEnabled, model.ExplicitDestinationType(columns, name))
 }
 
-// QValueFromMysqlFieldValue converts a snapshot value as a mirror of the latest internal version does
 func QValueFromMysqlFieldValue(
-	qkind types.QValueKind, mytype byte, fv mysql.FieldValue, wrapNonObjectJSON bool,
-) (types.QValue, error) {
-	return QValueFromMysqlFieldValueForVersion(qkind, mytype, fv, wrapNonObjectJSON, shared.InternalVersion_Latest)
-}
-
-func QValueFromMysqlFieldValueForVersion(
 	qkind types.QValueKind, mytype byte, fv mysql.FieldValue, wrapNonObjectJSON bool, version uint32,
 ) (types.QValue, error) {
 	switch fv.Type {

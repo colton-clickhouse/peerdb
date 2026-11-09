@@ -211,7 +211,7 @@ func TestQValueFromMysql_WrapNonObjectJSON(t *testing.T) {
 			}
 
 			fv := mysql.NewFieldValue(mysql.FieldValueTypeString, 0, []byte(tc.in))
-			got, err := QValueFromMysqlFieldValue(types.QValueKindJSON, mysql.MYSQL_TYPE_JSON, fv, wrap)
+			got, err := QValueFromMysqlFieldValue(types.QValueKindJSON, mysql.MYSQL_TYPE_JSON, fv, wrap, shared.InternalVersion_Latest)
 			require.NoError(t, err)
 			require.Equal(t, want, got.(types.QValueJSON).Val, "snapshot in=%q wrap=%v", tc.in, wrap)
 
@@ -248,7 +248,7 @@ func TestQValueFromMysql_MariaDBJSONKeepsText(t *testing.T) {
 			}
 
 			fv := mysql.NewFieldValue(mysql.FieldValueTypeString, 0, []byte(tc.in))
-			got, err := QValueFromMysqlFieldValue(types.QValueKindJSON, mysql.MYSQL_TYPE_BLOB, fv, wrap)
+			got, err := QValueFromMysqlFieldValue(types.QValueKindJSON, mysql.MYSQL_TYPE_BLOB, fv, wrap, shared.InternalVersion_Latest)
 			require.NoError(t, err)
 			require.Equal(t, want, got.(types.QValueJSON).Val, "snapshot in=%q wrap=%v", tc.in, wrap)
 
@@ -291,7 +291,7 @@ func TestQValueFromMysql_PartialZeroDates(t *testing.T) {
 	var coercionReported bool
 	snapshot := func(s string, version uint32) time.Time {
 		t.Helper()
-		qv, err := QValueFromMysqlFieldValueForVersion(types.QValueKindDate, 0,
+		qv, err := QValueFromMysqlFieldValue(types.QValueKindDate, 0,
 			mysql.NewFieldValue(mysql.FieldValueTypeString, 0, []byte(s)), false, version)
 		require.NoError(t, err, s)
 		return qv.Value().(time.Time).UTC()
