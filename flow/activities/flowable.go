@@ -221,7 +221,7 @@ func (a *FlowableActivity) CreateRawTable(
 	if err := monitoring.InitializeCDCFlow(ctx, a.CatalogPool, config.FlowJobName); err != nil {
 		return nil, err
 	}
-	// a new raw table: nothing synced before it is still waiting for normalize (resync)
+	// a new raw table: nothing synced before it is still waiting for normalize (recreated or resynced mirror)
 	if err := monitoring.DeleteOpenCDCBatches(ctx, a.CatalogPool, config.FlowJobName); err != nil {
 		return nil, err
 	}
