@@ -515,24 +515,7 @@ func (c *PostgresConnector) normalizeBatch(
 	for _, entry := range entries {
 		ct, err := results.Exec()
 		if err != nil {
-			// a statement that fails to prepare fails the whole batch, and its error comes back with the
-			// first result: name the table whose statement it was, or none if it was the metadata update
-			var preprocessingErr pgx.ErrPreprocessingBatch
-			if errors.As(err, &preprocessingErr) {
-				i := slices.IndexFunc(entries, func(e batchEntry) bool { return e.statement == preprocessingErr.SQL() })
-				if i < 0 {
-					c.logger.Error("error executing the normalize metadata update", slog.Any("error", err))
-					return 0, fmt.Errorf("failed to update metadata for NormalizeTables: %w", err)
-				}
-				entry = entries[i]
-			}
-			c.logger.Error("error executing normalize statement",
-				slog.String("statement", entry.statement),
-				slog.Int64("batchID", batchID),
-				slog.String("destinationTableName", entry.tableName),
-				slog.Any("error", err),
-			)
-			return 0, fmt.Errorf("error executing normalize statement for table %s: %w", entry.tableName, err)
+			return 0, c.normalizeBatchError(err, batchID, entry, entries)
 		}
 		totalRowsAffected += int(ct.RowsAffected())
 	}
@@ -550,6 +533,28 @@ func (c *PostgresConnector) normalizeBatch(
 	}
 
 	return totalRowsAffected, nil
+}
+
+// normalizeBatchError is the error for entry's result failing. A statement that fails to prepare fails the whole
+// batch, and its error comes back with the first result: name the table whose statement it was, or none if it was
+// the metadata update.
+func (c *PostgresConnector) normalizeBatchError(err error, batchID int64, entry batchEntry, entries []batchEntry) error {
+	var preprocessingErr pgx.ErrPreprocessingBatch
+	if errors.As(err, &preprocessingErr) {
+		i := slices.IndexFunc(entries, func(e batchEntry) bool { return e.statement == preprocessingErr.SQL() })
+		if i < 0 {
+			c.logger.Error("error executing the normalize metadata update", slog.Any("error", err))
+			return fmt.Errorf("failed to update metadata for NormalizeTables: %w", err)
+		}
+		entry = entries[i]
+	}
+	c.logger.Error("error executing normalize statement",
+		slog.String("statement", entry.statement),
+		slog.Int64("batchID", batchID),
+		slog.String("destinationTableName", entry.tableName),
+		slog.Any("error", err),
+	)
+	return fmt.Errorf("error executing normalize statement for table %s: %w", entry.tableName, err)
 }
 
 // CreateRawTable creates a raw table, implementing the Connector interface.
