@@ -1880,6 +1880,16 @@ func TestMySQLGeometryLinearRingNotClosedShouldBeUnsupportedDatatype(t *testing.
 	}, errInfo)
 }
 
+func TestPostGISSRIDOutOfRangeShouldBeUnsupportedDatatype(t *testing.T) {
+	err := fmt.Errorf("column g: %w", exceptions.NewPostGISSRIDOutOfRangeError(1<<31, 999999))
+	errorClass, errInfo := GetErrorClass(t.Context(), fmt.Errorf("failed to sync records: %w", err))
+	assert.Equal(t, ErrorUnsupportedDatatype, errorClass)
+	assert.Equal(t, ErrorInfo{
+		Source: "typeConversion",
+		Code:   "UNSUPPORTED_GEOMETRY_SRID",
+	}, errInfo)
+}
+
 func TestMySQLGeometryParseErrorUnknownShouldFallThrough(t *testing.T) {
 	geosErr := fmt.Errorf("ParseException: Unknown WKB type 99")
 	wrapped := fmt.Errorf("mysql error: %w", exceptions.NewMySQLGeometryParseError(geosErr))

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	geo "github.com/PeerDB-io/peerdb/flow/shared/datatypes"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
@@ -238,7 +239,7 @@ const MaxPostGISSRID = 999999
 
 func CheckPostGISSRID(srid uint32) error {
 	if srid > MaxPostGISSRID {
-		return fmt.Errorf("SRID %d is above the largest SRID PostGIS stores (%d), which would change it", srid, MaxPostGISSRID)
+		return exceptions.NewPostGISSRIDOutOfRangeError(srid, MaxPostGISSRID)
 	}
 	return nil
 }
