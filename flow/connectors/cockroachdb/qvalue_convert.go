@@ -313,13 +313,7 @@ func qvalueFromCrdbValue(
 		case string:
 			return types.QValueINET{Val: normalizeInetText(v)}, nil
 		case netip.Prefix:
-			if v.Bits() == v.Addr().BitLen() {
-				// render host addresses bare ("192.168.1.5", not the
-				// "192.168.1.5/32" netip form) to match the changefeed path
-				// and the Postgres text convention
-				return types.QValueINET{Val: v.Addr().String()}, nil
-			}
-			return types.QValueINET{Val: v.String()}, nil
+			return types.QValueINET{Val: inetPrefixText(v)}, nil
 		}
 	case types.QValueKindGeography, types.QValueKindGeometry:
 		wkbString, ok := value.(string)
@@ -465,6 +459,11 @@ func qvalueFromCrdbValue(
 					strs = append(strs, "")
 					continue
 				}
+				if prefix, ok := anyVal.(netip.Prefix); ok {
+					// INET[] elements, like scalar INET
+					strs = append(strs, inetPrefixText(prefix))
+					continue
+				}
 				strs = append(strs, convertToString(typeMap, 0, anyVal))
 			}
 			return types.QValueArrayString{Val: strs}, nil
@@ -588,6 +587,15 @@ func parseUUIDArray(value any) ([]uuid.UUID, error) {
 // maxTimeMicroseconds is 23:59:59.999999, the clamp target for CockroachDB's
 // legal TIME '24:00:00' extreme, shared by the snapshot and changefeed paths.
 const maxTimeMicroseconds = 24*3600*1000000 - 1
+
+// inetPrefixText renders an INET value decoded by pgx with host addresses bare ("192.168.1.5", not the
+// "192.168.1.5/32" netip form), to match the changefeed path and the Postgres text convention.
+func inetPrefixText(p netip.Prefix) string {
+	if p.Bits() == p.Addr().BitLen() {
+		return p.Addr().String()
+	}
+	return p.String()
+}
 
 // normalizeInetText strips full-length masks from INET text ("192.168.1.5/32"
 // becomes "192.168.1.5"): CockroachDB's inet::text always renders a mask, but
