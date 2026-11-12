@@ -260,6 +260,7 @@ func pullAndSyncCore[TPull connectors.CDCPullConnectorCore, TSync connectors.CDC
 			InternalVersion:             config.Version,
 			Flags:                       config.Flags,
 			SplitPrimaryKeyUpdates:      dstType == protos.DBType_POSTGRES,
+			DestinationType:             dstType,
 		})
 		if err != nil {
 			pullSpan.RecordError(err)

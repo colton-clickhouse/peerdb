@@ -106,6 +106,7 @@ func syncRecordsCore[Items model.Items](
 		GeometryAsEWKT:    req.Version >= shared.InternalVersion_PgGeoKeepSRID,
 		StripNulBytes:     stripNulBytes,
 		ArrayNullElements: true,
+		NonFiniteFloats:   true,
 	}
 	streamReadFunc := func() ([]any, error) {
 		for record := range req.Records.GetRecords() {

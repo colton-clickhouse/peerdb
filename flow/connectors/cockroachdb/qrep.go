@@ -269,9 +269,10 @@ func (c *CockroachDBConnector) PullQRepRecords(
 	stream.SetSchema(schema)
 
 	arrayNullElements := config.Version >= shared.InternalVersion_ArrayConversionIntegrity
+	pg := newPgValues(config.Version, dstType)
 	var totalRecords, totalBytes int64
 	for rows.Next() {
-		record, err := c.mapRowToQRecord(rows, fds, schema, dstType, arrayNullElements)
+		record, err := c.mapRowToQRecord(rows, fds, schema, dstType, arrayNullElements, pg)
 		if err != nil {
 			return totalRecords, totalBytes, fmt.Errorf("failed to map row to QRecord: %w", err)
 		}
@@ -339,6 +340,7 @@ func (c *CockroachDBConnector) mapRowToQRecord(
 	schema types.QRecordSchema,
 	dstType protos.DBType,
 	arrayNullElements bool,
+	pg pgValues,
 ) ([]types.QValue, error) {
 	record := make([]types.QValue, len(fds))
 	rawValues := rows.RawValues()
@@ -420,7 +422,7 @@ func (c *CockroachDBConnector) mapRowToQRecord(
 				}
 			}
 
-			qv, err := qvalueFromCrdbValue(field, dstType, fd.DataTypeOID, typeMap, value)
+			qv, err := qvalueFromCrdbValue(field, dstType, fd.DataTypeOID, typeMap, value, pg)
 			if err != nil {
 				return nil, fmt.Errorf("failed to convert value for %s: %w", fd.Name, err)
 			}
