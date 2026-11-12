@@ -232,13 +232,17 @@ func TestParsePgArray(t *testing.T) {
 			"{{N,NU,NUL,NULL,NUL\\L,\\NULL,NULLL},{{NO,NUO,NULO,\"NULL\"},{ NULL}}}",
 			[]string{"N", "NU", "NUL", "", "NULL", "NULL", "NULLL", "NO", "NUO", "NULO", "NULL", ""},
 		},
-		{"{}", nil},
+		{"{}", []string{}},
 		{"{,}", []string{""}},
 	}
 	for _, tc := range tests {
 		got := ParsePgArrayStringToStringSlice(tc.input, ',')
-		if !slices.Equal(got, tc.output) {
-			t.Errorf("parsed %s to %v instead of %v", tc.input, got, tc.output)
+		if !slices.Equal(got, tc.output) || (got == nil) != (tc.output == nil) {
+			t.Errorf("parsed %s to %#v instead of %#v", tc.input, got, tc.output)
 		}
+	}
+	// not an array at all: nothing parsed
+	if got := ParsePgArrayStringToStringSlice("", ','); got != nil {
+		t.Errorf("parsed an empty string to %#v", got)
 	}
 }

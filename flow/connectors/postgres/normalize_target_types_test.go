@@ -96,9 +96,9 @@ func TestGenerateMergeStatement_CastRules(t *testing.T) {
 		{"c_dec", string(types.QValueKindNumeric), "integer", `(_peerdb_data->>'c_dec')::NUMERIC::integer AS "c_dec"`},
 		// arrays: text[] has no cast to a vector or from float text to integer[]
 		{"c_vec", string(types.QValueKindArrayFloat32), "vector",
-			`ARRAY(SELECT JSON_ARRAY_ELEMENTS_TEXT((_peerdb_data->>'c_vec')::JSON))::REAL[]::vector AS "c_vec"`},
+			`CASE WHEN _peerdb_data->>'c_vec' IS NULL THEN NULL ELSE ARRAY(SELECT JSON_ARRAY_ELEMENTS_TEXT((_peerdb_data->>'c_vec')::JSON))::REAL[]::vector END AS "c_vec"`},
 		{"c_ints", string(types.QValueKindArrayFloat64), "integer[]",
-			`ARRAY(SELECT JSON_ARRAY_ELEMENTS_TEXT((_peerdb_data->>'c_ints')::JSON))::DOUBLE PRECISION[]::integer[] AS "c_ints"`},
+			`CASE WHEN _peerdb_data->>'c_ints' IS NULL THEN NULL ELSE ARRAY(SELECT JSON_ARRAY_ELEMENTS_TEXT((_peerdb_data->>'c_ints')::JSON))::DOUBLE PRECISION[]::integer[] END AS "c_ints"`},
 		// string targets: through PeerDB's type, as assignment converted them before
 		{"c_ts_text", string(types.QValueKindTimestamp), "text",
 			`(_peerdb_data->>'c_ts_text')::TIMESTAMP::text AS "c_ts_text"`},
