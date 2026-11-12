@@ -219,6 +219,7 @@ type ToJSONOptions struct {
 	HStoreAsJSON         bool
 	ClearValuesOverBytes int  // 0 means preserve values
 	GeometryAsEWKT       bool // geometry with an SRID beside its WKT (MySQL) as SRID=N;WKT
+	StripNulBytes        bool // drop U+0000 from strings (PG destinations can't store it)
 }
 
 func NewToJSONOptions(unnestCols []string, hstoreAsJSON bool) ToJSONOptions {

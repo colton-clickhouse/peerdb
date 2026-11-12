@@ -21,6 +21,8 @@ type RecordStreamSink struct {
 	*model.QRecordStream
 	DestinationType protos.DBType
 	Version         uint32 // the mirror's, for CopyInto
+	// StripNulBytes removes NUL bytes from strings (PEERDB_PG_STRIP_NUL_BYTES)
+	StripNulBytes bool
 }
 
 func (stream RecordStreamSink) ExecuteQueryWithTx(
@@ -117,9 +119,13 @@ func (stream RecordStreamSink) CopyInto(ctx context.Context, _ *PostgresConnecto
 	if err != nil {
 		return 0, err
 	}
-	return tx.CopyFrom(ctx, table, columnNames, model.NewQRecordCopyFromSource(stream.QRecordStream, model.PgCopyOptions{
+	src := model.NewQRecordCopyFromSource(stream.QRecordStream, model.PgCopyOptions{
 		GeoSRIDs: stream.Version >= shared.InternalVersion_PgGeoKeepSRID,
-	}))
+	})
+	if stream.StripNulBytes {
+		src.WithStripNulBytes()
+	}
+	return tx.CopyFrom(ctx, table, columnNames, src)
 }
 
 func (stream RecordStreamSink) GetColumnNames() ([]string, error) {

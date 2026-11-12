@@ -627,6 +627,15 @@ var DynamicSettings = [...]*protos.DynamicSetting{
 		TargetForSetting: protos.DynconfTarget_POSTGRES,
 	},
 	{
+		Name: "PEERDB_PG_STRIP_NUL_BYTES",
+		Description: "Remove NUL bytes (U+0000) from strings written to Postgres, which can't store them. " +
+			"Off, a string with a NUL byte fails the snapshot or CDC batch",
+		DefaultValue:     "false",
+		ValueType:        protos.DynconfValueType_BOOL,
+		ApplyMode:        protos.DynconfApplyMode_APPLY_MODE_AFTER_RESUME,
+		TargetForSetting: protos.DynconfTarget_POSTGRES,
+	},
+	{
 		Name:             "PEERDB_MONGODB_NUM_PARALLEL_DECODE_THREADS",
 		Description:      "Number of parallel threads to use when decoding full BSON documents in MongoDB change events.",
 		DefaultValue:     "1",
@@ -1178,6 +1187,10 @@ func PeerDBMongoDBSampledObjectIDPartitioning(ctx context.Context, env map[strin
 
 func PeerDBPostgresRawBatchCleanupThreshold(ctx context.Context, env map[string]string) (int64, error) {
 	return dynamicConfSigned[int64](ctx, env, "PEERDB_POSTGRES_RAW_BATCH_CLEANUP_THRESHOLD")
+}
+
+func PeerDBPgStripNulBytes(ctx context.Context, env map[string]string) (bool, error) {
+	return dynamicConfBool(ctx, env, "PEERDB_PG_STRIP_NUL_BYTES")
 }
 
 func PeerDBMongoDBNumParallelDecodeThreads(ctx context.Context, env map[string]string) (int64, error) {
