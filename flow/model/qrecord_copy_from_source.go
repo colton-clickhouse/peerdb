@@ -113,6 +113,20 @@ func constructArray[T any](v []T) *pgtype.Array[T] {
 	}
 }
 
+// constructNullableArray is constructArray with NULL elements where nulls says so (types.ArrayNulls).
+func constructNullableArray[T any](v []T, nulls []bool) any {
+	if nulls == nil {
+		return constructArray(v)
+	}
+	elems := make([]*T, len(v))
+	for i := range v {
+		if !nulls[i] {
+			elems[i] = &v[i]
+		}
+	}
+	return constructArray(elems)
+}
+
 // pgDuration is a TIME value for COPY. MySQL TIME is a duration (-838:59:59 to 838:59:59), and its target
 // column can be time (PeerDB's mapping) or interval (pre-created). pgx encodes pgtype.Time into interval
 // through its text form, which puts the sign on each field (-838:-59:-59, read back as -837:00:01);
@@ -206,6 +220,9 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 			values[i] = nil
 			continue
 		}
+		if err := types.CheckArrayNulls(qValue); err != nil {
+			return nil, err
+		}
 
 		switch v := qValue.(type) {
 		case types.QValueFloat32:
@@ -285,33 +302,33 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 			}
 			values[i] = wkb
 		case types.QValueArrayString:
-			values[i] = constructArray(src.nulBytesAll(v.Val))
+			values[i] = constructNullableArray(src.nulBytesAll(v.Val), v.Nulls)
 		case types.QValueArrayEnum:
-			values[i] = constructArray(src.nulBytesAll(v.Val))
+			values[i] = constructNullableArray(src.nulBytesAll(v.Val), v.Nulls)
 		case types.QValueArrayDate:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayInterval:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayTimestamp:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayTimestampTZ:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayInt16:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayInt32:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayInt64:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayFloat32:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayFloat64:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayBoolean:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayUUID:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueArrayNumeric:
-			values[i] = constructArray(v.Val)
+			values[i] = constructNullableArray(v.Val, v.Nulls)
 		case types.QValueJSON:
 			values[i] = v.Val
 		case types.QValueArrayJSON:

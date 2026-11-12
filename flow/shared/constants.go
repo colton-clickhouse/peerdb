@@ -55,6 +55,9 @@ const (
 	// Postgres: geometry and geography keep their SRID (EWKB in the snapshot, EWKT in CDC). Older mirrors write
 	// the snapshot with SRID 0, and MySQL's SRID through CDC too.
 	InternalVersion_PgGeoKeepSRID
+	// CockroachDB: NULL elements inside arrays are marked (types.ArrayNulls), and Postgres destinations write them as
+	// NULL. Older mirrors write the element type's zero value ({1,NULL,3} -> {1,0,3}, text '', bool false, ...).
+	InternalVersion_ArrayConversionIntegrity
 
 	TotalNumberOfInternalVersions
 	InternalVersion_Latest = TotalNumberOfInternalVersions - 1
