@@ -155,6 +155,9 @@ type changefeedTableSchema struct {
 	pg pgValues
 	// geoSRIDs are the SRIDs of constrained geometry / geography columns: changefeed GeoJSON has none
 	geoSRIDs map[string]int
+	// geoM are the geometry / geography columns whose type has an M dimension but no Z (geometry(PointM)): their
+	// 3-coordinate GeoJSON is XYM, which would read as XYZ, so CDC fails on them
+	geoM map[string]struct{}
 }
 
 // newChangefeedTableSchema builds the cached per-table schema for envelope
@@ -164,9 +167,16 @@ type changefeedTableSchema struct {
 func newChangefeedTableSchema(schema *protos.TableSchema, exclude map[string]struct{}) *changefeedTableSchema {
 	fields := make(map[string]types.QField, len(schema.Columns))
 	var geoSRIDs map[string]int
+	var geoM map[string]struct{}
 	for _, col := range schema.Columns {
 		kind := types.QValueKind(col.Type)
 		if kind == types.QValueKindGeometry || kind == types.QValueKindGeography {
+			if col.TypeModifier >= 0 && col.TypeModifier&3 == 1 {
+				if geoM == nil {
+					geoM = make(map[string]struct{})
+				}
+				geoM[col.Name] = struct{}{}
+			}
 			if srid := datatypes.GeoTypmodSRID(col.TypeModifier); srid != 0 {
 				if geoSRIDs == nil {
 					geoSRIDs = make(map[string]int)
@@ -193,6 +203,7 @@ func newChangefeedTableSchema(schema *protos.TableSchema, exclude map[string]str
 		primaryKeys:     schema.PrimaryKeyColumns,
 		nullableEnabled: schema.NullableEnabled,
 		geoSRIDs:        geoSRIDs,
+		geoM:            geoM,
 	}
 }
 
@@ -233,8 +244,18 @@ func changefeedRecordItems(
 		if !ok {
 			continue
 		}
-		qv, err := qvalueFromChangefeedJSON(field, raw, schema.pg)
+		var qv types.QValue
+		var err error
+		if _, m := schema.geoM[col]; m && !isJSONNull(raw) {
+			err = exceptions.NewGeometryParseError(errors.New("the column's type has an M dimension, which changefeed" +
+				" GeoJSON doesn't carry: CDC would read the M coordinate as Z"))
+		} else {
+			qv, err = qvalueFromChangefeedJSON(field, raw, schema.pg)
+		}
 		if err != nil {
+			if _, ok := errors.AsType[*exceptions.GeometryParseError](err); ok {
+				return items, fmt.Errorf("column %s: %w", col, err)
+			}
 			if arrayErr, ok := errors.AsType[*exceptions.ArrayElementTypeError](err); ok {
 				// it says what to do; the generic advice below doesn't apply to it
 				arrayErr.WithColumn(col)
@@ -511,13 +532,8 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, pg pgValu
 	case types.QValueKindGeography, types.QValueKindGeometry:
 		wkt, err := geoJSONToWKT(raw)
 		if err != nil {
-			// mirror the QRep fallback for unparseable geo values
-			if field.Nullable {
-				return types.QValueNull(field.Type), nil
-			} else if field.Type == types.QValueKindGeography {
-				return types.QValueGeography{}, nil
-			}
-			return types.QValueGeometry{}, nil
+			// e.g. XYZM: GeoJSON has no M, so 4 coordinates don't parse. Writing NULL instead would lose the value.
+			return nil, exceptions.NewGeometryParseError(fmt.Errorf("GeoJSON %s: %w", truncateForError(string(raw)), err))
 		}
 		if field.Type == types.QValueKindGeography {
 			if !strings.HasPrefix(wkt, "SRID=") {

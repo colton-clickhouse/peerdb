@@ -2418,3 +2418,12 @@ func TestArrayElementTypeErrorShouldNotifyUser(t *testing.T) {
 	assert.Equal(t, NotifyUser, errorClass.ErrorAction())
 	assert.Equal(t, ErrorInfo{Source: ErrorSourceOther, Code: "int32"}, errInfo)
 }
+
+func TestGeometryParseErrorNotifiesUser(t *testing.T) {
+	err := fmt.Errorf("column g: %w", exceptions.NewGeometryParseError(errors.New("unknown GeoJSON type")))
+	errorClass, errInfo := GetErrorClass(t.Context(), err)
+	assert.Equal(t, ErrorUnsupportedDatatype, errorClass)
+	// a value that can't be read fails on every retry: it needs the user, and feeds the no-progress alert
+	assert.Equal(t, NotifyUser, errorClass.ErrorAction())
+	assert.Equal(t, "UNSUPPORTED_GEOMETRY", errInfo.Code)
+}
