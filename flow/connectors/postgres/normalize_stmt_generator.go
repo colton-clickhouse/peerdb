@@ -244,12 +244,13 @@ func (n *normalizeStmtGenerator) generateMergeStatement(
 			genericColumnType := column.Type
 			expr := n.generateExpr(normalizedTableSchema, genericColumnType, stringCol, pgType)
 			selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", expr, quotedCol))
+			if slices.Contains(normalizedTableSchema.PrimaryKeyColumns, column.Name) {
+				// the column's own expression: a plain cast of the JSON text fails for arrays (["a","b"] isn't array text)
+				primaryKeyColumnCasts[column.Name] = expr
+			}
 		}
 
 		if slices.Contains(normalizedTableSchema.PrimaryKeyColumns, column.Name) {
-			if !useJsonbToRecord {
-				primaryKeyColumnCasts[column.Name] = fmt.Sprintf("(_peerdb_data->>%s)::%s", stringCol, pgType)
-			}
 			primaryKeySelectSQLArray = append(primaryKeySelectSQLArray, fmt.Sprintf("src.%s=dst.%s", quotedCol, quotedCol))
 		}
 	}
