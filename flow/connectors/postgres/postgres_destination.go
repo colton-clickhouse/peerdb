@@ -111,6 +111,7 @@ func syncRecordsCore[Items model.Items](
 		StripNulBytes:     stripNulBytes,
 		ArrayNullElements: true,
 		NonFiniteFloats:   true,
+		PgBCDates:         true,
 	}
 	recordOpts := func(dstTable string) model.ToJSONOptions {
 		opts := jsonOpts
