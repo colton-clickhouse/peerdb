@@ -65,7 +65,8 @@ func cdcIdleTimeout(value int) time.Duration {
 	return time.Duration(value) * time.Second
 }
 
-func getInitialNormalizeBatchID(
+// getInitialBatchIDs returns the last synced and the last normalized batch of the mirror.
+func getInitialBatchIDs(
 	ctx context.Context,
 	logger log.Logger,
 	catalogPool shared.CatalogPool,
@@ -73,22 +74,32 @@ func getInitialNormalizeBatchID(
 	destinationName string,
 	destinationType protos.DBType,
 	flowName string,
-) (int64, error) {
-	// Postgres keeps normalize progress in destination-local metadata.
+) (int64, int64, error) {
+	// Postgres keeps sync and normalize progress in destination-local metadata.
 	if destinationType == protos.DBType_POSTGRES {
 		dstPgConn, dstClose, err := connectors.GetPostgresConnectorByName(ctx, env, catalogPool, destinationName)
 		if err != nil {
-			return 0, fmt.Errorf("failed to get postgres destination connector for normalize state: %w", err)
+			return 0, 0, fmt.Errorf("failed to get postgres destination connector for normalize state: %w", err)
 		}
 		defer dstClose(ctx)
-		return dstPgConn.GetLastNormalizeBatchID(ctx, flowName)
+		syncBatchID, err := dstPgConn.GetLastSyncBatchID(ctx, flowName)
+		if err != nil {
+			return 0, 0, err
+		}
+		normBatchID, err := dstPgConn.GetLastNormalizeBatchID(ctx, flowName)
+		return syncBatchID, normBatchID, err
 	}
 
 	pgMetadata := connmetadata.NewPostgresMetadataFromCatalog(logger, catalogPool)
+	syncBatchID, err := pgMetadata.GetLastSyncBatchID(ctx, flowName)
+	if err != nil {
+		return 0, 0, err
+	}
 	// Unsupported-normalize sinks do not persist normalize_batch_id, so after restart this may
 	// be behind until the first no-op normalize advances the in-memory watermark again.
 	// Proper fix for this would ideally need a way to query connector capabilities without creating one which comes with a ping
-	return pgMetadata.GetLastNormalizeBatchID(ctx, flowName)
+	normBatchID, err := pgMetadata.GetLastNormalizeBatchID(ctx, flowName)
+	return syncBatchID, normBatchID, err
 }
 
 func (a *FlowableActivity) Alert(
@@ -475,7 +486,7 @@ func (a *FlowableActivity) syncFlowSharedStream(
 	normRequests := concurrency.NewLastChan()
 	normResponses := concurrency.NewLastChan()
 
-	lastNormBatchID, err := getInitialNormalizeBatchID(
+	lastSyncBatchID, lastNormBatchID, err := getInitialBatchIDs(
 		ctx, logger, a.CatalogPool, config.Env, config.DestinationName, destinationType, config.FlowJobName,
 	)
 	if err != nil {
@@ -484,6 +495,13 @@ func (a *FlowableActivity) syncFlowSharedStream(
 	if lastNormBatchID > 0 {
 		normalizingBatchID.Store(lastNormBatchID)
 		normResponses.Update(lastNormBatchID)
+	}
+	// A batch synced before the previous SyncFlow ended (a worker restart, an error after the sync) but not
+	// normalized would otherwise wait for the next sync, which needs new rows: request it now.
+	if lastSyncBatchID > lastNormBatchID {
+		logger.Info("normalizing batches synced by a previous SyncFlow",
+			slog.Int64("syncBatchID", lastSyncBatchID), slog.Int64("normalizeBatchID", lastNormBatchID))
+		normRequests.Update(lastSyncBatchID)
 	}
 	normBufferHours, err := internal.PeerDBNormalizeBufferHours(ctx, config.Env)
 	if err != nil {
