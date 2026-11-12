@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgerrcode"
@@ -234,6 +235,11 @@ func changefeedRecordItems(
 		}
 		qv, err := qvalueFromChangefeedJSON(field, raw, schema.pg)
 		if err != nil {
+			if arrayErr, ok := errors.AsType[*exceptions.ArrayElementTypeError](err); ok {
+				// it says what to do; the generic advice below doesn't apply to it
+				arrayErr.WithColumn(col)
+				return items, fmt.Errorf("column %s as %s: %w", col, field.Type, err)
+			}
 			return items, fmt.Errorf("column %s as %s: %w"+
 				" (the source column type may have changed; resync the mirror to pick up the new type)",
 				col, field.Type, err)
@@ -358,6 +364,10 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, pg pgValu
 	}
 	if pg.specialValues {
 		if qv, ok := changefeedSpecialValue(field, raw); ok {
+			return qv, nil
+		}
+	} else if pg.arrayInfinity {
+		if qv, ok := changefeedInfinityFallback(field, raw, pg.defaultTime); ok {
 			return qv, nil
 		}
 	}
@@ -625,8 +635,18 @@ func qvalueFromChangefeedJSON(field types.QField, raw json.RawMessage, pg pgValu
 			parseElem = parseChangefeedTimestampTZ
 		}
 		a, err := changefeedArray(raw, func(el json.RawMessage) (time.Time, error) {
-			if isJSONNull(el) || (pg.specialValues && changefeedTimeSpecial(el) != types.SpecialNone) {
+			if isJSONNull(el) {
+				if pg.arrayInfinity && !pg.specialValues {
+					return pg.defaultTime, nil // as the snapshot path (qvalue.PrepareTimeArray)
+				}
 				return time.Time{}, nil
+			}
+			if changefeedTimeSpecial(el) != types.SpecialNone {
+				if pg.specialValues {
+					return time.Time{}, nil // marked below
+				} else if pg.arrayInfinity {
+					return pg.defaultTime, nil // as the snapshot path
+				}
 			}
 			return parseWithString(el, parseElem)
 		})
@@ -707,6 +727,30 @@ func changefeedSpecialValue(field types.QField, raw json.RawMessage) (types.QVal
 	return nil, false
 }
 
+// changefeedInfinityFallback is the snapshot's value for a +-infinity date or timestamp on a destination that doesn't
+// keep it (pgValues.arrayInfinity): NULL, or defaultTime in a column that isn't nullable.
+func changefeedInfinityFallback(field types.QField, raw json.RawMessage, defaultTime time.Time) (types.QValue, bool) {
+	switch field.Type {
+	case types.QValueKindDate, types.QValueKindTimestamp, types.QValueKindTimestampTZ:
+		if changefeedTimeSpecial(raw) == types.SpecialNone {
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
+	if field.Nullable {
+		return types.QValueNull(field.Type), true
+	}
+	switch field.Type {
+	case types.QValueKindDate:
+		return types.QValueDate{Val: defaultTime}, true
+	case types.QValueKindTimestamp:
+		return types.QValueTimestamp{Val: defaultTime}, true
+	default:
+		return types.QValueTimestampTZ{Val: defaultTime}, true
+	}
+}
+
 // changefeedArraySpecials marks the NaN and infinite elements of a numeric, date or timestamp array; nil if none.
 func changefeedArraySpecials(raw json.RawMessage, field types.QField) []types.SpecialValue {
 	var elems []json.RawMessage
@@ -722,6 +766,20 @@ func changefeedArraySpecials(raw json.RawMessage, field types.QField) []types.Sp
 		}
 	}
 	return types.CompactSpecials(specials)
+}
+
+// truncateForError shortens a value quoted in an error message (and flow_errors) to at most 64 bytes, cutting at a
+// rune boundary: the catalog rejects invalid UTF-8, which would lose the error.
+func truncateForError(s string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	if len(s) <= 64 {
+		return s
+	}
+	cut := 61
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }
 
 // changefeedNumericSpecial recognises the JSON strings "NaN", "Infinity" and "-Infinity"; like numericSpecial,
@@ -772,9 +830,12 @@ func changefeedArray[T any](raw json.RawMessage, conv func(json.RawMessage) (T, 
 		return nil, fmt.Errorf("expected JSON array, got %s: %w", raw, err)
 	}
 	out := make([]T, 0, len(elems))
-	for _, el := range elems {
+	for i, el := range elems {
 		v, err := conv(el)
 		if err != nil {
+			if arrayErr, ok := errors.AsType[*exceptions.ArrayElementTypeError](err); ok {
+				arrayErr.Index = i
+			}
 			return nil, err
 		}
 		out = append(out, v)

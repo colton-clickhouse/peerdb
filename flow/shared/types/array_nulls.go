@@ -10,6 +10,8 @@ import (
 // the others keep writing the zero value. A nil mask means no NULL elements.
 
 // ArrayNulls returns the NULL-element mask of an array value, or nil (no NULL elements, or not an array).
+// A NULL element's Val is a placeholder: the element type's zero value, or DefaultTime for a date/timestamp
+// element on destinations that don't store NULL elements (qvalue.PrepareTimeArray).
 func ArrayNulls(qv QValue) []bool {
 	switch v := qv.(type) {
 	case QValueArrayInterval:

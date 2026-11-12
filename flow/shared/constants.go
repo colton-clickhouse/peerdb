@@ -55,8 +55,11 @@ const (
 	// Postgres: geometry and geography keep their SRID (EWKB in the snapshot, EWKT in CDC). Older mirrors write
 	// the snapshot with SRID 0, and MySQL's SRID through CDC too.
 	InternalVersion_PgGeoKeepSRID
-	// CockroachDB: NULL elements inside arrays are marked (types.ArrayNulls), and Postgres destinations write them as
-	// NULL. Older mirrors write the element type's zero value ({1,NULL,3} -> {1,0,3}, text '', bool false, ...).
+	// Postgres and CockroachDB sources: array elements keep what they are instead of the element type's zero value.
+	// NULL elements are marked (types.ArrayNulls) and Postgres destinations write them as NULL; older mirrors write the
+	// element type's zero value ({1,NULL,3} -> {1,0,3}, text '', bool false, ...). +-infinity date/timestamp elements
+	// are infinity for Postgres destinations (DefaultTime for others), on both paths, and CockroachDB changefeed
+	// date/timestamp arrays accept infinity like the snapshot; older mirrors keep 0001-01-01 for both.
 	InternalVersion_ArrayConversionIntegrity
 	// CockroachDB sources: constrained geometry / geography columns (GEOMETRY(POINT,4326)) replicate as geometry /
 	// geography with their PostGIS typmod; Postgres destinations create them constrained and COPY keeps SRIDs. Older

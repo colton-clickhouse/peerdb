@@ -373,6 +373,7 @@ func pullCore[Items model.Items](
 		InternalVersion:                          req.InternalVersion,
 		Flags:                                    req.Flags,
 		NativeJSONEnabled:                        nativeJSONEnabled,
+		DestinationType:                          req.DestinationType,
 	})
 	if err != nil {
 		c.logger.Error("error creating cdc source", slog.Any("error", err))
