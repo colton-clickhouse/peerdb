@@ -21,6 +21,7 @@ import (
 	connpostgres "github.com/PeerDB-io/peerdb/flow/connectors/postgres"
 	"github.com/PeerDB-io/peerdb/flow/e2eshared"
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
+	"github.com/PeerDB-io/peerdb/flow/internal"
 	"github.com/PeerDB-io/peerdb/flow/model"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
 	"github.com/PeerDB-io/peerdb/flow/shared"
@@ -504,6 +505,57 @@ func (s CRDBPGSuite) Test_Nul_Bytes_Stripped() {
 			= '1:ab:{x,y} 2:c:{p} 11:ab:{x,y} 12:plain:{p}' FROM %s`, dstFull))
 		return ok
 	})
+	env.Cancel(t.Context())
+	RequireEnvCanceled(t, env)
+}
+
+// A table with several column families fails every changefeed start with a CockroachDB error that only the user can
+// fix (NOTIFY_CHANGEFEED_INVALID). Once that has gone on without progress for PEERDB_NO_PROGRESS_ALERT_THRESHOLD_MINUTES,
+// the mirror's log warns that it makes no progress, naming the class, and its status shows it RUNNING with the time
+// of its last progress and the failure as its last error.
+func (s CRDBPGSuite) Test_Column_Families_Warns_No_Progress() {
+	t := s.t
+	srcTable := "families_stall"
+	srcFull := AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+		`CREATE TABLE %s (id INT8 PRIMARY KEY, hot INT8, cold STRING, FAMILY f_hot (id, hot), FAMILY f_cold (cold))`, srcFull)))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (1, 10, 'a')`, srcFull)))
+	SetDynamicSetting(t, "PEERDB_NO_PROGRESS_ALERT_THRESHOLD_MINUTES", "1")
+
+	flowConnConfig := s.startMirror(srcTable)
+	tc := NewTemporalClient(t)
+	env := ExecutePeerflow(t, tc, flowConnConfig)
+	SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	EnvWaitFor(t, env, 2*time.Minute, "snapshot row", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == 1
+	})
+	catalogPool, err := internal.GetCatalogConnectionPoolFromEnv(t.Context())
+	require.NoError(t, err)
+	EnvWaitFor(t, env, 6*time.Minute, "a no-progress warning while every changefeed start fails", func() bool {
+		count, err := GetLogCount(t.Context(), catalogPool, flowConnConfig.FlowJobName, "warn",
+			"errors that need a fix (NOTIFY_CHANGEFEED_INVALID)")
+		return err == nil && count > 0
+	})
+	count, err := GetLogCount(t.Context(), catalogPool, flowConnConfig.FlowJobName, "error",
+		"recreate the table with a single column family")
+	EnvNoError(t, env, err)
+	require.Positive(t, count, "the mirror's errors say how to fix it")
+
+	client, err := NewApiClient()
+	require.NoError(t, err)
+	res, err := client.MirrorStatus(t.Context(), &protos.MirrorStatusRequest{
+		FlowJobName: flowConnConfig.FlowJobName, IncludeFlowInfo: true,
+	})
+	EnvNoError(t, env, err)
+	require.Equal(t, protos.FlowStatus_STATUS_RUNNING, res.CurrentFlowState)
+	require.True(t, res.FailingWithoutProgress)
+	require.NotNil(t, res.LastProgressAt)
+	require.Greater(t, time.Since(res.LastProgressAt.AsTime()), time.Minute)
+	require.NotNil(t, res.LastError)
+	require.Contains(t, res.LastError.Message, "column famil")
+
 	env.Cancel(t.Context())
 	RequireEnvCanceled(t, env)
 }
