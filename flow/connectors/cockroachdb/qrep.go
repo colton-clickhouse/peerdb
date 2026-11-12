@@ -455,7 +455,16 @@ func buildSelectedColumns(cols []*protos.FieldDescription, exclude []string) str
 		if slices.Contains(exclude, col.Name) {
 			continue
 		}
-		columns = append(columns, common.QuoteIdentifier(col.Name))
+		quoted := common.QuoteIdentifier(col.Name)
+		switch types.QValueKind(col.Type) {
+		case types.QValueKindInterval:
+			// read as text, as the changefeed sends it: pgwire's binary interval holds days and months in 32 bits,
+			// so a larger value arrives wrapped, silently (e.g. 3000000000 days as -1294967296 days)
+			quoted += "::STRING AS " + quoted
+		case types.QValueKindArrayInterval:
+			quoted += "::STRING[] AS " + quoted
+		}
+		columns = append(columns, quoted)
 	}
 	return strings.Join(columns, ", ")
 }

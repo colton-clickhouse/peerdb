@@ -18,7 +18,8 @@ import (
 // destination, per PeerDB type, instead of the type PeerDB creates (qValueKindToPostgresType). Each one holds every
 // value of the PeerDB type, takes the snapshot's binary COPY of it, and normalize casts to it (the target's own
 // types). Only for mappings that can't hold the source's range or meaning: wider integers for unsigned ones, MySQL
-// TIME as a duration, TINYINT(1) as an integer. Other target types are the user's to pre-create.
+// TIME as a duration, INTERVAL as an interval, TINYINT(1) as an integer. Other target
+// types are the user's to pre-create.
 var destinationTypeOverrides = map[types.QValueKind][]string{
 	types.QValueKindInt8:   {"smallint", "integer", "bigint", "numeric"},
 	types.QValueKindUInt8:  {"smallint", "integer", "bigint", "numeric"},
@@ -29,8 +30,27 @@ var destinationTypeOverrides = map[types.QValueKind][]string{
 	types.QValueKindInt64:  {"numeric"},
 	types.QValueKindUInt64: {"numeric(20,0)", "numeric"},
 	types.QValueKindTime:   {"interval"},
+	// INTERVAL (CockroachDB, Postgres sources on the Q type system), which PeerDB creates as text holding its interval
+	// JSON: such a column gets the intervals themselves (intervalColumns)
+	types.QValueKindInterval:      {"interval"},
+	types.QValueKindArrayInterval: {"interval[]"},
 	// MySQL TINYINT(1) only, which the MySQL reader then reads as an integer instead of a boolean
 	types.QValueKindBoolean: {"smallint"},
+}
+
+// intervalColumns are the columns whose destination_type is interval or interval[]: their intervals are written as
+// intervals, on both paths, where other columns keep PeerDB's interval JSON
+func intervalColumns(columns []*protos.ColumnSetting) map[string]struct{} {
+	var out map[string]struct{}
+	for _, col := range columns {
+		if t := strings.ToLower(col.DestinationType); t == "interval" || t == "interval[]" {
+			if out == nil {
+				out = make(map[string]struct{})
+			}
+			out[col.SourceName] = struct{}{}
+		}
+	}
+	return out
 }
 
 // GetColumnsTypeConversion lists the destination_type choices for Postgres destinations, for the API (the mirror

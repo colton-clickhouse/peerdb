@@ -87,3 +87,12 @@ func TestValidateDestinationTypesOnResync(t *testing.T) {
 	err := (&PostgresConnector{}).ValidateMirrorDestination(t.Context(), cfg, schemas)
 	require.ErrorContains(t, err, "db.t.d: bigint isn't a destination_type for its type time")
 }
+
+// Only an interval destination_type makes a column's intervals intervals; the type's case doesn't matter.
+func TestIntervalColumns(t *testing.T) {
+	require.Equal(t, map[string]struct{}{"i": {}, "a": {}}, intervalColumns([]*protos.ColumnSetting{
+		{SourceName: "i", DestinationType: "interval"}, {SourceName: "a", DestinationType: "INTERVAL[]"},
+		{SourceName: "t", DestinationType: "bigint"}, {SourceName: "n"},
+	}))
+	require.Nil(t, intervalColumns(nil))
+}

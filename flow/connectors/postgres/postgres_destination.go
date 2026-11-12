@@ -100,6 +100,10 @@ func syncRecordsCore[Items model.Items](
 	if err != nil {
 		return nil, err
 	}
+	intervalColumnsByTable := make(map[string]map[string]struct{}, len(req.TableMappings))
+	for _, tm := range req.TableMappings {
+		intervalColumnsByTable[tm.DestinationTableIdentifier] = intervalColumns(tm.Columns)
+	}
 	jsonOpts := model.ToJSONOptions{
 		UnnestColumns:     nil,
 		HStoreAsJSON:      false,
@@ -108,12 +112,17 @@ func syncRecordsCore[Items model.Items](
 		ArrayNullElements: true,
 		NonFiniteFloats:   true,
 	}
+	recordOpts := func(dstTable string) model.ToJSONOptions {
+		opts := jsonOpts
+		opts.PgIntervalColumns = intervalColumnsByTable[dstTable]
+		return opts
+	}
 	streamReadFunc := func() ([]any, error) {
 		for record := range req.Records.GetRecords() {
 			var row []any
 			switch typedRecord := record.(type) {
 			case *model.InsertRecord[Items]:
-				itemsJSON, err := typedRecord.Items.ToJSONWithOptions(jsonOpts)
+				itemsJSON, err := typedRecord.Items.ToJSONWithOptions(recordOpts(typedRecord.DestinationTableName))
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize insert record items to JSON: %w", err)
 				}
@@ -130,11 +139,11 @@ func syncRecordsCore[Items model.Items](
 				}
 
 			case *model.UpdateRecord[Items]:
-				newItemsJSON, err := typedRecord.NewItems.ToJSONWithOptions(jsonOpts)
+				newItemsJSON, err := typedRecord.NewItems.ToJSONWithOptions(recordOpts(typedRecord.DestinationTableName))
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize update record new items to JSON: %w", err)
 				}
-				oldItemsJSON, err := typedRecord.OldItems.ToJSONWithOptions(jsonOpts)
+				oldItemsJSON, err := typedRecord.OldItems.ToJSONWithOptions(recordOpts(typedRecord.DestinationTableName))
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize update record old items to JSON: %w", err)
 				}
@@ -151,7 +160,7 @@ func syncRecordsCore[Items model.Items](
 				}
 
 			case *model.DeleteRecord[Items]:
-				itemsJSON, err := typedRecord.Items.ToJSONWithOptions(jsonOpts)
+				itemsJSON, err := typedRecord.Items.ToJSONWithOptions(recordOpts(typedRecord.DestinationTableName))
 				if err != nil {
 					return nil, fmt.Errorf("failed to serialize delete record items to JSON: %w", err)
 				}

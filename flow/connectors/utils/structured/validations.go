@@ -8,7 +8,7 @@ import (
 )
 
 // ColumnTypeRegex matches the column type expressions accepted as a column's `destination_type`.
-var ColumnTypeRegex = regexp.MustCompile(`^$|^[a-zA-Z][a-zA-Z0-9(),]*$`)
+var ColumnTypeRegex = regexp.MustCompile(`^$|^[a-zA-Z][a-zA-Z0-9(),]*(\[\])?$`)
 
 // SupportedSourcePeer reports whether peer can be the source of structured ingestion mappings
 // This condition must evolve as new connectors support structured ingestion.
