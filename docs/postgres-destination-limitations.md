@@ -203,6 +203,13 @@ the duplicate and stale rows:
 
 A fix in PeerDB is under discussion.
 
+A `REPLICA IDENTITY FULL` table *with* a primary key gets that key on the target, unless the key is all of the
+target's columns in table order, after excluded columns are taken out: that looks like the keyless case, so such a
+table (for example a key `(id, k)` with every other column excluded) gets no key. Tables created before this fix
+have no key there: recreate them (resync), or add it by hand, `ALTER TABLE <target table> ADD PRIMARY KEY (<key
+columns>)`. Either way, first remove rows with duplicate keys from the target (left by updates while it had no
+key, as above): a resync with soft delete copies the old rows by key and fails on duplicates, as the `ALTER` does.
+
 ## Mirror health
 
 A mirror that keeps failing with an error only the user can fix (a dropped target column, a missing publication or
