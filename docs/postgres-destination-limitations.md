@@ -108,7 +108,17 @@ their defaults (`smallint`, `integer`). Give the others a wider type where the v
 
 Mirror validation (and table creation, also with `skip_validation`) refuses other choices, naming the column. A
 target table pre-created by the user is kept as it is; normalize casts to its columns' types, for any type the
-values cast to.
+values cast to. Known limits of pre-created columns:
+
+- **`bytea`** takes binary source columns only: a string, enum, JSON or UUID value fails normalize (`column ... is of
+  type bytea but expression is of type text`).
+- **`text` or `varchar`** for a non-string source column: CDC writes the value's text, but the initial snapshot can't
+  write integer, floating-point or boolean columns into a text column (the snapshot fails), writes binary values
+  raw, and writes dates and times in another format than CDC (`2024-02-29 00:00:00 +0000 UTC` instead of
+  `2024-02-29`). Give such columns their default type for the snapshot and alter them afterwards, or check the
+  values.
+- **A domain** keeps its checks, the length of a domain over `varchar(n)` included: a value too long fails
+  normalize rather than being cut.
 
 Values PeerDB itself can't represent on Postgres:
 
@@ -119,9 +129,15 @@ Values PeerDB itself can't represent on Postgres:
   only in them (or from a real `1970-01-01`) become equal on the target: the snapshot fails with a duplicate key
   error, and in CDC the rows merge into one. Find them before a migration, per `DATE`/`DATETIME`/`TIMESTAMP` column:
   `SELECT count(*) FROM t WHERE CAST(col AS CHAR) LIKE '%-00%' OR CAST(col AS CHAR) LIKE '0000-%'`.
+  A `DATE` or `DATETIME` partition column whose minimum or maximum isn't a real date makes the snapshot read the
+  table as one partition. Incremental (or custom-query) QRep on such a watermark is refused
+  (`WATERMARK_NOT_REAL_DATE`): use a watermark column with real dates, or a full-table refresh.
 - **Geometry SRIDs** are kept (MySQL geometries, and Postgres sources' PostGIS values in the snapshot) in mirrors
   created at or after `InternalVersion_PgGeoKeepSRID`; there, SRIDs above 999999 are refused
-  (PostGIS would store another SRID). Older mirrors drop the SRID (0).
+  (PostGIS would store another SRID). Older mirrors drop the SRID (0). From that version on, the snapshot of a
+  Postgres or CockroachDB source keeps the SRID too (it arrived as 0 in the snapshot, and with its SRID through CDC).
+  A pre-created `geography` column takes geodetic SRIDs only (such as 4326): a projected one (3857) fails;
+  transform on the source, or pre-create a `geometry` column.
 
 ## Table and column names
 
@@ -178,12 +194,15 @@ A fix in PeerDB is under discussion.
 ## Mirror health
 
 A mirror that keeps failing with an error only the user can fix (a dropped target column, a missing publication or
-slot, unsupported data, a connection problem) stays Running and retries. Once it has made no progress for
-`PEERDB_NO_PROGRESS_ALERT_THRESHOLD_MINUTES` (default 30, 0 disables), it logs a warning and alerts the configured
-alert senders, once per alerting gap (`PEERDB_ALERTING_GAP_MINUTES`). The mirror status reports when it last made
-progress and its last error.
+slot, unsupported data, a connection problem) stays Running and retries. Once it has been failing, without progress,
+for longer than `PEERDB_NO_PROGRESS_ALERT_THRESHOLD_MINUTES` (default 30, 0 disables), it logs a warning and alerts
+the configured alert senders, once per alerting gap (`PEERDB_ALERTING_GAP_MINUTES`). The mirror status reports when
+it last made progress, its last error (its snapshot's included), and whether it's failing without progress.
 
-- The latest error decides: one such error after a long run of transient ones (a network outage) alerts.
+- A mirror paused while failing alerts on its first error after resuming; an idle mirror with an old error after its
+  last progress alerts on its next one.
+- Not covered: errors not classified as needing the user, failures that don't reach the mirror's error log, and a
+  mirror that fails outright before the threshold.
 - There's no exact "failing since"; the mirror's error log has the history.
 
 ## Session settings and connection poolers
