@@ -417,6 +417,55 @@ type batchEntry struct {
 	statement string
 }
 
+// getTargetColumnTypes reads the column types (without modifiers) of the destination tables whose values
+// normalize casts from PeerDB's own types, in one query. In the normalize transaction, so a column altered
+// since the last batch is picked up. A table that doesn't exist has no types: its statements keep PeerDB's
+// mapped types and fail as before, naming the table.
+func getTargetColumnTypes(
+	ctx context.Context, tx pgx.Tx, tableNames []string, schemas map[string]*protos.TableSchema,
+) (map[string]map[string]string, error) {
+	var names, quoted []string
+	for _, tableName := range tableNames {
+		if schema, ok := schemas[tableName]; ok && schema.System == protos.TypeSystem_Q {
+			parsedTable, err := common.ParseTableIdentifier(tableName)
+			if err != nil {
+				return nil, fmt.Errorf("error parsing destination table %s: %w", tableName, err)
+			}
+			names, quoted = append(names, tableName), append(quoted, parsedTable.String())
+		}
+	}
+	out := make(map[string]map[string]string, len(names))
+	if len(names) == 0 {
+		return out, nil
+	}
+	// typmod -1, not NULL: with NULL, format_type names bpchar and bit as character and bit, i.e. char(1)
+	// and bit(1), and a cast to those truncates. A domain's base type (through domains over domains), for
+	// the same reason: a cast to a domain over varchar(n) truncates, assignment to it refuses
+	rows, err := tx.Query(ctx, `SELECT t.name, a.attname, format_type(b.typ, -1)
+		FROM unnest($1::text[], $2::text[]) AS t(name, quoted)
+		JOIN pg_attribute a ON a.attrelid = to_regclass(t.quoted)
+		CROSS JOIN LATERAL (WITH RECURSIVE base(typ, depth) AS (
+			SELECT a.atttypid, 0
+			UNION ALL
+			SELECT pt.typbasetype, base.depth + 1 FROM base JOIN pg_type pt ON pt.oid = base.typ WHERE pt.typbasetype <> 0
+		) SELECT typ FROM base ORDER BY depth DESC LIMIT 1) b
+		WHERE a.attnum > 0 AND NOT a.attisdropped`, names, quoted)
+	if err != nil {
+		return nil, fmt.Errorf("error reading destination column types: %w", err)
+	}
+	var tableName, column, columnType string
+	if _, err := pgx.ForEachRow(rows, []any{&tableName, &column, &columnType}, func() error {
+		if out[tableName] == nil {
+			out[tableName] = make(map[string]string)
+		}
+		out[tableName][column] = columnType
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("error reading destination column types: %w", err)
+	}
+	return out, nil
+}
+
 func (c *PostgresConnector) normalizeBatch(
 	ctx context.Context,
 	batchID int64,
@@ -438,6 +487,12 @@ func (c *PostgresConnector) normalizeBatch(
 			break
 		}
 	}
+
+	targetColumnTypes, err := getTargetColumnTypes(ctx, tx, destinationTableNames, normalizeStmtGen.tableSchemaMapping)
+	if err != nil {
+		return 0, err
+	}
+	normalizeStmtGen.targetColumnTypes = targetColumnTypes
 
 	batch := &pgx.Batch{}
 	var entries []batchEntry
