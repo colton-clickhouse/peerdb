@@ -94,6 +94,7 @@ func (h *FlowRequestHandler) MirrorStatus(
 	}
 
 	if req.IncludeFlowInfo {
+		health := h.mirrorHealth(ctx, req.FlowJobName)
 		if cdcFlow, err := h.isCDCFlow(ctx, req.FlowJobName); err != nil {
 			slog.ErrorContext(ctx, "unable to determine if mirror is cdc", slog.Any("error", err))
 			return nil, NewInternalApiError(fmt.Errorf("unable to determine if mirror %s is of type CDC: %w", req.FlowJobName, err))
@@ -110,8 +111,11 @@ func (h *FlowRequestHandler) MirrorStatus(
 				Status: &protos.MirrorStatusResponse_CdcStatus{
 					CdcStatus: cdcStatus,
 				},
-				CurrentFlowState: currState,
-				CreatedAt:        timestamppb.New(*createdAt),
+				CurrentFlowState:       currState,
+				CreatedAt:              timestamppb.New(*createdAt),
+				LastProgressAt:         health.lastProgressAt,
+				LastError:              health.lastError,
+				FailingWithoutProgress: health.failingWithoutProgress,
 			}, nil
 		} else {
 			qrepStatus, err := h.qrepFlowStatus(ctx, req)
@@ -126,8 +130,11 @@ func (h *FlowRequestHandler) MirrorStatus(
 				Status: &protos.MirrorStatusResponse_QrepStatus{
 					QrepStatus: qrepStatus,
 				},
-				CurrentFlowState: currState,
-				CreatedAt:        timestamppb.New(*createdAt),
+				CurrentFlowState:       currState,
+				CreatedAt:              timestamppb.New(*createdAt),
+				LastProgressAt:         health.lastProgressAt,
+				LastError:              health.lastError,
+				FailingWithoutProgress: health.failingWithoutProgress,
 			}, nil
 		}
 	}
@@ -137,6 +144,35 @@ func (h *FlowRequestHandler) MirrorStatus(
 		CurrentFlowState: currState,
 		CreatedAt:        timestamppb.New(*createdAt),
 	}, nil
+}
+
+type mirrorHealth struct {
+	lastProgressAt         *timestamppb.Timestamp
+	lastError              *protos.MirrorLastError
+	failingWithoutProgress bool
+}
+
+// mirrorHealth reads when the mirror last made progress, whether it has been failing without progress for longer than
+// PEERDB_NO_PROGRESS_ALERT_THRESHOLD_MINUTES, and its newest error, best effort: the status is returned without them
+// if the catalog can't be read
+func (h *FlowRequestHandler) mirrorHealth(ctx context.Context, flowName string) mirrorHealth {
+	var health mirrorHealth
+	thresholdMinutes, err := internal.PeerDBNoProgressAlertThresholdMinutes(ctx, nil)
+	if err != nil {
+		slog.WarnContext(ctx, "unable to read the no-progress alert threshold", slog.Any("error", err))
+	}
+	if progress, err := internal.GetFlowProgress(ctx, h.pool, flowName, time.Duration(thresholdMinutes)*time.Minute); err != nil {
+		slog.WarnContext(ctx, "unable to read the mirror's last progress", slog.Any("error", err))
+	} else {
+		health.lastProgressAt = timestamppb.New(progress.LastProgress)
+		health.failingWithoutProgress = progress.FailingWithoutProgress
+	}
+	if message, at, ok, err := internal.FlowLastError(ctx, h.pool, flowName); err != nil {
+		slog.WarnContext(ctx, "unable to read the mirror's last error", slog.Any("error", err))
+	} else if ok {
+		health.lastError = &protos.MirrorLastError{Message: message, Timestamp: timestamppb.New(at)}
+	}
+	return health
 }
 
 func (h *FlowRequestHandler) cdcFlowStatus(
