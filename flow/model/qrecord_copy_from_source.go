@@ -3,12 +3,14 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
 	geo "github.com/PeerDB-io/peerdb/flow/shared/datatypes"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 	"github.com/PeerDB-io/peerdb/flow/shared/types"
 )
 
@@ -30,17 +32,26 @@ func (d pgDuration) IntervalValue() (pgtype.Interval, error) {
 	return pgtype.Interval{Microseconds: d.Microseconds, Valid: d.Valid}, nil
 }
 
+// PgCopyOptions are the internal-version dependent conversions of QRecordCopyFromSource.
+type PgCopyOptions struct {
+	// GeoSRIDs keeps geometry / geography SRIDs (EWKB) instead of dropping them (InternalVersion_PgGeoKeepSRID)
+	GeoSRIDs bool
+}
+
 type QRecordCopyFromSource struct {
 	stream        *QRecordStream
 	currentRecord []types.QValue
+	pgGeoSRIDs    bool
 }
 
 func NewQRecordCopyFromSource(
 	stream *QRecordStream,
+	opts PgCopyOptions,
 ) *QRecordCopyFromSource {
 	return &QRecordCopyFromSource{
 		stream:        stream,
 		currentRecord: nil,
+		pgGeoSRIDs:    opts.GeoSRIDs,
 	}
 }
 
@@ -59,6 +70,30 @@ func geoWktToWkb(wkt string) ([]byte, error) {
 	}
 
 	return geo.GeoToWKB(wkt)
+}
+
+// geoWkb is the binary COPY value of a geometry / geography WKT. With pgGeoSRIDs it's EWKB with the SRID of an
+// "SRID=n;" prefix, else fallbackSRID (MySQL keeps the SRID beside plain WKT; 0 for none), refused above PostGIS's
+// maximum. Without it, WKB without the SRID, as older mirrors write.
+func (src *QRecordCopyFromSource) geoWkb(wkt string, fallbackSRID uint32) ([]byte, error) {
+	if !src.pgGeoSRIDs {
+		return geoWktToWkb(wkt)
+	}
+	srid := fallbackSRID
+	if rest, ok := strings.CutPrefix(wkt, "SRID="); ok {
+		sridText, wktWithoutSRID, found := strings.Cut(rest, ";")
+		if found {
+			n, err := strconv.ParseUint(sridText, 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("invalid SRID in %q: %w", wkt, err)
+			}
+			srid, wkt = uint32(n), wktWithoutSRID
+		}
+	}
+	if err := CheckPostGISSRID(srid); err != nil {
+		return nil, err
+	}
+	return geo.GeoToEWKB(wkt, int(srid))
 }
 
 func (src *QRecordCopyFromSource) Values() ([]any, error) {
@@ -138,13 +173,13 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		case types.QValueHStore:
 			values[i] = v.Val
 		case types.QValueGeography:
-			wkb, err := geoWktToWkb(v.Val)
+			wkb, err := src.geoWkb(v.Val, 0)
 			if err != nil {
 				return nil, err
 			}
 			values[i] = wkb
 		case types.QValueGeometry:
-			wkb, err := geoWktToWkb(v.Val)
+			wkb, err := src.geoWkb(v.Val, v.SRID)
 			if err != nil {
 				return nil, err
 			}
@@ -201,4 +236,15 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 
 func (src *QRecordCopyFromSource) Err() error {
 	return src.stream.Err()
+}
+
+// MaxPostGISSRID is the largest SRID PostGIS stores; it remaps larger ones (and a geometry SRID above it can't be
+// used), so they're refused rather than replicated as another SRID
+const MaxPostGISSRID = 999999
+
+func CheckPostGISSRID(srid uint32) error {
+	if srid > MaxPostGISSRID {
+		return exceptions.NewPostGISSRIDOutOfRangeError(srid, MaxPostGISSRID)
+	}
+	return nil
 }

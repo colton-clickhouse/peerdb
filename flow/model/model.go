@@ -218,6 +218,7 @@ type ToJSONOptions struct {
 	UnnestColumns        map[string]struct{}
 	ClearValuesOverBytes int // 0 means preserve values
 	HStoreAsJSON         bool
+	GeometryAsEWKT       bool // geometry with an SRID beside its WKT (MySQL) as SRID=N;WKT
 	// NilBytesAsEmpty writes a QValueBytes with a nil Val as an empty value instead of null (a NULL arrives as
 	// QValueNull, so nil there is an empty value)
 	NilBytesAsEmpty bool

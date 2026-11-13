@@ -33,6 +33,7 @@ func (c *PostgresConnector) SyncQRepRecords(
 	return syncQRepRecords(c, ctx, config, partition, RecordStreamSink{
 		QRecordStream:   stream,
 		DestinationType: protos.DBType_POSTGRES,
+		Version:         config.Version,
 	})
 }
 
