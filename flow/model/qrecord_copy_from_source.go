@@ -20,6 +20,16 @@ func constructArray[T any](v []T) *pgtype.Array[T] {
 	}
 }
 
+// pgDuration is a TIME value for COPY. MySQL TIME is a duration (-838:59:59 to 838:59:59), and its target
+// column can be time (PeerDB's mapping) or interval (pre-created). pgx encodes pgtype.Time into interval
+// through its text form, which puts the sign on each field (-838:-59:-59, read back as -837:00:01);
+// as an IntervalValuer it goes in as microseconds, like it does into time.
+type pgDuration struct{ pgtype.Time }
+
+func (d pgDuration) IntervalValue() (pgtype.Interval, error) {
+	return pgtype.Interval{Microseconds: d.Microseconds, Valid: d.Valid}, nil
+}
+
 type QRecordCopyFromSource struct {
 	stream        *QRecordStream
 	currentRecord []types.QValue
@@ -103,7 +113,7 @@ func (src *QRecordCopyFromSource) Values() ([]any, error) {
 		case types.QValueMacaddr:
 			values[i] = v.Val
 		case types.QValueTime:
-			values[i] = pgtype.Time{Microseconds: int64(v.Val / time.Microsecond), Valid: true}
+			values[i] = pgDuration{pgtype.Time{Microseconds: int64(v.Val / time.Microsecond), Valid: true}}
 		case types.QValueTimeTZ:
 			values[i] = pgtype.Time{Microseconds: int64(v.Val / time.Microsecond), Valid: true}
 		case types.QValueInterval:
