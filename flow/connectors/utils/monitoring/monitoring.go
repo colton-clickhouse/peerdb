@@ -40,6 +40,19 @@ func InitializeCDCFlow(ctx context.Context, pool shared.CatalogPool, flowJobName
 	return nil
 }
 
+// DeleteOpenCDCBatches deletes a flow's batches that were synced but never normalized, when the flow's raw table
+// is (re)created. Dropping a mirror without its stats keeps its batches, and a resync keeps the flow and its
+// batches and restarts batch ids, so a mirror recreated under the same name or resynced would count the old open
+// ones as its pending normalize lag (and raise the normalize-gap alert) for good.
+func DeleteOpenCDCBatches(ctx context.Context, pool shared.CatalogPool, flowJobName string) error {
+	if _, err := pool.Exec(ctx,
+		`DELETE FROM peerdb_stats.cdc_batches WHERE flow_name = $1 AND end_time IS NULL`, flowJobName,
+	); err != nil {
+		return fmt.Errorf("error while deleting open batches of %s: %w", flowJobName, err)
+	}
+	return nil
+}
+
 func UpdateLatestLSNAtSourceForCDCFlow(ctx context.Context, pool shared.CatalogPool, flowJobName string,
 	latestLSNAtSource int64,
 ) error {
