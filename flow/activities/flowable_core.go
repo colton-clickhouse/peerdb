@@ -171,6 +171,12 @@ func pullAndSyncCore[TPull connectors.CDCPullConnectorCore, TSync connectors.CDC
 	syncBatchID += 1
 	batchSpan.SetAttributes(attribute.Int64(otel_metrics.BatchIdKey, syncBatchID))
 
+	// the MySQL reader splits primary key changes into delete + insert for Postgres destinations
+	dstType, err := connectors.LoadPeerType(ctx, a.CatalogPool, config.DestinationName)
+	if err != nil {
+		return nil, a.Alerter.LogFlowError(ctx, flowName, err)
+	}
+
 	startTime := time.Now()
 	syncState.Store(new("syncing"))
 	errGroup, errCtx := errgroup.WithContext(ctx)
@@ -196,6 +202,7 @@ func pullAndSyncCore[TPull connectors.CDCPullConnectorCore, TSync connectors.CDC
 			Env:                         config.Env,
 			InternalVersion:             config.Version,
 			Flags:                       config.Flags,
+			SplitPrimaryKeyUpdates:      dstType == protos.DBType_POSTGRES,
 		})
 		if err != nil {
 			pullSpan.RecordError(err)

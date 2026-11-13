@@ -112,6 +112,9 @@ type PullRecordsRequest[T Items] struct {
 	LastOffset CdcCheckpoint
 	// destination capabilities recorded at mirror creation
 	Flags []string
+	// the destination matches rows by the new primary key only (Postgres): send updates that change the key as
+	// delete + insert. ClickHouse has its own setting for these (PEERDB_CLICKHOUSE_ENABLE_PRIMARY_UPDATE).
+	SplitPrimaryKeyUpdates bool
 	// MaxBatchSize is the max number of records to fetch.
 	MaxBatchSize uint32
 	// peerdb versioning to prevent breaking changes

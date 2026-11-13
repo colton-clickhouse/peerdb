@@ -13,6 +13,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"net"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -697,6 +698,7 @@ func (c *MySqlConnector) PullRecords(
 
 	var skewLossReported bool
 	var coercionReported bool
+	var partialKeyMoveReported bool
 	var updatedOffset string
 	var inTx bool
 	var recordCount uint32
@@ -1074,19 +1076,30 @@ func (c *MySqlConnector) PullRecords(
 							}
 							newItems.AddColumn(fd.Name, val)
 						}
+						completeImages := len(unchangedToastColumns) == 0 &&
+							(len(ev.SkippedColumns) <= idx || len(ev.SkippedColumns[idx]) == 0)
+						var sourceSchema *types.QValueString
 						if sourceSchemaAsDestinationColumn {
-							newItems.AddColumn("_peerdb_source_schema", types.QValueString{Val: string(ev.Table.Schema)})
+							sourceSchema = &types.QValueString{Val: string(ev.Table.Schema)}
 						}
-
-						if err := addRecord(ctx, &model.UpdateRecord[model.RecordItems]{
+						records, partialKeyMove := updateRowRecords(&model.UpdateRecord[model.RecordItems]{
 							BaseRecord:            model.BaseRecord{CommitTimeNano: int64(event.Header.Timestamp) * 1e9},
 							OldItems:              oldItems,
 							NewItems:              newItems,
 							SourceTableName:       sourceTableName,
 							DestinationTableName:  destinationTableName,
 							UnchangedToastColumns: unchangedToastColumns,
-						}); err != nil {
-							return err
+						}, schema.PrimaryKeyColumns, req.SplitPrimaryKeyUpdates, completeImages, sourceSchema)
+						if partialKeyMove && !partialKeyMoveReported {
+							partialKeyMoveReported = true
+							c.logger.Warn("primary key update with a partial row image (binlog_row_image isn't FULL for "+
+								"its session) applied as an update, which leaves the row under its old key on the destination",
+								slog.String("table", sourceTableName))
+						}
+						for _, record := range records {
+							if err := addRecord(ctx, record); err != nil {
+								return err
+							}
 						}
 					}
 				case replication.DELETE_ROWS_EVENTv1, replication.DELETE_ROWS_EVENTv2, replication.MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1:
@@ -1543,6 +1556,57 @@ func (c *MySqlConnector) processRenameTableQuery(
 			attribute.String(otel_metrics.OnlineSchemaMigrationTool, tool),
 		)))
 	}
+}
+
+// updateRowRecords returns the records for one updated row. Postgres normalize matches rows by the new primary
+// key only, so with split set an update that changes the key would leave the old row behind: it is sent as
+// delete(old) + insert(new). Only with complete row images: the insert needs every column, and the delete (a soft
+// delete keeps the row) the old values. Validation requires binlog_row_image=FULL, but a session can still log
+// less; partialKeyMove reports a key change kept as an update for that reason. sourceSchema, if set, is added to
+// the items as _peerdb_source_schema.
+func updateRowRecords(
+	update *model.UpdateRecord[model.RecordItems],
+	pkeyCols []string,
+	split bool,
+	completeImages bool,
+	sourceSchema *types.QValueString,
+) (records []model.Record[model.RecordItems], partialKeyMove bool) {
+	keyChanged := split && pkeyChanged(pkeyCols, update.OldItems, update.NewItems)
+	if sourceSchema != nil {
+		update.NewItems.AddColumn("_peerdb_source_schema", *sourceSchema)
+	}
+	if !keyChanged || !completeImages {
+		return []model.Record[model.RecordItems]{update}, keyChanged
+	}
+	if sourceSchema != nil {
+		update.OldItems.AddColumn("_peerdb_source_schema", *sourceSchema)
+	}
+	return []model.Record[model.RecordItems]{
+		&model.DeleteRecord[model.RecordItems]{
+			BaseRecord:           update.BaseRecord,
+			Items:                update.OldItems,
+			SourceTableName:      update.SourceTableName,
+			DestinationTableName: update.DestinationTableName,
+		},
+		&model.InsertRecord[model.RecordItems]{
+			BaseRecord:           update.BaseRecord,
+			Items:                update.NewItems,
+			SourceTableName:      update.SourceTableName,
+			DestinationTableName: update.DestinationTableName,
+		},
+	}, false
+}
+
+// pkeyChanged reports whether an update moved the row to another primary key. Values are compared as the
+// binlog sent them, so a case-only change under a CI collation counts; a false positive is harmless
+// (delete + insert of the same key normalizes to the same row).
+func pkeyChanged(pkeyCols []string, oldItems, newItems model.RecordItems) bool {
+	for _, col := range pkeyCols {
+		if !reflect.DeepEqual(oldItems.GetColumnValue(col), newItems.GetColumnValue(col)) {
+			return true
+		}
+	}
+	return false
 }
 
 // classifyOnlineSchemaMigrationTool guesses which online schema-change tool
