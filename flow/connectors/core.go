@@ -64,6 +64,13 @@ type DestinationTableValidationConnector interface {
 	ValidateDestinationTables(context.Context, []*protos.TableMapping) error
 }
 
+type AddedTablesValidationConnector interface {
+	Connector
+
+	// ValidateAddedTables checks tables being added to a running mirror for what would break their replication.
+	ValidateAddedTables(context.Context, *protos.FlowConnectionConfigsCore, map[string]*protos.TableSchema) error
+}
+
 type StatActivityConnector interface {
 	Connector
 
@@ -895,6 +902,7 @@ var (
 	_ MirrorDestinationValidationConnector = &connbigquery.BigQueryConnector{}
 
 	_ DestinationTableValidationConnector = &connclickhouse.ClickHouseConnector{}
+	_ AddedTablesValidationConnector      = &connpostgres.PostgresConnector{}
 
 	_ GetFlagsConnector = &connclickhouse.ClickHouseConnector{}
 

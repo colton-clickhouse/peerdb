@@ -216,7 +216,7 @@ func (h *FlowRequestHandler) CreateCDCFlow(
 	// Use idempotent validation that skips mirror existence check
 	connectionConfigsCore := pconv.FlowConnectionConfigsToCore(req.ConnectionConfigs)
 	if connectionConfigsCore.SkipValidation == nil || !*connectionConfigsCore.SkipValidation {
-		if _, err := h.validateCDCMirrorImpl(ctx, connectionConfigsCore, true, !connectionConfigsCore.Resync); err != nil {
+		if _, err := h.validateCDCMirrorImpl(ctx, connectionConfigsCore, true); err != nil {
 			slog.ErrorContext(ctx, "validate mirror error", slog.Any("error", err))
 			return nil, NewInternalApiError(fmt.Errorf("invalid mirror: %w", err))
 		}
@@ -495,6 +495,14 @@ func (h *FlowRequestHandler) FlowStateChange(
 				return nil, apiErr
 			}
 		}
+		// not when the mirror is being terminated, which ignores the update (a source outage mustn't block it)
+		terminating := req.RequestedFlowState == protos.FlowStatus_STATUS_TERMINATING ||
+			req.RequestedFlowState == protos.FlowStatus_STATUS_TERMINATED
+		if len(cdcUpdate.AdditionalTables) > 0 && !terminating {
+			if apiErr := h.validateAdditionalTables(ctx, req.FlowJobName, cdcUpdate); apiErr != nil {
+				return nil, apiErr
+			}
+		}
 	}
 
 	configUpdateSignaled := false
@@ -568,12 +576,15 @@ func (h *FlowRequestHandler) FlowStateChange(
 				config.Resync = true
 				config.DoInitialSnapshot = true
 
-				// validate mirror first because once the mirror is dropped, there's no going back
+				// validate mirror first because once the mirror is dropped, there's no going back, unless the
+				// mirror skips validation, as at its creation
 				// Note: We do not validate snapshot parameters (SnapshotNumRowsPerPartition, etc)
-				if _, err := h.ValidateCDCMirror(ctx, &protos.CreateCDCFlowRequest{
-					ConnectionConfigs: config,
-				}); err != nil {
-					return nil, err
+				if !config.GetSkipValidation() {
+					if _, err := h.ValidateCDCMirror(ctx, &protos.CreateCDCFlowRequest{
+						ConnectionConfigs: config,
+					}); err != nil {
+						return nil, err
+					}
 				}
 				changeErr = model.FlowSignalStateChange.SignalClientWorkflow(ctx, h.temporalClient, workflowID, "", req)
 				if changeErr == nil {
@@ -745,7 +756,7 @@ func (h *FlowRequestHandler) validateTableResync(
 	resyncConfig := internal.BuildTableResyncConfig(pconv.FlowConnectionConfigsToCore(config), cdcUpdate.ResyncTables)
 	// snapshot-only mirrors skip CDC checks, but we want to make sure that after the resync the mirror can continue CDC
 	resyncConfig.InitialSnapshotOnly = false
-	_, apiErr := h.validateCDCMirrorImpl(ctx, resyncConfig, false, true)
+	_, apiErr := h.validateCDCMirrorImpl(ctx, resyncConfig, false)
 	return apiErr
 }
 
@@ -785,7 +796,7 @@ func (h *FlowRequestHandler) resyncByRecreatingFlow(
 	internal.ApplySnapshotConfigOverrides(configCore, cdcConfigUpdate)
 
 	// validate mirror first because once the mirror is dropped, there's no going back
-	if _, err := h.validateCDCMirrorImpl(ctx, configCore, false, false); err != nil {
+	if _, err := h.validateCDCMirrorImpl(ctx, configCore, false); err != nil {
 		return err
 	}
 
