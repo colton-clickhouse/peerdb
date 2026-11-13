@@ -77,23 +77,10 @@ func walSenderTimeoutOverride(ctx context.Context, env map[string]string) (walSe
 func (c *PostgresConnector) CreateReplConn(ctx context.Context, env map[string]string) (*pgx.Conn, walSenderTimeout, error) {
 	// create a separate connection for non-replication queries as replication connections cannot
 	// be used for extended query protocol, i.e. prepared statements
-	replConfig, err := ParseConfig(c.connStr, c.Config)
+	replConfig, err := newReplConnConfig(c.connStr, c.Config)
 	if err != nil {
 		return nil, walSenderTimeout{}, fmt.Errorf("failed to parse connection string: %w", err)
 	}
-
-	replConfig.Config.RuntimeParams["timezone"] = "UTC"
-	replConfig.Config.RuntimeParams["idle_in_transaction_session_timeout"] = "0"
-	replConfig.Config.RuntimeParams["statement_timeout"] = "0"
-	replConfig.Config.RuntimeParams["replication"] = "database"
-	replConfig.Config.RuntimeParams["bytea_output"] = "hex"
-	replConfig.Config.RuntimeParams["intervalstyle"] = "postgres"
-	replConfig.Config.RuntimeParams["extra_float_digits"] = "3"
-	replConfig.Config.RuntimeParams["DateStyle"] = "ISO, DMY"
-	// Required for QueryExecModeSimpleProtocol below; pgx refuses simple
-	// protocol when the server reports standard_conforming_strings=off.
-	replConfig.Config.RuntimeParams["standard_conforming_strings"] = "on"
-	replConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	wst, err := walSenderTimeoutOverride(ctx, env)
 	if err != nil {
@@ -112,7 +99,33 @@ func (c *PostgresConnector) CreateReplConn(ctx context.Context, env map[string]s
 		return nil, walSenderTimeout{}, fmt.Errorf("failed to create replication connection: %w", err)
 	}
 	setIdleSessionTimeout(ctx, conn, c.logger)
+	// pgoutput sends values in text form, formatted with this session's settings. SET as on the connector's
+	// connection: pgbouncer 1.23 and later pass replication connections too.
+	if err := setTextOutputSettings(ctx, conn, c.logger); err != nil {
+		conn.Close(context.Background())
+		return nil, walSenderTimeout{}, err
+	}
 	return conn, wst, nil
+}
+
+// newReplConnConfig is the configuration of the replication connection
+func newReplConnConfig(connectionString string, pgConfig *protos.PostgresConfig) (*pgx.ConnConfig, error) {
+	replConfig, err := ParseConfig(connectionString, pgConfig)
+	if err != nil {
+		return nil, err
+	}
+	replConfig.Config.RuntimeParams["timezone"] = "UTC"
+	replConfig.Config.RuntimeParams["idle_in_transaction_session_timeout"] = "0"
+	replConfig.Config.RuntimeParams["statement_timeout"] = "0"
+	replConfig.Config.RuntimeParams["replication"] = "database"
+	replConfig.Config.RuntimeParams["bytea_output"] = "hex"
+	// IntervalStyle, extra_float_digits and xmloption: SET after connecting (setTextOutputSettings)
+	replConfig.Config.RuntimeParams["DateStyle"] = "ISO, DMY"
+	// Required for QueryExecModeSimpleProtocol below; pgx refuses simple
+	// protocol when the server reports standard_conforming_strings=off.
+	replConfig.Config.RuntimeParams["standard_conforming_strings"] = "on"
+	replConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	return replConfig, nil
 }
 
 func (c *PostgresConnector) SetupReplConn(ctx context.Context, env map[string]string) error {
