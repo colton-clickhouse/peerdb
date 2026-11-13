@@ -235,6 +235,18 @@ func processTime(str string) (time.Duration, error) {
 	return val, nil
 }
 
+// isZeroDate reports whether a MySQL date or datetime string ("YYYY-MM-DD...") is replicated as a zero date,
+// the epoch: the full zero date, or, from InternalVersion_MySQLZeroDatePartsAsZero on, any zero part.
+func isZeroDate(s string, version uint32) bool {
+	if strings.HasPrefix(s, "0000-00-00") {
+		return true
+	}
+	if version < shared.InternalVersion_MySQLZeroDatePartsAsZero || len(s) < 10 || s[4] != '-' || s[7] != '-' {
+		return false
+	}
+	return s[0:4] == "0000" || s[5:7] == "00" || s[8:10] == "00"
+}
+
 // padTrimmedBinary restores a fixed-width binary value
 func padTrimmedBinary(data []byte, width int) []byte {
 	if width <= len(data) {
@@ -281,7 +293,7 @@ func shouldWrapNonObjectJSON(
 }
 
 func QValueFromMysqlFieldValue(
-	qkind types.QValueKind, mytype byte, fv mysql.FieldValue, wrapNonObjectJSON bool,
+	qkind types.QValueKind, mytype byte, fv mysql.FieldValue, wrapNonObjectJSON bool, version uint32,
 ) (types.QValue, error) {
 	switch fv.Type {
 	case mysql.FieldValueTypeNull:
@@ -397,7 +409,7 @@ func QValueFromMysqlFieldValue(
 			}
 			return types.QValueNumeric{Val: val}, nil
 		case types.QValueKindTimestamp:
-			if strings.HasPrefix(unsafeString, "0000-00-00") {
+			if isZeroDate(unsafeString, version) {
 				return types.QValueTimestamp{Val: time.Unix(0, 0)}, nil
 			}
 			val, err := time.Parse("2006-01-02 15:04:05.999999", strings.ReplaceAll(unsafeString, "-00", "-01"))
@@ -412,7 +424,7 @@ func QValueFromMysqlFieldValue(
 			}
 			return types.QValueTime{Val: tm}, nil
 		case types.QValueKindDate:
-			if unsafeString == "0000-00-00" {
+			if isZeroDate(unsafeString, version) {
 				return types.QValueDate{Val: time.Unix(0, 0)}, nil
 			}
 			val, err := time.Parse(time.DateOnly, strings.ReplaceAll(unsafeString, "-00", "-01"))
@@ -463,7 +475,7 @@ func QValueFromMysqlRowEvent(
 	ev *replication.TableMapEvent, idx int,
 	enums []string, sets []string,
 	qkind types.QValueKind, val any, enc encoding.Encoding, logger log.Logger, coercionReported *bool,
-	wrapNonObjectJSON bool,
+	wrapNonObjectJSON bool, version uint32,
 ) (types.QValue, error) {
 	mytype := ev.ColumnType[idx]
 
@@ -594,6 +606,10 @@ func QValueFromMysqlRowEvent(
 		// YEAR: https://dev.mysql.com/doc/refman/8.4/en/year.html
 		return types.QValueInt16{Val: int16(val)}, nil
 	case time.Time:
+		// legacy DATETIME (MariaDB's old temporal format) decodes year 0 as a time, not a string
+		if val.Year() == 0 && version >= shared.InternalVersion_MySQLZeroDatePartsAsZero {
+			return types.QValueTimestamp{Val: time.Unix(0, 0).UTC()}, nil
+		}
 		return types.QValueTimestamp{Val: val}, nil
 	case *replication.JsonDiff:
 		// Partial JSON updates (binlog_row_value_options=PARTIAL_JSON) cannot be applied; the caller
@@ -699,7 +715,7 @@ func QValueFromMysqlRowEvent(
 				// https://github.com/go-mysql-org/go-mysql/blob/v1.13.0/replication/row_event.go#L1316-L1327
 				// TIMESTAMP2  zero
 				// https://github.com/go-mysql-org/go-mysql/blob/v1.13.0/replication/row_event.go#L1663-L1686
-				if strings.HasPrefix(val, "0000-00-00") {
+				if isZeroDate(val, version) {
 					return types.QValueDate{Val: time.Unix(0, 0).UTC()}, nil
 				}
 				tm, err := time.Parse("2006-01-02 15:04:05.999999", strings.ReplaceAll(val, "-00", "-01"))
@@ -708,7 +724,7 @@ func QValueFromMysqlRowEvent(
 				}
 				return types.QValueDate{Val: tm.Truncate(24 * time.Hour).UTC()}, nil
 			default:
-				if val == "0000-00-00" {
+				if isZeroDate(val, version) {
 					return types.QValueDate{Val: time.Unix(0, 0).UTC()}, nil
 				}
 				val, err := time.Parse(time.DateOnly, strings.ReplaceAll(val, "-00", "-01"))
@@ -725,7 +741,7 @@ func QValueFromMysqlRowEvent(
 				}
 				return types.QValueTimestamp{Val: time.Unix(0, 0).UTC().Add(tm)}, nil
 			}
-			if strings.HasPrefix(val, "0000-00-00") {
+			if isZeroDate(val, version) {
 				return types.QValueTimestamp{Val: time.Unix(0, 0).UTC()}, nil
 			}
 			tm, err := time.Parse("2006-01-02 15:04:05.999999", strings.ReplaceAll(val, "-00", "-01"))

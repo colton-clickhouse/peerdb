@@ -1019,7 +1019,7 @@ func (c *MySqlConnector) PullRecords(
 								continue
 							}
 							val, err := QValueFromMysqlRowEvent(ev.Table, idx, enumMap[idx], setMap[idx],
-								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, shouldWrapJSON(fd))
+								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, shouldWrapJSON(fd), req.InternalVersion)
 							if err != nil {
 								return err
 							}
@@ -1056,7 +1056,7 @@ func (c *MySqlConnector) PullRecords(
 								continue
 							}
 							val, err := QValueFromMysqlRowEvent(ev.Table, idx, enumMap[idx], setMap[idx],
-								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, shouldWrapJSON(fd))
+								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, shouldWrapJSON(fd), req.InternalVersion)
 							if err != nil {
 								return err
 							}
@@ -1070,7 +1070,7 @@ func (c *MySqlConnector) PullRecords(
 								continue
 							}
 							val, err := QValueFromMysqlRowEvent(ev.Table, idx, enumMap[idx], setMap[idx],
-								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, shouldWrapJSON(fd))
+								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, shouldWrapJSON(fd), req.InternalVersion)
 							if err != nil {
 								return err
 							}
@@ -1119,7 +1119,7 @@ func (c *MySqlConnector) PullRecords(
 								continue
 							}
 							val, err := QValueFromMysqlRowEvent(ev.Table, idx, enumMap[idx], setMap[idx],
-								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, shouldWrapJSON(fd))
+								types.QValueKind(fd.Type), val, encFor(idx), c.logger, &coercionReported, shouldWrapJSON(fd), req.InternalVersion)
 							if err != nil {
 								return err
 							}

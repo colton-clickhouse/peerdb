@@ -2293,6 +2293,27 @@ func TestMySQLUnsupportedPartialRowEventShouldBeNotifyPartialRowEventUnsupported
 	}, errInfo)
 }
 
+func TestMySQLWatermarkNotRealDateShouldBeUnsupportedDatatype(t *testing.T) {
+	t.Parallel()
+
+	err := exceptions.NewMySQLWatermarkNotRealDateError("db.events", "created_at", "2024-03-00 10:00:00")
+	for _, part := range []string{"created_at", "db.events", `"2024-03-00 10:00:00"`,
+		"use a watermark column with real dates, or a full-table refresh (initial copy only)"} {
+		assert.Contains(t, err.Error(), part)
+	}
+	errorClass, errInfo := GetErrorClass(t.Context(), fmt.Errorf("failed to get partitions: %w", err))
+	assert.Equal(t, ErrorUnsupportedDatatype, errorClass)
+	assert.Equal(t, NotifyUser, errorClass.action)
+	assert.Equal(t, ErrorInfo{
+		Source: ErrorSourceMySQL,
+		Code:   "WATERMARK_NOT_REAL_DATE",
+		AdditionalAttributes: map[AdditionalErrorAttributeKey]string{
+			ErrorAttributeKeyTable:  "db.events",
+			ErrorAttributeKeyColumn: "created_at",
+		},
+	}, errInfo)
+}
+
 func TestMySQLUnsupportedBinlogRowValueOptionsErrorShouldBeNotifyBinlogPartialJsonUnsupported(t *testing.T) {
 	t.Parallel()
 

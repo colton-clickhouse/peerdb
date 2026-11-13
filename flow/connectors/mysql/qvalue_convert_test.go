@@ -211,13 +211,13 @@ func TestQValueFromMysql_WrapNonObjectJSON(t *testing.T) {
 			}
 
 			fv := mysql.NewFieldValue(mysql.FieldValueTypeString, 0, []byte(tc.in))
-			got, err := QValueFromMysqlFieldValue(types.QValueKindJSON, mysql.MYSQL_TYPE_JSON, fv, wrap)
+			got, err := QValueFromMysqlFieldValue(types.QValueKindJSON, mysql.MYSQL_TYPE_JSON, fv, wrap, shared.InternalVersion_Latest)
 			require.NoError(t, err)
 			require.Equal(t, want, got.(types.QValueJSON).Val, "snapshot in=%q wrap=%v", tc.in, wrap)
 
 			// the row-event path passes the server text through unchanged, so compare semantically
 			for _, val := range []any{[]byte(tc.in), tc.in} {
-				got, err := QValueFromMysqlRowEvent(ev, 0, nil, nil, types.QValueKindJSON, val, nil, logger, &coercionReported, wrap)
+				got, err := QValueFromMysqlRowEvent(ev, 0, nil, nil, types.QValueKindJSON, val, nil, logger, &coercionReported, wrap, shared.InternalVersion_Latest)
 				require.NoError(t, err)
 				require.JSONEq(t, want, got.(types.QValueJSON).Val, "cdc in=%q (%T) wrap=%v", tc.in, val, wrap)
 			}
@@ -248,13 +248,65 @@ func TestQValueFromMysql_MariaDBJSONKeepsText(t *testing.T) {
 			}
 
 			fv := mysql.NewFieldValue(mysql.FieldValueTypeString, 0, []byte(tc.in))
-			got, err := QValueFromMysqlFieldValue(types.QValueKindJSON, mysql.MYSQL_TYPE_BLOB, fv, wrap)
+			got, err := QValueFromMysqlFieldValue(types.QValueKindJSON, mysql.MYSQL_TYPE_BLOB, fv, wrap, shared.InternalVersion_Latest)
 			require.NoError(t, err)
 			require.Equal(t, want, got.(types.QValueJSON).Val, "snapshot in=%q wrap=%v", tc.in, wrap)
 
-			got, err = QValueFromMysqlRowEvent(ev, 0, nil, nil, types.QValueKindJSON, []byte(tc.in), nil, logger, &coercionReported, wrap)
+			got, err = QValueFromMysqlRowEvent(ev, 0, nil, nil, types.QValueKindJSON, []byte(tc.in), nil, logger, &coercionReported, wrap,
+				shared.InternalVersion_Latest)
 			require.NoError(t, err)
 			require.Equal(t, want, got.(types.QValueJSON).Val, "cdc in=%q wrap=%v", tc.in, wrap)
 		}
 	}
+}
+
+func TestIsZeroDate(t *testing.T) {
+	gate, before := shared.InternalVersion_MySQLZeroDatePartsAsZero, shared.InternalVersion_MySQLZeroDatePartsAsZero-1
+	for _, tc := range []struct {
+		s                string
+		wantOld, wantNew bool
+	}{
+		{"0000-00-00", true, true},
+		{"0000-00-00 00:00:00", true, true},
+		{"0000-00-00 12:34:56.000001", true, true},
+		{"2024-00-15", false, true},          // zero month
+		{"2024-02-00 12:00:00", false, true}, // zero day
+		{"2024-00-00 01:02:03.000004", false, true},
+		{"0000-05-10", false, true}, // zero year: no Postgres equivalent
+		{"0000-02-03 04:05:06", false, true},
+		{"2024-05-15", false, false},
+		{"2000-10-01 00:00:00", false, false}, // zeros elsewhere in a real date
+		{"1000-01-01", false, false},
+		{"", false, false},
+	} {
+		require.Equal(t, tc.wantOld, isZeroDate(tc.s, before), "old: %q", tc.s)
+		require.Equal(t, tc.wantNew, isZeroDate(tc.s, gate), "new: %q", tc.s)
+	}
+}
+
+func TestQValueFromMysql_PartialZeroDates(t *testing.T) {
+	epoch := time.Unix(0, 0).UTC()
+	gate := shared.InternalVersion_MySQLZeroDatePartsAsZero
+	ev := &replication.TableMapEvent{ColumnType: []byte{mysql.MYSQL_TYPE_DATETIME2}, ColumnMeta: []uint16{0}}
+	var coercionReported bool
+	snapshot := func(s string, version uint32) time.Time {
+		t.Helper()
+		qv, err := QValueFromMysqlFieldValue(types.QValueKindDate, 0,
+			mysql.NewFieldValue(mysql.FieldValueTypeString, 0, []byte(s)), false, version)
+		require.NoError(t, err, s)
+		return qv.Value().(time.Time).UTC()
+	}
+	cdc := func(s string, version uint32) time.Time {
+		t.Helper()
+		qv, err := QValueFromMysqlRowEvent(ev, 0, nil, nil, types.QValueKindTimestamp, s, nil,
+			log.NewStructuredLogger(nil), &coercionReported, false, version)
+		require.NoError(t, err, s)
+		return qv.Value().(time.Time).UTC()
+	}
+
+	require.Equal(t, epoch, snapshot("2024-00-15", gate))
+	require.Equal(t, epoch, cdc("2024-02-00 12:00:00", gate))
+	// older mirrors keep rolling a zero month or day forward
+	require.Equal(t, time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC), snapshot("2024-00-15", gate-1))
+	require.Equal(t, time.Date(2024, 2, 1, 12, 0, 0, 0, time.UTC), cdc("2024-02-00 12:00:00", gate-1))
 }

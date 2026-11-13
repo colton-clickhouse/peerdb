@@ -227,7 +227,8 @@ func (s *MySqlSource) GetRows(ctx context.Context, suffix string, table string, 
 	for _, row := range rs.Values {
 		record := make([]types.QValue, 0, len(row))
 		for idx, val := range row {
-			qv, err := connmysql.QValueFromMysqlFieldValue(schema.Fields[idx].Type, rs.Fields[idx].Type, val, false)
+			qv, err := connmysql.QValueFromMysqlFieldValue(schema.Fields[idx].Type, rs.Fields[idx].Type, val, false,
+				shared.InternalVersion_Latest)
 			if err != nil {
 				return nil, err
 			}

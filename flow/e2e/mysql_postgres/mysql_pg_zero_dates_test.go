@@ -1,0 +1,235 @@
+//go:build tilt
+
+package mysql_postgres
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	e2e "github.com/PeerDB-io/peerdb/flow/e2e"
+	"github.com/PeerDB-io/peerdb/flow/internal"
+	"github.com/PeerDB-io/peerdb/flow/shared"
+)
+
+// Partial zero dates: MySQL allows a zero month or day ('2024-00-15', '2024-02-00 12:00:00') where sql_mode
+// permits; Postgres has no such dates. The reader used to rewrite "-00" to "-01", so they arrived as real,
+// plausible dates that were never in the source ('2024-01-15', '2024-02-01 12:00:00'), in the snapshot and in
+// CDC. They must arrive like zero dates (the epoch), and so must a zero year ('0000-05-10').
+func (s MySQLPGSuite) Test_Partial_Zero_Dates_As_Zero_Dates() {
+	// rows: 1 partial (snapshot), 2 zero (snapshot), 3 real -> partial (cdc update), 4 partial (cdc
+	// insert), 5 zero year (snapshot), 6 zero year (cdc insert)
+	got := s.zeroDateRows("partial_zero_dates", shared.InternalVersion_Latest, true)
+	epoch := "1970-01-01 | 1970-01-01 00:00:00 | 1970-01-01 00:00:00"
+	for _, id := range []int{1, 2, 3, 4, 5, 6} {
+		require.Equal(s.t, epoch, got[id], "id %d: zero, partial zero and zero-year dates must arrive as the epoch", id)
+	}
+}
+
+// Mirrors created before InternalVersion_MySQLZeroDatePartsAsZero keep rolling a zero month or day forward,
+// so an existing mirror's values don't change mid-stream. (No zero-year rows: those fail older mirrors.)
+func (s MySQLPGSuite) Test_Partial_Zero_Dates_Old_Version_Rolled_Forward() {
+	got := s.zeroDateRows("partial_zero_dates_old", shared.InternalVersion_MySQLZeroDatePartsAsZero-1, false)
+	rolled := "2024-01-15 | 2024-02-01 12:00:00 | 2024-01-01 01:02:03.000004"
+	for _, id := range []int{1, 3, 4} {
+		require.Equal(s.t, rolled, got[id], "id %d: old-version mirror", id)
+	}
+	require.Equal(s.t, "1970-01-01 | 1970-01-01 00:00:00 | 1970-01-01 00:00:00", got[2], "zero dates")
+}
+
+// zeroDateRows replicates zero, partial zero (and, with zeroYears, zero-year) dates through the snapshot and
+// CDC with a mirror at version, and returns each row's destination values as "date | datetime | datetime6".
+func (s MySQLPGSuite) zeroDateRows(srcTable string, version uint32, zeroYears bool) map[int]string {
+	t := s.t
+	srcFull := e2e.AttachSchema(s, srcTable)
+	dstFull := s.DestinationTable(srcTable)
+	partial := `'2024-00-15', '2024-02-00 12:00:00', '2024-00-00 01:02:03.000004'`
+	zeroYear := `'0000-05-10', '0000-02-03 04:05:06', '0000-02-03 04:05:06.000007'`
+	require.NoError(t, s.source.Exec(t.Context(), `SET SESSION sql_mode = ''`))
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY,
+		c_date DATE, c_datetime DATETIME, c_datetime6 DATETIME(6))`, srcFull)))
+	rows := []string{
+		"(1, " + partial + ")",
+		"(2, '0000-00-00', '0000-00-00 00:00:00', '0000-00-00 00:00:00.000000')",
+		"(3, '2024-05-15', '2024-05-15 12:00:00', '2024-05-15 12:00:00.000001')",
+	}
+	if zeroYears {
+		rows = append(rows, "(5, "+zeroYear+")")
+	}
+	require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES %s`, srcFull, strings.Join(rows, ", "))))
+
+	connectionGen := e2e.FlowConnectionGenerationConfig{
+		FlowJobName:   e2e.AddSuffix(s, srcTable),
+		TableMappings: e2e.TableMappings(s, srcTable, srcTable),
+		Destination:   s.Peer().Name,
+	}
+	flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
+	flowConnConfig.DoInitialSnapshot = true
+	// mirror creation replaces Version with PEERDB_FORCE_INTERNAL_VERSION (default: latest)
+	flowConnConfig.Env = map[string]string{"PEERDB_FORCE_INTERNAL_VERSION": strconv.FormatUint(uint64(version), 10)}
+	flowConnConfig.Version = version
+	tc := e2e.NewTemporalClient(t)
+	env := e2e.ExecutePeerflow(t, tc, flowConnConfig)
+	e2e.SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+	e2e.EnvWaitFor(t, env, 3*time.Minute, "initial load", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == int64(len(rows))
+	})
+
+	e2e.EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (4, %s)`, srcFull, partial)))
+	e2e.EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(
+		`UPDATE %s SET c_date = '2024-00-15', c_datetime = '2024-02-00 12:00:00',
+		 c_datetime6 = '2024-00-00 01:02:03.000004' WHERE id = 3`, srcFull)))
+	want := len(rows) + 1
+	if zeroYears {
+		e2e.EnvNoError(t, env, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES (6, %s)`, srcFull, zeroYear)))
+		want++
+	}
+	e2e.EnvWaitFor(t, env, 3*time.Minute, "cdc changes", func() bool {
+		return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dstFull)) == int64(want) &&
+			s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id = 3 AND c_date IS DISTINCT FROM DATE '2024-05-15'`,
+				dstFull)) == 1
+	})
+
+	got := map[int]string{}
+	rs, err := s.dest.Conn().Query(t.Context(), fmt.Sprintf(
+		`SELECT id, concat_ws(' | ', coalesce(c_date::text, 'NULL'), coalesce(c_datetime::text, 'NULL'),
+		 coalesce(c_datetime6::text, 'NULL')) FROM %s`, dstFull))
+	require.NoError(t, err)
+	for rs.Next() {
+		var id int
+		var v string
+		require.NoError(t, rs.Scan(&id, &v))
+		got[id] = v
+		t.Logf("id %d: %s", id, v)
+	}
+	require.NoError(t, rs.Err())
+	env.Cancel(t.Context())
+	e2e.RequireEnvCanceled(t, env)
+	return got
+}
+
+// A DATE or DATETIME partition key's MIN/MAX became the partition bounds through the value conversion, so a
+// zero-part bound turned into the epoch: a partial-zero MAX put the end before the start, and a zero MIN dropped
+// every row before 1970. A bound that isn't a real date now reads the table as one partition; real bounds keep
+// range partitions, which must still read zero-part values inside the range and next to a partition boundary.
+func (s MySQLPGSuite) Test_Zero_Date_Partition_Bounds() {
+	s.zeroDatePartitions("zdp", shared.InternalVersion_Latest)
+}
+
+// Partitioning doesn't depend on the version: older mirrors (before InternalVersion_MySQLZeroDatePartsAsZero) read
+// every row too, with a zero month or day rolled forward. (No zero-year values: those fail older mirrors.)
+func (s MySQLPGSuite) Test_Zero_Date_Partition_Bounds_Old_Version() {
+	s.zeroDatePartitions("zdp_old", shared.InternalVersion_MySQLZeroDatePartsAsZero-1)
+}
+
+func (s MySQLPGSuite) zeroDatePartitions(prefix string, version uint32) {
+	t := s.t
+	latest := version >= shared.InternalVersion_MySQLZeroDatePartsAsZero
+	for _, tc := range []struct {
+		name, colType string
+		values        []string
+		zeroYear      bool
+	}{
+		{"date_year0_min", "DATE", []string{"0000-00-00", "0000-05-10", "1960-01-01", "2024-05-10", "2025-00-15",
+			"2025-02-28", "2025-03-00", "2025-03-01", "2025-09-00"}, true},
+		{"date_zero_min", "DATE", []string{"0000-00-00", "1960-01-01", "2024-05-10", "2025-00-15", "2025-03-01"}, false},
+		{"date_partial_min", "DATE", []string{"2024-03-00", "2024-03-01", "2024-05-10", "2025-03-00", "2025-03-01",
+			"2025-12-00"}, false},
+		{"date_partial_max", "DATE", []string{"1960-01-01", "2024-05-10", "2025-03-00", "2025-03-01", "2025-12-00"}, false},
+		{"datetime6", "DATETIME(6)", []string{"0000-00-00 00:00:00", "1960-01-01 00:00:00", "2025-02-28 23:59:59.999999",
+			"2025-03-00 12:00:00", "2025-03-01 00:00:00", "2025-03-01 00:00:00.000001", "2025-04-00 00:00:00"}, false},
+		// real bounds: range partitions, with zero days inside
+		{"datetime6_real_bounds", "DATETIME(6)", []string{"2025-01-01 00:00:00", "2025-02-28 23:59:59.999999",
+			"2025-03-00 12:00:00", "2025-03-01 00:00:00", "2025-04-00 00:00:00", "2025-05-15 00:00:00",
+			"2025-06-01 00:00:00"}, false},
+		{"datetime_year0_only", "DATETIME", []string{"0000-05-10 10:00:00", "0000-00-00 00:00:00"}, true},
+	} {
+		if tc.zeroYear && !latest {
+			continue
+		}
+		name := prefix + "_" + tc.name
+		srcFull := e2e.AttachSchema(s, name)
+		require.NoError(t, s.source.Exec(t.Context(), `SET SESSION sql_mode = ''`))
+		require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+			`CREATE TABLE %s (id INT AUTO_INCREMENT PRIMARY KEY, k %s)`, srcFull, tc.colType)))
+		var epochs int64
+		for _, v := range tc.values {
+			require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s (k) VALUES ('%s')`, srcFull, v)))
+			if strings.HasPrefix(v, "0000-00-00") || (latest && (v[:4] == "0000" || v[5:7] == "00" || v[8:10] == "00")) {
+				epochs++
+			}
+		}
+		require.NoError(t, s.source.Exec(t.Context(), `ANALYZE TABLE `+srcFull))
+
+		connectionGen := e2e.FlowConnectionGenerationConfig{
+			FlowJobName:   e2e.AddSuffix(s, name),
+			TableMappings: e2e.TableMappings(s, name, name),
+			Destination:   s.Peer().Name,
+		}
+		flowConnConfig := connectionGen.GenerateFlowConnectionConfigs(s)
+		flowConnConfig.TableMappings[0].PartitionKey = "k"
+		flowConnConfig.DoInitialSnapshot = true
+		flowConnConfig.SnapshotNumRowsPerPartition = 2
+		// mirror creation replaces Version with PEERDB_FORCE_INTERNAL_VERSION (default: latest)
+		flowConnConfig.Env = map[string]string{"PEERDB_FORCE_INTERNAL_VERSION": strconv.FormatUint(uint64(version), 10)}
+		flowConnConfig.Version = version
+		temporal := e2e.NewTemporalClient(t)
+		env := e2e.ExecutePeerflow(t, temporal, flowConnConfig)
+		e2e.SetupCDCFlowStatusQuery(t, env, flowConnConfig)
+		dst := s.DestinationTable(name)
+		e2e.EnvWaitFor(t, env, 3*time.Minute, "initial load "+name, func() bool {
+			return s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s`, dst)) == int64(len(tc.values))
+		})
+		// the old version rolls a zero month or day forward instead
+		require.Equal(t, epochs, s.destInt(fmt.Sprintf(`SELECT count(*) FROM %s WHERE k = '1970-01-01'`, dst)), name)
+		env.Cancel(t.Context())
+		e2e.RequireEnvCanceled(t, env)
+	}
+}
+
+// Incremental QRep on a DATETIME watermark whose minimum isn't a real date: rounding it to a real date made the last
+// partition's end skip rows inserted later below it, and a full-table partition every cycle would duplicate rows in
+// append mode. Refused naming the column, for a table-based and a custom-query QRep, with a partial-zero and a
+// zero-year minimum.
+func (s MySQLPGSuite) Test_Partial_Zero_Watermark_Incremental_QRep() {
+	t := s.t
+	catalogPool, err := internal.GetCatalogConnectionPoolFromEnv(t.Context())
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name, minValue string
+		customQuery    bool
+	}{
+		{"qrep_partial_zero_min", "2024-03-00 10:00:00", false},
+		{"qrep_zero_year_min", "0000-05-10 10:00:00", false},
+		{"qrep_partial_zero_query", "2024-03-00 10:00:00", true},
+	} {
+		srcFull := e2e.AttachSchema(s, tc.name)
+		require.NoError(t, s.source.Exec(t.Context(), `SET SESSION sql_mode = ''`))
+		require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(
+			`CREATE TABLE %s (id INT PRIMARY KEY, k DATETIME NOT NULL)`, srcFull)))
+		require.NoError(t, s.source.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s VALUES
+			(1, '%s'), (2, '2024-03-01 00:00:00'), (3, '2024-06-15 08:00:00')`, srcFull, tc.minValue)))
+		query := ""
+		if tc.customQuery {
+			query = fmt.Sprintf("SELECT * FROM %s WHERE k BETWEEN {{.start}} AND {{.end}}", srcFull)
+		}
+		qrepConfig := e2e.CreateQRepWorkflowConfig(t, e2e.AddSuffix(s, tc.name), srcFull, s.DestinationTable(tc.name),
+			query, s.Peer().Name, "", true, "", "")
+		qrepConfig.SourceName = s.Source().GeneratePeer(t).Name
+		qrepConfig.WatermarkColumn = "k"
+		qrepConfig.InitialCopyOnly = false
+		qrepConfig.WaitBetweenBatchesSeconds = 5
+		qrepConfig.NumRowsPerPartition = 2
+		env := e2e.RunQRepFlowWorkflow(t, e2e.NewTemporalClient(t), qrepConfig)
+		e2e.EnvWaitFor(t, env, 3*time.Minute, "refusal naming the watermark column "+tc.name, func() bool {
+			count, err := e2e.GetLogCount(t.Context(), catalogPool, qrepConfig.FlowJobName, "error",
+				"watermark column k of")
+			return err == nil && count > 0
+		})
+		env.Cancel(t.Context())
+		e2e.RequireEnvCanceled(t, env)
+	}
+}

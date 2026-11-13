@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -16,8 +17,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/log"
 
+	"github.com/PeerDB-io/peerdb/flow/connectors/utils"
 	"github.com/PeerDB-io/peerdb/flow/generated/protos"
 	"github.com/PeerDB-io/peerdb/flow/pkg/common"
+	"github.com/PeerDB-io/peerdb/flow/shared/exceptions"
 )
 
 func TestUUIDToBigIntRoundTrip(t *testing.T) {
@@ -480,4 +483,95 @@ func TestBuildAdaptiveStringPartitions_MixedCase_UUID(t *testing.T) {
 	partitions := runAdaptiveStringPartitions(t, keys, binaryLess, numPartitions)
 	require.Len(t, partitions, numPartitions)
 	verifyFullCoverage(t, partitions, keys, binaryLess)
+}
+
+func TestMySQLDateTime(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"2024-05-10", "2024-05-10 00:00:00"},
+		{"2024-05-10 00:00:00.5", "2024-05-10 00:00:00.5"},
+		{"0001-01-01 00:00:00", "0001-01-01 00:00:00"},
+	} {
+		got, ok := mysqlDateTime(tc.in)
+		require.True(t, ok, tc.in)
+		require.Equal(t, tc.want, got.Format("2006-01-02 15:04:05.999999"), tc.in)
+	}
+	for _, in := range []string{
+		"2025-03-00", "2025-00-15 01:02:03", "0000-00-00", "0000-00-00 00:00:00", "0000-05-10",
+		"2025-02-30", // ALLOW_INVALID_DATES
+		"not a date",
+	} {
+		_, ok := mysqlDateTime(in)
+		require.False(t, ok, in)
+	}
+}
+
+// A bound that isn't a real date reads a one-shot copy (a CDC mirror's initial snapshot, or InitialCopyOnly QRep)
+// as one partition, with a new id like every other partition. Incremental QRep, and a custom query, are refused.
+func TestTemporalPartitions(t *testing.T) {
+	logger := log.NewStructuredLogger(slog.Default())
+	snapshot := &protos.QRepConfig{WatermarkTable: "db.t", WatermarkColumn: "k", AddNullPartition: true, InitialCopyOnly: true}
+	incremental := &protos.QRepConfig{WatermarkTable: "db.t", WatermarkColumn: "k"}
+	custom := &protos.QRepConfig{
+		WatermarkTable: "db.t", WatermarkColumn: "k", InitialCopyOnly: true,
+		Query: "SELECT * FROM db.t WHERE k BETWEEN {{.start}} AND {{.end}}",
+	}
+	customIncremental := &protos.QRepConfig{WatermarkTable: "db.t", WatermarkColumn: "k", Query: custom.Query}
+
+	parts, err := temporalPartitions(logger, snapshot, "2024-01-01 00:00:00", "2024-01-04 00:00:00", 3)
+	require.NoError(t, err)
+	require.Len(t, parts, 4, "three ranges and the null partition")
+	first := parts[0].Range.GetTimestampRange()
+	require.NotNil(t, first)
+	require.Equal(t, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), first.Start.AsTime())
+	require.Equal(t, time.Date(2024, 1, 4, 0, 0, 0, 0, time.UTC), parts[2].Range.GetTimestampRange().End.AsTime())
+	require.NotNil(t, parts[3].Range.GetNullRange())
+	// real bounds partition every kind of QRep
+	for _, config := range []*protos.QRepConfig{incremental, custom, customIncremental} {
+		parts, err := temporalPartitions(logger, config, "2024-03-01 10:00:00", "2025-01-01 00:00:00", 3)
+		require.NoError(t, err)
+		require.Len(t, parts, 3)
+	}
+
+	for _, bounds := range [][2]string{
+		{"0000-00-00", "2025-01-01"}, {"2024-03-00 10:00:00", "2025-01-01 00:00:00"},
+		{"2024-01-01", "2025-03-00"}, {"0000-05-10 10:00:00", "2024-01-01 00:00:00"},
+	} {
+		var ids []string
+		for range 2 {
+			parts, err := temporalPartitions(logger, snapshot, bounds[0], bounds[1], 3)
+			require.NoError(t, err, bounds)
+			require.Len(t, parts, 1, bounds)
+			require.True(t, parts[0].FullTablePartition, bounds)
+			require.Nil(t, parts[0].Range, bounds)
+			ids = append(ids, parts[0].PartitionId)
+		}
+		require.NotEqual(t, ids[0], ids[1], bounds)
+		require.NotContains(t, ids, utils.FullTablePartitionID, bounds)
+
+		for _, config := range []*protos.QRepConfig{incremental, custom, customIncremental} {
+			_, err := temporalPartitions(logger, config, bounds[0], bounds[1], 3)
+			var notRealDate *exceptions.MySQLWatermarkNotRealDateError
+			require.ErrorAs(t, err, &notRealDate, bounds)
+			require.Equal(t, "k", notRealDate.ColumnName)
+			want := bounds[0]
+			if _, ok := mysqlDateTime(want); ok {
+				want = bounds[1]
+			}
+			require.Equal(t, want, notRealDate.Value, "the bound that isn't a real date")
+		}
+	}
+}
+
+// A partition boundary one microsecond before March 1st: the zero day '2025-03-00 12:00:00' sorts after
+// '2025-02-28 23:59:59.999999' and before '2025-03-01 00:00:00', so BETWEEN start AND end misses it, while
+// v < end + 1µs keeps it in the first partition.
+func TestTimestampRangeQueryCoversZeroDays(t *testing.T) {
+	end := time.Date(2025, 2, 28, 23, 59, 59, 999999000, time.UTC)
+	query, rangeEnd := timestampRangeQuery("*", "`db`.`t`", "`c`", end)
+	require.Equal(t, "SELECT * FROM `db`.`t` WHERE `c` >= {{.start}} AND `c` < {{.end}}", query)
+	require.Equal(t, "'2025-03-01 00:00:00'", rangeEnd)
+	// MySQL compares DATETIME values part by part, so the string order of these literals is MySQL's order
+	zeroDay := "2025-03-00 12:00:00"
+	require.Greater(t, zeroDay, end.Format("2006-01-02 15:04:05.999999"))
+	require.Less(t, zeroDay, strings.Trim(rangeEnd, "'"))
 }
